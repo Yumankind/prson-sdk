@@ -13,7 +13,7 @@
  * pure-JS implementation that runs in every browser without WebCrypto
  * dependency gaps (Web Crypto doesn't ship X25519 in all engines).
  */
-import { openBox } from "@stablelib/nacl";
+import { box, openBox } from "@stablelib/nacl";
 import { generateKeyPair } from "@stablelib/x25519";
 import { randomBytes } from "@stablelib/random";
 import { decodeURLSafe as b64uDecode, encodeURLSafe as b64uEncode } from "@stablelib/base64";
@@ -74,7 +74,8 @@ export type DecryptedEnvelope = {
     | "decline"
     | "claim-update"
     | "display-update"
-    | "credential-revoked";
+    | "credential-revoked"
+    | "response";
   issuedAt: number;
   ttlMinutes?: number;
   domain?: string;
@@ -82,6 +83,28 @@ export type DecryptedEnvelope = {
   /** Present for `presentation`, `renewal`, and `claim-update`. */
   presentation?: string;
   fragments?: unknown[];
+
+  /**
+   * Wallet's session-long X25519 public key (base64url, 32 bytes).
+   * Present only in the INITIAL `presentation` envelope at sign-in
+   * (and on `renewal` if the wallet rotates its session key). The
+   * browser SDK extracts + caches this on the session so subsequent
+   * outbound `request` envelopes can NaCl-box to it. Without this
+   * the browser→wallet direction has no destination key and the
+   * request channel can't open.
+   */
+  walletSessionPk?: string;
+
+  /**
+   * User's preferred UI language as a BCP-47 language tag (e.g.
+   * `"en"`, `"pt-PT"`, `"fr-CA"`). The wallet sets this from the
+   * device's active locale on the initial `presentation` envelope
+   * and may rotate it on `renewal` if the device language changes
+   * mid-session. The host site can read it via
+   * `session.preferredLanguage` to localise its UI without an
+   * extra round-trip.
+   */
+  preferredLanguage?: string;
 
   /** `claim-update` body: per-claim **name-only** delta. The
    *  wallet MUST NOT include claim values here — the SDK ignores
@@ -106,6 +129,15 @@ export type DecryptedEnvelope = {
   /** `credential-revoked` body. Closes the session with the
    *  matching ExpiryReason. */
   reason?: "alias_transferred" | "user_revoked" | "key_compromised";
+
+  /** `response` body. The wallet's reply to an earlier outbound
+   *  `request` envelope. Paired by `requestId` (RFC-4122 v4 UUID,
+   *  echoed verbatim from the request). Either `result` (success
+   *  payload, kind-dependent shape) or `error` (short string code)
+   *  is set; both being absent is treated as `error: "unsupported"`. */
+  requestId?: string;
+  result?: unknown;
+  error?: string;
 };
 
 export async function decryptEnvelope(
@@ -144,4 +176,44 @@ function stripPad(s: string): string {
 function addPad(s: string): string {
   const mod = s.length % 4;
   return mod === 0 ? s : s + "=".repeat(4 - mod);
+}
+
+/**
+ * Box a JSON-serialisable [plaintext] to the wallet's session X25519
+ * public key. Mirror of the wallet's `LoginEnvelope.encryptToBrowser`
+ * primitive (NaCl `box`, XSalsa20-Poly1305, fresh per-message
+ * ephemeral keypair + 24-byte nonce) — the wallet decrypts with its
+ * stored session secret. Returns the same JSON-encoded envelope
+ * shape the browser already RECEIVES from the wallet:
+ *
+ *     { ephPk: <base64url>, nonce24: <base64url>, ct: <base64url> }
+ *
+ * The fresh per-message X25519 keypair gives per-message forward
+ * secrecy: a snapshot of the wallet's session secret only decrypts
+ * messages already-on-the-wire, not future ones.
+ *
+ * [walletSessionPkB64u] is what the wallet stamped into the initial
+ * `presentation` envelope's `walletSessionPk` field. The browser SDK
+ * stores it on the session at sign-in time and re-uses for every
+ * outbound boxed message.
+ */
+export function boxToWallet(
+  walletSessionPkB64u: string,
+  plaintext: string,
+): string {
+  const recipientPk = b64uDecode(addPad(walletSessionPkB64u));
+  if (recipientPk.length !== 32) {
+    throw new Error("boxToWallet: bad walletSessionPk length");
+  }
+  const ephemeral = generateKeyPair();
+  const nonce = randomBytes(24);
+  const pt = new TextEncoder().encode(plaintext);
+  // NaCl `box(senderSk, recipientPk, nonce, plaintext)` produces
+  // XSalsa20-Poly1305 ciphertext + 16-byte authenticator.
+  const ct = box(ephemeral.secretKey, recipientPk, nonce, pt);
+  return JSON.stringify({
+    ephPk: stripPad(b64uEncode(ephemeral.publicKey)),
+    nonce24: stripPad(b64uEncode(nonce)),
+    ct: stripPad(b64uEncode(ct)),
+  });
 }

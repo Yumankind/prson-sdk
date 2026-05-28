@@ -37,9 +37,17 @@
  */
 import type { CnfJwk, SignInResult } from "./index.js";
 import type { DecryptedEnvelope, EphemeralKeys } from "./crypto.js";
-import { decryptEnvelope } from "./crypto.js";
+import { boxToWallet, decryptEnvelope } from "./crypto.js";
 import type { Transport } from "./transport.js";
 import { verifyPresentation, type VerifyOptions } from "./verify.js";
+import {
+  RequestController,
+  type LoginRequest,
+  type LoginResponse,
+  type RequestOptions,
+} from "./requests.js";
+
+export type { LoginRequest, LoginResponse, RequestOptions, InputType } from "./requests.js";
 
 export type ExpiryReason =
   | "ttl_reached"
@@ -93,9 +101,17 @@ export type LoginEvent =
   | { type: "signed_in"; result: SignInResult }
   | { type: "signed_out"; reason: ExpiryReason }
   | { type: "renewed"; result: SignInResult }
-  | { type: "claim_added"; name: string }
+  /**
+   * Claim added / updated. `newHash` is a hex-encoded SHA-256 of the
+   * canonical-JSON encoding of the NEW value — the host can compare
+   * against a precomputed `sha256(canonical(expected))` to confirm
+   * what the new value is without ever seeing the value travel
+   * through the event payload. The full value lives in
+   * `session.claims[name]` for callers that need it.
+   */
+  | { type: "claim_added"; name: string; newHash: string }
+  | { type: "claim_updated"; name: string; newHash: string }
   | { type: "claim_removed"; name: string }
-  | { type: "claim_updated"; name: string }
   | { type: "display_name_changed"; displayName: string | null }
   | { type: "avatar_changed"; avatar: { url: string; hash: string } | null }
   | { type: "credential_revoked"; reason: CredentialRevokedReason };
@@ -114,6 +130,26 @@ export class PrsonLoginSession {
   private _verifierContext: VerifierContext;
   private _expiryTimer: ReturnType<typeof setTimeout> | null = null;
   private _closed = false;
+
+  /**
+   * Wallet's session X25519 public key. Captured from the first
+   * inbound envelope's `walletSessionPk`. Null until then — calls
+   * to `request()` before it lands resolve with
+   * `{ ok: false, error: "no-active-session" }`.
+   */
+  private _walletSessionPk: string | null = null;
+
+  /** Pairs outbound `request` envelopes with inbound `response`s. */
+  private _requestController = new RequestController();
+
+  /**
+   * User's preferred UI language as a BCP-47 tag. Captured from the
+   * initial `presentation` envelope's `preferredLanguage` field;
+   * updated whenever a fresh envelope arrives with a new value.
+   * Null until the first envelope lands. The host page reads this
+   * to localise its own UI without an extra round-trip.
+   */
+  private _preferredLanguage: string | null = null;
 
   /** Per-type listener map. */
   private _listeners: Map<LoginEventType, Set<(e: LoginEvent) => void>> =
@@ -141,6 +177,13 @@ export class PrsonLoginSession {
      * enable `signed_in` dispatch; omit to leave the event silent.
      */
     initialSignedInResult?: SignInResult;
+    /**
+     * The wallet's session X25519 public key from the initial
+     * `presentation` envelope. Required to open the browser→wallet
+     * request channel (`session.request(...)`). Optional only for
+     * back-compat with older wallets that don't yet publish it.
+     */
+    walletSessionPk?: string;
   }) {
     this._cnf = opts.cnf;
     this._expiresAt = opts.credential.expiresAt;
@@ -148,6 +191,7 @@ export class PrsonLoginSession {
     this._ephKeys = opts.ephKeys;
     this._verifierContext = opts.verifierContext;
     this._claimsSnapshot = { ...(opts.initialClaims ?? {}) };
+    this._walletSessionPk = opts.walletSessionPk ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
 
@@ -172,6 +216,12 @@ export class PrsonLoginSession {
   /** Snapshot of the most recent verified claims (since last renew / update). */
   get claims(): Readonly<Record<string, unknown>> {
     return this._claimsSnapshot;
+  }
+
+  /** User's preferred UI language (BCP-47 tag) or null if the
+   *  wallet hasn't published one yet. */
+  get preferredLanguage(): string | null {
+    return this._preferredLanguage;
   }
 
   // ─── Subscription API ────────────────────────────────────────────
@@ -226,6 +276,113 @@ export class PrsonLoginSession {
 
   close(): void {
     this._teardown("user_revoked");
+  }
+
+  // ─── Request channel ─────────────────────────────────────────────
+
+  /**
+   * Send a [request] to the wallet and resolve with the wallet's
+   * reply. The wallet shows a bottom drawer for the user to
+   * approve / decline / pick a matching fragment or document; the
+   * promise resolves when the user acts (or the [timeoutMs]
+   * elapses, or the session closes).
+   *
+   * Common error codes:
+   *   * `no-active-session` — request issued before the wallet has
+   *      published its session pk (race against the initial
+   *      `presentation` envelope) or after the session closed.
+   *   * `declined` — user tapped Decline in the wallet drawer.
+   *   * `not-present` — no matching fragment / document on the
+   *      device AND the user declined to acquire one.
+   *   * `queue-full` — wallet is sitting at the 5-in-flight cap and
+   *      isn't accepting more requests. Try later.
+   *   * `rate-limited` — wallet's 1-request-per-second throttle
+   *      rejected this one.
+   *   * `timeout` — the [timeoutMs] elapsed before the wallet
+   *      replied. Defaults to 60 s.
+   *   * `session-closed` — the session shut down with this request
+   *      in flight.
+   *
+   * Wire grammar: outbound envelope shape is
+   * `{ v, msg: "request", issuedAt, domain, requestId, kind, ...kindFields }`,
+   * NaCl-boxed to the wallet's session pk. Reply is a matching
+   * `{ msg: "response", requestId, result | error }`.
+   */
+  async request(req: LoginRequest, opts?: RequestOptions): Promise<LoginResponse> {
+    if (this._closed) return { ok: false, error: "session-closed" };
+    const recipientPk = this._walletSessionPk;
+    if (!recipientPk) return { ok: false, error: "no-active-session" };
+
+    const timeoutMs = opts?.timeoutMs ?? 60_000;
+    const { requestId, promise } = this._requestController.enqueue(timeoutMs);
+
+    const envelope: Record<string, unknown> = {
+      v: "prson_vp_v1",
+      msg: "request",
+      issuedAt: Math.floor(Date.now() / 1000),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+      requestId,
+      kind: req.kind,
+    };
+    // Per-kind body — flat keys for simplicity, matches the wallet's
+    // existing wire-decoder pattern.
+    switch (req.kind) {
+      case "claim-value":
+        envelope.name = req.name;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "fragment-check":
+        envelope.fragmentName = req.fragmentName;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "document-presence":
+        if (req.type) envelope.type = req.type;
+        if (req.country) envelope.country = req.country;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "document-sign":
+        // Bytes get base64'd in the envelope; large docs should use
+        // `uploadUrl` to keep the WebRTC message size down.
+        if ("bytes" in req.document) {
+          envelope.document = {
+            bytes: u8ToB64(req.document.bytes),
+          };
+        } else {
+          envelope.document = req.document;
+        }
+        if (req.visibleCue) envelope.visibleCue = req.visibleCue;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "input":
+        envelope.inputType = req.inputType;
+        envelope.label = req.label;
+        if (req.placeholder !== undefined) envelope.placeholder = req.placeholder;
+        if (req.defaultValue !== undefined) envelope.defaultValue = req.defaultValue;
+        if (req.minLength !== undefined) envelope.minLength = req.minLength;
+        if (req.maxLength !== undefined) envelope.maxLength = req.maxLength;
+        if (req.min !== undefined) envelope.min = req.min;
+        if (req.max !== undefined) envelope.max = req.max;
+        if (req.pattern !== undefined) envelope.pattern = req.pattern;
+        if (req.required !== undefined) envelope.required = req.required;
+        if (req.options !== undefined) envelope.options = req.options;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "input-form":
+        envelope.fields = req.fields;
+        if (req.submitLabel !== undefined) envelope.submitLabel = req.submitLabel;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+    }
+
+    try {
+      const boxed = boxToWallet(recipientPk, JSON.stringify(envelope));
+      this._transport.send(boxed);
+    } catch {
+      // Network down, channel closed, encoding bug — surface as
+      // session-closed; the timeout would also fire eventually.
+      return { ok: false, error: "session-closed" };
+    }
+    return promise;
   }
 
   // ─── internals ───────────────────────────────────────────────────
@@ -289,6 +446,19 @@ export class PrsonLoginSession {
    */
   async _dispatchDecryptedForTest(envelope: DecryptedEnvelope): Promise<void> {
     if (this._closed) return;
+    // Wallet may rotate its session pk on a renewal. We always read
+    // the latest one from any decrypted inbound envelope so the
+    // browser→wallet channel stays unblocked even after rotation.
+    if (typeof envelope.walletSessionPk === "string") {
+      this._walletSessionPk = envelope.walletSessionPk;
+    }
+    // Same treatment for the user's preferred language — the wallet
+    // re-stamps this on every envelope so a mid-session locale
+    // change propagates without an explicit event.
+    if (typeof envelope.preferredLanguage === "string") {
+      this._preferredLanguage = envelope.preferredLanguage;
+    }
+
     switch (envelope.msg) {
       case "revoke":
         this._teardown("wallet_signed_out");
@@ -305,6 +475,13 @@ export class PrsonLoginSession {
         return;
       case "credential-revoked":
         this._handleCredentialRevoked(envelope);
+        return;
+      case "response":
+        // Wallet replied to an outbound `request`. Match by UUID
+        // and resolve the matching promise. Late replies (after
+        // timeout) silently no-op — the controller already
+        // delivered the timeout error.
+        this._requestController.resolve(envelope);
         return;
       default:
         // Forward-compatible: unknown msg types are ignored, not
@@ -383,15 +560,25 @@ export class PrsonLoginSession {
     const newClaims = verified.claims;
     this._claimsSnapshot = { ...newClaims };
 
-    // Added + updated — emit name only. Host reads the value via
-    // `session.claims[name]` when needed; that read site is the
-    // explicit, auditable point where claim values cross from the
-    // SDK into host code.
+    // Added + updated — emit name + canonical hash of the new
+    // value (NOT the raw value). The host reads the actual value
+    // via `session.claims[name]` when needed; the hash lets
+    // callers do an `==`-style check against a precomputed digest
+    // ("did verification_level become 5?") without ever letting
+    // the raw value cross the event surface.
     for (const [name, newValue] of Object.entries(newClaims)) {
       if (!(name in oldClaims)) {
-        this._dispatch({ type: "claim_added", name });
+        this._dispatch({
+          type: "claim_added",
+          name,
+          newHash: await canonicalSha256Hex(newValue),
+        });
       } else if (!_deepEqual(oldClaims[name], newValue)) {
-        this._dispatch({ type: "claim_updated", name });
+        this._dispatch({
+          type: "claim_updated",
+          name,
+          newHash: await canonicalSha256Hex(newValue),
+        });
       }
     }
     // Removed
@@ -442,6 +629,9 @@ export class PrsonLoginSession {
     } catch {
       /* */
     }
+    // Reject every in-flight request so callers awaiting
+    // `session.request(...)` don't hang past the teardown.
+    this._requestController.closeAll("session-closed");
     this._dispatch({ type: "signed_out", reason });
     // Clear listener sets after dispatch so a host that calls
     // `session.on(...)` after teardown doesn't accumulate forever.
@@ -475,6 +665,66 @@ function extractKbNonce(presentation: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * `Uint8Array` → standard base64 (with `=` padding) for inclusion
+ * inside a JSON envelope. Used by the request channel's
+ * `document-sign` payload when the document arrives as raw bytes.
+ */
+function u8ToB64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]!);
+  return btoa(s);
+}
+
+/**
+ * Canonical-JSON encoder: stable key ordering at every nesting
+ * depth, no whitespace, arrays preserve insertion order. Used as
+ * the input to the SHA-256 that becomes `claim_added.newHash` /
+ * `claim_updated.newHash`. Matches the wallet's
+ * `canonicalStringify` byte-for-byte, so both sides hash to the
+ * same digest — the host can precompute a known-value digest and
+ * compare.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === undefined) return "null";
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return "[" + value.map(canonicalJson).join(",") + "]";
+  }
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    return (
+      "{" +
+      keys
+        .map((k) => JSON.stringify(k) + ":" + canonicalJson(obj[k]))
+        .join(",") +
+      "}"
+    );
+  }
+  return JSON.stringify(String(value));
+}
+
+/**
+ * SHA-256 over `canonicalJson(value)` returned as 64-char lowercase
+ * hex. Uses the browser-native WebCrypto API — no dependency. Async
+ * because `crypto.subtle.digest` is async.
+ */
+async function canonicalSha256Hex(value: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(canonicalJson(value));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const view = new Uint8Array(digest);
+  let s = "";
+  for (let i = 0; i < view.length; i++) {
+    s += view[i]!.toString(16).padStart(2, "0");
+  }
+  return s;
 }
 
 /**

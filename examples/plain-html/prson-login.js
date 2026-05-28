@@ -1999,22 +1999,22 @@ var require_secretbox = __commonJS({
       return result;
     }
     exports.secretBox = secretBox;
-    function openSecretBox(key, nonce, box) {
+    function openSecretBox(key, nonce, box2) {
       if (nonce.length !== 24) {
         throw new Error("secretBox nonce must be 24 bytes");
       }
-      if (box.length < 16) {
+      if (box2.length < 16) {
         throw new Error("secretBox data must be at least 16 bytes");
       }
       const firstBlock = new Uint8Array(64);
       const nonceCounter = new Uint8Array(24 + 8);
       nonceCounter.set(nonce);
       (0, xsalsa20_1.stream)(key, nonceCounter, firstBlock, 8);
-      const auth = (0, poly1305_1.oneTimeAuth)(firstBlock.subarray(0, 32), box.subarray(16));
-      if (!(0, poly1305_1.equal)(auth, box.subarray(0, 16))) {
+      const auth = (0, poly1305_1.oneTimeAuth)(firstBlock.subarray(0, 32), box2.subarray(16));
+      if (!(0, poly1305_1.equal)(auth, box2.subarray(0, 16))) {
         return null;
       }
-      const ciphertext = box.subarray(16);
+      const ciphertext = box2.subarray(16);
       const result = new Uint8Array(ciphertext.length);
       for (let i = 0; i < 32 && i < ciphertext.length; i++) {
         result[i] = ciphertext[i] ^ firstBlock[32 + i];
@@ -2056,13 +2056,13 @@ var require_box = __commonJS({
       return key;
     }
     exports.precomputeSharedKey = precomputeSharedKey;
-    function box(theirPublicKey, mySecretKey, nonce, data) {
+    function box2(theirPublicKey, mySecretKey, nonce, data) {
       const sharedKey = precomputeSharedKey(theirPublicKey, mySecretKey);
       const result = (0, secretbox_1.secretBox)(sharedKey, nonce, data);
       (0, wipe_1.wipe)(sharedKey);
       return result;
     }
-    exports.box = box;
+    exports.box = box2;
     function openBox2(theirPublicKey, mySecretKey, nonce, data) {
       const sharedKey = precomputeSharedKey(theirPublicKey, mySecretKey);
       const result = (0, secretbox_1.openSecretBox)(sharedKey, nonce, data);
@@ -2356,6 +2356,21 @@ function addPad(s) {
   const mod = s.length % 4;
   return mod === 0 ? s : s + "=".repeat(4 - mod);
 }
+function boxToWallet(walletSessionPkB64u, plaintext) {
+  const recipientPk = (0, import_base64.decodeURLSafe)(addPad(walletSessionPkB64u));
+  if (recipientPk.length !== 32) {
+    throw new Error("boxToWallet: bad walletSessionPk length");
+  }
+  const ephemeral = (0, import_x25519.generateKeyPair)();
+  const nonce = (0, import_random.randomBytes)(24);
+  const pt = new TextEncoder().encode(plaintext);
+  const ct = (0, import_nacl.box)(ephemeral.secretKey, recipientPk, nonce, pt);
+  return JSON.stringify({
+    ephPk: stripPad((0, import_base64.encodeURLSafe)(ephemeral.publicKey)),
+    nonce24: stripPad((0, import_base64.encodeURLSafe)(nonce)),
+    ct: stripPad((0, import_base64.encodeURLSafe)(ct))
+  });
+}
 
 // src/verify.ts
 var ANONYMOUS_WALLET_VCT = "https://app.prson.net/credentials/anonymous-wallet/v1";
@@ -2608,11 +2623,93 @@ async function verifyAnonymousWallet(jws, opts) {
   };
 }
 
+// src/requests.ts
+var RequestController = class {
+  constructor() {
+    this._pending = /* @__PURE__ */ new Map();
+    this._closed = false;
+  }
+  /**
+   * Wire up a new outbound request. Returns the requestId to put in
+   * the envelope + a `promise` that resolves when the wallet replies
+   * (or times out / the session closes).
+   */
+  enqueue(timeoutMs) {
+    const requestId = newUuid();
+    const promise = new Promise((resolve) => {
+      if (this._closed) {
+        resolve({ ok: false, error: "session-closed" });
+        return;
+      }
+      const entry = {
+        requestId,
+        resolve,
+        timer: setTimeout(() => {
+          const p = this._pending.get(requestId);
+          if (!p) return;
+          this._pending.delete(requestId);
+          resolve({ ok: false, error: "timeout" });
+        }, timeoutMs)
+      };
+      this._pending.set(requestId, entry);
+    });
+    return { requestId, promise };
+  }
+  /** Resolve a pending request when a wallet `response` envelope arrives. */
+  resolve(envelope) {
+    if (envelope.msg !== "response") return;
+    const requestId = envelope.requestId;
+    if (!requestId) return;
+    const entry = this._pending.get(requestId);
+    if (!entry) return;
+    this._pending.delete(requestId);
+    if (entry.timer) clearTimeout(entry.timer);
+    if (envelope.error) {
+      entry.resolve({ ok: false, error: envelope.error });
+    } else {
+      entry.resolve({ ok: true, value: envelope.result });
+    }
+  }
+  /**
+   * Reject every in-flight request with the given reason. Typically
+   * called with `"session-closed"` from session teardown.
+   */
+  closeAll(reason) {
+    if (this._closed) return;
+    this._closed = true;
+    for (const entry of this._pending.values()) {
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.resolve({ ok: false, error: reason });
+    }
+    this._pending.clear();
+  }
+};
+function newUuid() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  b[6] = b[6] & 15 | 64;
+  b[8] = b[8] & 63 | 128;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 // src/session.ts
 var PrsonLoginSession = class {
   constructor(opts) {
     this._expiryTimer = null;
     this._closed = false;
+    /**
+     * Wallet's session X25519 public key. Captured from the first
+     * inbound envelope's `walletSessionPk`. Null until then — calls
+     * to `request()` before it lands resolve with
+     * `{ ok: false, error: "no-active-session" }`.
+     */
+    this._walletSessionPk = null;
+    /** Pairs outbound `request` envelopes with inbound `response`s. */
+    this._requestController = new RequestController();
     /** Per-type listener map. */
     this._listeners = /* @__PURE__ */ new Map();
     /** "Fire on every event" subscribers — for logging / telemetry. */
@@ -2623,6 +2720,7 @@ var PrsonLoginSession = class {
     this._ephKeys = opts.ephKeys;
     this._verifierContext = opts.verifierContext;
     this._claimsSnapshot = { ...opts.initialClaims ?? {} };
+    this._walletSessionPk = opts.walletSessionPk ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
     if (opts.initialSignedInResult) {
@@ -2685,6 +2783,95 @@ var PrsonLoginSession = class {
   close() {
     this._teardown("user_revoked");
   }
+  // ─── Request channel ─────────────────────────────────────────────
+  /**
+   * Send a [request] to the wallet and resolve with the wallet's
+   * reply. The wallet shows a bottom drawer for the user to
+   * approve / decline / pick a matching fragment or document; the
+   * promise resolves when the user acts (or the [timeoutMs]
+   * elapses, or the session closes).
+   *
+   * Common error codes:
+   *   * `no-active-session` — request issued before the wallet has
+   *      published its session pk (race against the initial
+   *      `presentation` envelope) or after the session closed.
+   *   * `declined` — user tapped Decline in the wallet drawer.
+   *   * `not-present` — no matching fragment / document on the
+   *      device AND the user declined to acquire one.
+   *   * `queue-full` — wallet is sitting at the 5-in-flight cap and
+   *      isn't accepting more requests. Try later.
+   *   * `rate-limited` — wallet's 1-request-per-second throttle
+   *      rejected this one.
+   *   * `timeout` — the [timeoutMs] elapsed before the wallet
+   *      replied. Defaults to 60 s.
+   *   * `session-closed` — the session shut down with this request
+   *      in flight.
+   *
+   * Wire grammar: outbound envelope shape is
+   * `{ v, msg: "request", issuedAt, domain, requestId, kind, ...kindFields }`,
+   * NaCl-boxed to the wallet's session pk. Reply is a matching
+   * `{ msg: "response", requestId, result | error }`.
+   */
+  async request(req, opts) {
+    if (this._closed) return { ok: false, error: "session-closed" };
+    const recipientPk = this._walletSessionPk;
+    if (!recipientPk) return { ok: false, error: "no-active-session" };
+    const timeoutMs = opts?.timeoutMs ?? 6e4;
+    const { requestId, promise } = this._requestController.enqueue(timeoutMs);
+    const envelope = {
+      v: "prson_vp_v1",
+      msg: "request",
+      issuedAt: Math.floor(Date.now() / 1e3),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+      requestId,
+      kind: req.kind
+    };
+    switch (req.kind) {
+      case "claim-value":
+        envelope.name = req.name;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "fragment-check":
+        envelope.fragmentName = req.fragmentName;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "document-presence":
+        if (req.type) envelope.type = req.type;
+        if (req.country) envelope.country = req.country;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "document-sign":
+        if ("bytes" in req.document) {
+          envelope.document = {
+            bytes: u8ToB64(req.document.bytes)
+          };
+        } else {
+          envelope.document = req.document;
+        }
+        if (req.visibleCue) envelope.visibleCue = req.visibleCue;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "input":
+        envelope.inputType = req.inputType;
+        envelope.label = req.label;
+        if (req.placeholder !== void 0) envelope.placeholder = req.placeholder;
+        if (req.minLength !== void 0) envelope.minLength = req.minLength;
+        if (req.maxLength !== void 0) envelope.maxLength = req.maxLength;
+        if (req.min !== void 0) envelope.min = req.min;
+        if (req.max !== void 0) envelope.max = req.max;
+        if (req.pattern !== void 0) envelope.pattern = req.pattern;
+        if (req.required !== void 0) envelope.required = req.required;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+    }
+    try {
+      const boxed = boxToWallet(recipientPk, JSON.stringify(envelope));
+      this._transport.send(boxed);
+    } catch {
+      return { ok: false, error: "session-closed" };
+    }
+    return promise;
+  }
   // ─── internals ───────────────────────────────────────────────────
   /**
    * Fire a single event to per-type listeners + onAny subscribers.
@@ -2738,6 +2925,9 @@ var PrsonLoginSession = class {
    */
   async _dispatchDecryptedForTest(envelope) {
     if (this._closed) return;
+    if (typeof envelope.walletSessionPk === "string") {
+      this._walletSessionPk = envelope.walletSessionPk;
+    }
     switch (envelope.msg) {
       case "revoke":
         this._teardown("wallet_signed_out");
@@ -2754,6 +2944,9 @@ var PrsonLoginSession = class {
         return;
       case "credential-revoked":
         this._handleCredentialRevoked(envelope);
+        return;
+      case "response":
+        this._requestController.resolve(envelope);
         return;
       default:
         return;
@@ -2819,9 +3012,17 @@ var PrsonLoginSession = class {
     this._claimsSnapshot = { ...newClaims };
     for (const [name, newValue] of Object.entries(newClaims)) {
       if (!(name in oldClaims)) {
-        this._dispatch({ type: "claim_added", name });
+        this._dispatch({
+          type: "claim_added",
+          name,
+          newHash: await canonicalSha256Hex(newValue)
+        });
       } else if (!_deepEqual(oldClaims[name], newValue)) {
-        this._dispatch({ type: "claim_updated", name });
+        this._dispatch({
+          type: "claim_updated",
+          name,
+          newHash: await canonicalSha256Hex(newValue)
+        });
       }
     }
     for (const name of Object.keys(oldClaims)) {
@@ -2867,6 +3068,7 @@ var PrsonLoginSession = class {
       this._transport.close();
     } catch {
     }
+    this._requestController.closeAll("session-closed");
     this._dispatch({ type: "signed_out", reason });
     this._listeners.clear();
     this._anyListeners.clear();
@@ -2886,6 +3088,38 @@ function extractKbNonce(presentation) {
   } catch {
     return void 0;
   }
+}
+function u8ToB64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+function canonicalJson(value) {
+  if (value === void 0) return "null";
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return "[" + value.map(canonicalJson).join(",") + "]";
+  }
+  if (typeof value === "object") {
+    const obj = value;
+    const keys = Object.keys(obj).sort();
+    return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonicalJson(obj[k])).join(",") + "}";
+  }
+  return JSON.stringify(String(value));
+}
+async function canonicalSha256Hex(value) {
+  const bytes = new TextEncoder().encode(canonicalJson(value));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const view = new Uint8Array(digest);
+  let s = "";
+  for (let i = 0; i < view.length; i++) {
+    s += view[i].toString(16).padStart(2, "0");
+  }
+  return s;
 }
 function _deepEqual(a, b) {
   if (a === b) return true;

@@ -15,15 +15,20 @@
 
 ## 1. SDK lifecycle events
 
-> **Status: shipped (SDK side).** The browser SDK now emits the full
-> [`LoginEvent`](packages/browser/src/session.ts) union via
-> `session.on(type, cb)` / `session.onAny(cb)`. The legacy
-> `session.onRenewed()` / `session.onExpiry()` are kept as back-
-> compat shims. Wallet-side emission of the new
-> `claim-update` / `display-update` / `credential-revoked` envelope
-> types is still TODO — until that ships, only `signed_in`,
-> `renewed`, and `signed_out` actually fire on the wire. See the
-> bottom of §1.2 for the wire grammar additions.
+> **Status: shipped (SDK + wallet sides).** The browser SDK emits
+> the full [`LoginEvent`](packages/browser/src/session.ts) union
+> via `session.on(type, cb)` / `session.onAny(cb)`; the wallet
+> emits `display-update` and `credential-revoked` envelopes
+> automatically from the
+> [`ActiveSessionEventBridge`](../mobile-app/prson_app/lib/core/services/active_session_event_bridge.dart)
+> when the bound identity changes. **§1.5 (request channel) is
+> also shipped** — `session.request(...)` opens a verifier→wallet
+> bidirectional surface for claim-value asks, fragment checks,
+> document presence/sign, and HTML5-style input prompts.
+> Wallet-side `claim-update` re-mint is the one piece still TODO
+> (the SDK accepts the envelope; the bridge logs a
+> `TODO(prson-login-events)` line when a re-mint would fire and
+> the host falls back to renewal-on-TTL).
 
 **Goal**: let host sites react to wallet-side changes *after* sign-in
 without polling. Today the SDK exposes `session.onRenewed()` and
@@ -140,6 +145,90 @@ The active-sessions tile on the mobile app gains a per-domain
 OFF after the session expires (no background updates without an
 active session). Per-domain because the user might want a banking
 site to never see avatar changes but a chat site to track them.
+
+### 1.5 Verifier → wallet request channel
+
+A bidirectional surface layered on the existing WebRTC data
+channel. The host site sends a `request` envelope; the wallet
+shows a bottom drawer to the user; the user's choice is encoded
+as a `response` envelope back through the same channel, paired by
+UUID.
+
+```ts
+type LoginRequest =
+  | { kind: "claim-value"; name: string; reason?: string }
+  | { kind: "fragment-check"; fragmentName: string; reason?: string }
+  | { kind: "document-presence"; type?: string; country?: string; reason?: string }
+  | {
+      kind: "document-sign";
+      document: { bytes: Uint8Array } | { uploadUrl: string; size?: number; sha256?: string };
+      visibleCue?: string;
+      reason?: string;
+    }
+  | {
+      kind: "input";
+      inputType: "text" | "search" | "email" | "tel" | "url" | "number" | "password";
+      label: string; placeholder?: string;
+      minLength?: number; maxLength?: number;
+      min?: number; max?: number;
+      pattern?: string; required?: boolean;
+      reason?: string;
+    };
+
+type LoginResponse =
+  | { ok: true; value: unknown }
+  | { ok: false; error:
+      "declined" | "not-present" | "expired" | "rate-limited" |
+      "queue-full" | "no-active-session" | "timeout" | "session-closed" |
+      "unsupported" | string };
+
+session.request(req: LoginRequest, opts?: { timeoutMs?: number }): Promise<LoginResponse>;
+```
+
+#### Protocol invariants
+
+1. **One request per second** on the wallet side. Inbound
+   envelopes arriving inside the throttle window are dropped
+   silently — the host's per-call timeout (default 60 s)
+   surfaces them as `error: "timeout"`.
+2. **Max five outstanding requests** queued on the wallet at
+   any time. Further envelopes are dropped silently. The cap
+   releases by one as soon as the user responds (we free the
+   slot before sending the `response`).
+3. **Session-scoped lifetime.** No request fires before
+   `signed_in`; no request flows while no session is active.
+   Session teardown rejects every in-flight request with
+   `error: "session-closed"`.
+4. **End-to-end encrypted.** The wallet mints a session-long
+   X25519 keypair at sign-in and publishes its public key on
+   the initial `presentation` envelope (`walletSessionPk`); the
+   browser SDK NaCl-boxes every outbound request to it. Forward
+   secrecy per message via a fresh ephemeral pk in the
+   envelope, same as the existing wallet → browser direction.
+
+#### Wallet UX
+
+A bottom drawer per accepted request, showing the verifier
+domain, the request kind + parameters, and Approve / Decline.
+Per-kind rich pickers (fragment selector with NFC fallback to
+scan a fresh document, keyboard-aware input form with HTML5
+validation, document signer with visible-cue placement) are
+follow-ups; the v1 drawer surfaces a stubbed approval payload so
+the protocol round-trips end-to-end.
+
+#### Use cases this unlocks
+
+- **Kiosk text entry.** "Enter your email on your phone": kiosk
+  fires `kind: "input", inputType: "email"`, wallet shows a
+  keyboard sized to the constraints, returns the typed value.
+- **Late-binding fact checks.** "Are you a citizen of country
+  X?": `kind: "fragment-check"`, wallet returns the signed
+  fragment; verifier re-checks server-side.
+- **Document signature.** PDF byte buffer or short-lived
+  upload URL → wallet PAdES-signs with the identity's EC key.
+- **Stale-claim refresh.** "What's your current verification
+  level?": `kind: "claim-value"` returns the live value
+  without a full re-sign-in.
 
 ---
 
