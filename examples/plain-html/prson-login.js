@@ -3005,9 +3005,10 @@ var PrsonLoginSession = class {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     const delta = this._expiresAt - Date.now();
     if (delta <= 0) {
-      if (this._expiresAt <= 0) {
+      const skewBudgetMs = 6e4;
+      if (this._expiresAt <= 0 || -delta < skewBudgetMs) {
         console.warn(
-          "[@prson/login-sdk] credential has no exp; leaving session open without a TTL timer. Host should set its own deadline."
+          `[@prson/login-sdk] credential expiresAt ${this._expiresAt <= 0 ? "missing/zero" : `${(-delta / 1e3).toFixed(1)}s in the past`} \u2014 leaving session open without a TTL timer. Host should set its own deadline.`
         );
         return;
       }

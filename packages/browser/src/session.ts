@@ -563,26 +563,36 @@ export class PrsonLoginSession {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     const delta = this._expiresAt - Date.now();
     if (delta <= 0) {
-      // `expiresAt` is zero or in the past. Two scenarios:
-      //   * The credential genuinely expired between issuance and the
-      //     browser's verify pass (clock skew / slow network).
-      //   * The credential's JWS `exp` field is missing or non-numeric,
-      //     so `verify.ts` returned `expiresAt: 0`. In that case
-      //     immediately tearing the session down with
-      //     `ttl_reached` would fire the moment the user signs in
-      //     — visibly wrong since the wallet still thinks the
-      //     session is valid.
+      // `delta <= 0` means the credential is "expired" against the
+      // browser clock. Three sub-cases — only the LAST should
+      // actually tear the session down:
       //
-      // Distinguish: a credential issued ≤ 60 s before "now" but
-      // with a missing/zero exp is almost certainly the second case.
-      // Don't arm a timer at all; the session stays open until the
-      // wallet (or the host) closes it. The host can still read
+      //   A. `expiresAt === 0` — the credential's JWS had no
+      //      numeric `exp` and `verify.ts` defaulted to zero.
+      //      Tearing down would fire the moment the user signs in,
+      //      which is visibly wrong (wallet still thinks the
+      //      session is valid). Skip the timer.
+      //
+      //   B. `expiresAt > 0` and within a 60 s window of "now" —
+      //      almost certainly browser ↔ wallet/server clock skew or
+      //      network latency between issuance and verify. Tearing
+      //      down on this signal causes the "signed_in then
+      //      signed_out a second later" UX bug. Skip the timer.
+      //
+      //   C. `expiresAt > 0` and meaningfully in the past — a real
+      //      expired credential. Teardown.
+      //
+      // For A and B we leave the session open until the wallet (or
+      // the host) closes it. The host can still read
       // `session.expiresAt` to make its own decision.
-      if (this._expiresAt <= 0) {
+      const skewBudgetMs = 60_000;
+      if (this._expiresAt <= 0 || -delta < skewBudgetMs) {
         // eslint-disable-next-line no-console
         console.warn(
-          "[@prson/login-sdk] credential has no exp; leaving session" +
-            " open without a TTL timer. Host should set its own deadline.",
+          `[@prson/login-sdk] credential expiresAt ${
+            this._expiresAt <= 0 ? "missing/zero" : `${(-delta / 1000).toFixed(1)}s in the past`
+          } — leaving session open without a TTL timer.` +
+            " Host should set its own deadline.",
         );
         return;
       }
