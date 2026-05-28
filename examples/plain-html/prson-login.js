@@ -1567,7 +1567,7 @@ var require_poly1305 = __commonJS({
     exports.DIGEST_LENGTH = 16;
     var Poly1305 = (
       /** @class */
-      (function() {
+      function() {
         function Poly13052(key) {
           this.digestLength = exports.DIGEST_LENGTH;
           this._buffer = new Uint8Array(16);
@@ -1943,7 +1943,7 @@ var require_poly1305 = __commonJS({
           return this;
         };
         return Poly13052;
-      })()
+      }()
     );
     exports.Poly1305 = Poly1305;
     function oneTimeAuth(key, data) {
@@ -2077,7 +2077,7 @@ var require_box = __commonJS({
 var require_nacl = __commonJS({
   "node_modules/@stablelib/nacl/lib/nacl.js"(exports) {
     "use strict";
-    var __createBinding = exports && exports.__createBinding || (Object.create ? (function(o, m, k, k2) {
+    var __createBinding = exports && exports.__createBinding || (Object.create ? function(o, m, k, k2) {
       if (k2 === void 0) k2 = k;
       var desc = Object.getOwnPropertyDescriptor(m, k);
       if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
@@ -2086,10 +2086,10 @@ var require_nacl = __commonJS({
         } };
       }
       Object.defineProperty(o, k2, desc);
-    }) : (function(o, m, k, k2) {
+    } : function(o, m, k, k2) {
       if (k2 === void 0) k2 = k;
       o[k2] = m[k];
-    }));
+    });
     var __exportStar = exports && exports.__exportStar || function(m, exports2) {
       for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports2, p)) __createBinding(exports2, m, p);
     };
@@ -2103,7 +2103,7 @@ var require_nacl = __commonJS({
 var require_base64 = __commonJS({
   "node_modules/@stablelib/base64/lib/base64.js"(exports) {
     "use strict";
-    var __extends = exports && exports.__extends || /* @__PURE__ */ (function() {
+    var __extends = exports && exports.__extends || /* @__PURE__ */ function() {
       var extendStatics = function(d, b) {
         extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
           d2.__proto__ = b2;
@@ -2119,12 +2119,12 @@ var require_base64 = __commonJS({
         }
         d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
       };
-    })();
+    }();
     Object.defineProperty(exports, "__esModule", { value: true });
     var INVALID_BYTE = 256;
     var Coder = (
       /** @class */
-      (function() {
+      function() {
         function Coder2(_paddingCharacter) {
           if (_paddingCharacter === void 0) {
             _paddingCharacter = "=";
@@ -2250,7 +2250,7 @@ var require_base64 = __commonJS({
           return paddingLength;
         };
         return Coder2;
-      })()
+      }()
     );
     exports.Coder = Coder;
     var stdCoder = new Coder();
@@ -2264,7 +2264,7 @@ var require_base64 = __commonJS({
     exports.decode = decode;
     var URLSafeCoder = (
       /** @class */
-      (function(_super) {
+      function(_super) {
         __extends(URLSafeCoder2, _super);
         function URLSafeCoder2() {
           return _super !== null && _super.apply(this, arguments) || this;
@@ -2288,7 +2288,7 @@ var require_base64 = __commonJS({
           return result;
         };
         return URLSafeCoder2;
-      })(Coder)
+      }(Coder)
     );
     exports.URLSafeCoder = URLSafeCoder;
     var urlSafeCoder = new URLSafeCoder();
@@ -2904,6 +2904,34 @@ var ANONYMOUS_WALLET_VCT2 = "https://app.prson.net/credentials/anonymous-wallet/
 var DEFAULT_TTL_MINUTES = 10;
 var MAX_TTL_MINUTES = 15;
 var SIGNALING_BASE = "https://signaling.prson.net";
+var LoginAbortedError = class extends Error {
+  constructor(message = "sign-in aborted by a newer signIn() call") {
+    super(message);
+    this.name = "LoginAbortedError";
+  }
+};
+var _inflight = null;
+function makeInflight() {
+  const teardowns = [];
+  const self2 = {
+    aborted: false,
+    pushTeardown(t) {
+      teardowns.push(t);
+    },
+    async abort() {
+      if (self2.aborted) return;
+      self2.aborted = true;
+      while (teardowns.length) {
+        const t = teardowns.pop();
+        try {
+          await t?.();
+        } catch {
+        }
+      }
+    }
+  };
+  return self2;
+}
 var PrsonLogin = class {
   /**
    * Drive a full sign-in. The promise resolves once the wallet has
@@ -2911,85 +2939,104 @@ var PrsonLogin = class {
    * one of the four `ExpiryReason` triggers.
    */
   static async signIn(opts = {}) {
-    const domain = opts.domain ?? window.location.origin.replace(/^https?:\/\//, "");
-    const ttlMaxMinutes = Math.min(
-      Math.max(opts.ttlMinutes ?? DEFAULT_TTL_MINUTES, 1),
-      MAX_TTL_MINUTES
-    );
-    const ephKeys = await generateEphemeralKeypair();
-    const nonce = b64u(crypto.getRandomValues(new Uint8Array(32)));
-    const request = {
-      domain,
-      nonce,
-      browserPk: ephKeys.publicKeyB64u,
-      required: opts.required ?? {},
-      // Carried into the wallet's drawer so an "Anonymous" option is
-      // offered. The SDK side enforces acceptance below at verify time;
-      // the wallet enforces drawer UX based on this flag.
-      allowAnonymous: opts.allowAnonymous === true,
-      // If set, instructs the wallet to mint a fresh random Ed25519
-      // keypair for this single sign-in (no deterministic per-domain
-      // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
-      ephemeralIdentity: opts.ephemeralIdentity === true,
-      ttlMaxMinutes
+    const prior = _inflight;
+    if (prior) await prior.abort();
+    const me = makeInflight();
+    _inflight = me;
+    const checkAborted = () => {
+      if (me.aborted) throw new LoginAbortedError();
     };
-    const draft = await createDraft(request);
-    const qrUrl = buildDeepLinkUrl({
-      reqId: draft.reqId,
-      browserPk: ephKeys.publicKeyB64u,
-      nonce,
-      domain,
-      request,
-      serverTs: draft.serverTs
-    });
-    const qrMount = resolveMount(opts.ui?.mountQrInto);
-    const qrHandle = qrMount ? renderLoginQr(qrUrl, qrMount, opts.ui?.theme ?? "auto") : null;
-    const signaling = await connectSignaling({
-      url: draft.signalingWss,
-      role: "browser",
-      sigToken: draft.draftToken
-    });
-    const transport = await establishTransport({
-      stunOnly: true,
-      signaling,
-      role: "browser"
-    });
-    const first = await transport.awaitFirstMessage();
-    const envelope = await decryptEnvelope(first, ephKeys);
-    if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
-      throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
-    }
-    const acceptedVcts = opts.allowAnonymous ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT2] : [...KNOWN_VCTS];
-    const verified = await verifyPresentation(envelope.presentation, {
-      expectedAudience: `https://${domain}`,
-      expectedNonce: nonce,
-      acceptedVcts,
-      trustedIssuer: TRUSTED_ISSUER
-    });
-    if (!verified.ok) {
-      throw new Error(`Presentation rejected: ${verified.reason}`);
-    }
-    qrHandle?.dispose();
-    const session = new PrsonLoginSession({
-      cnf: verified.cnf,
-      credential: verified.credential,
-      transport,
-      ephKeys,
-      verifierContext: {
-        expectedAudience: `https://${domain}`,
-        expectedNonceFactory: () => nonce,
-        // renewals carry a fresh nonce; see session.ts
-        acceptedVcts: [...KNOWN_VCTS],
-        trustedIssuer: TRUSTED_ISSUER
+    try {
+      const domain = opts.domain ?? window.location.origin.replace(/^https?:\/\//, "");
+      const ttlMaxMinutes = Math.min(
+        Math.max(opts.ttlMinutes ?? DEFAULT_TTL_MINUTES, 1),
+        MAX_TTL_MINUTES
+      );
+      const ephKeys = await generateEphemeralKeypair();
+      checkAborted();
+      const nonce = b64u(crypto.getRandomValues(new Uint8Array(32)));
+      const request = {
+        domain,
+        nonce,
+        browserPk: ephKeys.publicKeyB64u,
+        required: opts.required ?? {},
+        // Carried into the wallet's drawer so an "Anonymous" option is
+        // offered. The SDK side enforces acceptance below at verify time;
+        // the wallet enforces drawer UX based on this flag.
+        allowAnonymous: opts.allowAnonymous === true,
+        // If set, instructs the wallet to mint a fresh random Ed25519
+        // keypair for this single sign-in (no deterministic per-domain
+        // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
+        ephemeralIdentity: opts.ephemeralIdentity === true,
+        ttlMaxMinutes
+      };
+      const draft = await createDraft(request);
+      checkAborted();
+      const qrUrl = buildDeepLinkUrl({
+        reqId: draft.reqId,
+        browserPk: ephKeys.publicKeyB64u,
+        nonce,
+        domain,
+        request,
+        serverTs: draft.serverTs
+      });
+      const qrMount = resolveMount(opts.ui?.mountQrInto);
+      const qrHandle = qrMount ? renderLoginQr(qrUrl, qrMount, opts.ui?.theme ?? "auto") : null;
+      if (qrHandle) me.pushTeardown(() => qrHandle.dispose());
+      const signaling = await connectSignaling({
+        url: draft.signalingWss,
+        role: "browser",
+        sigToken: draft.draftToken
+      });
+      me.pushTeardown(() => signaling.close());
+      checkAborted();
+      const transport = await establishTransport({
+        stunOnly: true,
+        signaling,
+        role: "browser"
+      });
+      me.pushTeardown(() => transport.close());
+      checkAborted();
+      const first = await transport.awaitFirstMessage();
+      checkAborted();
+      const envelope = await decryptEnvelope(first, ephKeys);
+      if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
+        throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
       }
-    });
-    return {
-      sdJwtVc: envelope.presentation,
-      claims: verified.claims,
-      cnf: verified.cnf,
-      credential: verified.credential,
-      session
-    };
+      const acceptedVcts = opts.allowAnonymous ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT2] : [...KNOWN_VCTS];
+      const verified = await verifyPresentation(envelope.presentation, {
+        expectedAudience: `https://${domain}`,
+        expectedNonce: nonce,
+        acceptedVcts,
+        trustedIssuer: TRUSTED_ISSUER
+      });
+      if (!verified.ok) {
+        throw new Error(`Presentation rejected: ${verified.reason}`);
+      }
+      qrHandle?.dispose();
+      const session = new PrsonLoginSession({
+        cnf: verified.cnf,
+        credential: verified.credential,
+        transport,
+        ephKeys,
+        verifierContext: {
+          expectedAudience: `https://${domain}`,
+          expectedNonceFactory: () => nonce,
+          // renewals carry a fresh nonce; see session.ts
+          acceptedVcts: [...KNOWN_VCTS],
+          trustedIssuer: TRUSTED_ISSUER
+        }
+      });
+      return {
+        sdJwtVc: envelope.presentation,
+        claims: verified.claims,
+        cnf: verified.cnf,
+        credential: verified.credential,
+        session
+      };
+    } finally {
+      if (_inflight === me) _inflight = null;
+    }
   }
   /**
    * Rebind to a session that was previously established for the same
@@ -3029,6 +3076,7 @@ export {
   ANONYMOUS_WALLET_VCT2 as ANONYMOUS_WALLET_VCT,
   DEFAULT_TTL_MINUTES,
   KNOWN_VCTS,
+  LoginAbortedError,
   MAX_TTL_MINUTES,
   PROTOCOL_VERSION,
   PrsonLogin,

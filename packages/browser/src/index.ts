@@ -126,6 +126,85 @@ export const MAX_TTL_MINUTES = 15;
 export const SIGNALING_BASE = "https://signaling.prson.net";
 
 // ─────────────────────────────────────────────────────────────────────
+// Concurrency guard — one in-flight sign-in at a time
+// ─────────────────────────────────────────────────────────────────────
+//
+// A user who clicks "Sign in" twice in quick succession (because the
+// first click felt slow, or the QR scrolled out of view) would
+// otherwise spawn two parallel sign-in flows, each holding its own
+// draftToken / WS / RTCPeerConnection / QR card. The second sign-in's
+// QR would stack on top of the first; both wallets would try to
+// claim; the verifier might commit the wrong identity.
+//
+// Semantics:
+//   * Only the PHASE BEFORE signIn() resolves is treated as
+//     "in-flight". Once signIn() has resolved into a live session,
+//     that session is no longer in-flight; a fresh signIn() does
+//     NOT terminate the live session it just supersedes (the host
+//     page can keep the prior session handle if it needs to).
+//   * A second signIn() while a first is in-flight calls the first
+//     one's abort(), which runs the registered teardowns in LIFO
+//     order (latest resource first). The first signIn() then sees
+//     the abort signal on its next `await` and throws
+//     `LoginAbortedError`.
+//
+// Implementation: module-scoped current-inflight slot + per-call
+// disposer chain that the displacement awaits.
+
+/**
+ * Thrown by `PrsonLogin.signIn()` when a NEWER `signIn()` call
+ * displaces the current in-flight one. Host pages typically ignore
+ * this — the user's second click is the cancellation signal — but
+ * the typed error lets you distinguish it from real failures.
+ */
+export class LoginAbortedError extends Error {
+  constructor(message = "sign-in aborted by a newer signIn() call") {
+    super(message);
+    this.name = "LoginAbortedError";
+  }
+}
+
+interface InflightSignIn {
+  /** True once a newer signIn() has called `abort()`. */
+  aborted: boolean;
+  /**
+   * Run the registered teardowns in LIFO order and mark
+   * `aborted = true`. Resolves after every teardown has settled.
+   */
+  abort(): Promise<void>;
+  /** Push a teardown thunk; runs once on `abort()` or normal exit. */
+  pushTeardown(t: () => void | Promise<void>): void;
+}
+
+let _inflight: InflightSignIn | null = null;
+
+function makeInflight(): InflightSignIn {
+  const teardowns: Array<() => void | Promise<void>> = [];
+  const self: InflightSignIn = {
+    aborted: false,
+    pushTeardown(t) {
+      teardowns.push(t);
+    },
+    async abort() {
+      if (self.aborted) return;
+      self.aborted = true;
+      // LIFO so we close the most-recently-acquired resource first
+      // — typically the transport / RTCPeerConnection — and unwind
+      // backwards through signaling, QR, draft state.
+      while (teardowns.length) {
+        const t = teardowns.pop();
+        try {
+          await t?.();
+        } catch {
+          /* swallow — best-effort cleanup */
+        }
+      }
+    },
+  };
+  return self;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Public façade
 // ─────────────────────────────────────────────────────────────────────
 
@@ -136,6 +215,23 @@ export class PrsonLogin {
    * one of the four `ExpiryReason` triggers.
    */
   static async signIn(opts: SignInOptions = {}): Promise<SignInResult> {
+    // ─── concurrency guard ──────────────────────────────────────
+    // Tear down any prior in-flight sign-in BEFORE we mint a fresh
+    // draft. Awaited so the prior's QR / signaling are gone before
+    // the new one mounts — gives the user immediate visual
+    // confirmation that the second click cancelled the first. If
+    // there's no prior, `prior?.abort()` is a cheap no-op.
+    const prior = _inflight;
+    if (prior) await prior.abort();
+    const me = makeInflight();
+    _inflight = me;
+
+    /** Throw `LoginAbortedError` if a newer signIn() has displaced us. */
+    const checkAborted = () => {
+      if (me.aborted) throw new LoginAbortedError();
+    };
+
+    try {
     const domain = opts.domain ?? window.location.origin.replace(/^https?:\/\//, "");
     const ttlMaxMinutes = Math.min(
       Math.max(opts.ttlMinutes ?? DEFAULT_TTL_MINUTES, 1),
@@ -146,6 +242,7 @@ export class PrsonLogin {
     //    its envelope to. Stays in memory only — never written to
     //    storage, never crosses any network boundary.
     const ephKeys = await generateEphemeralKeypair();
+    checkAborted();
 
     // 2. Build the verifier request blob. The reqId is content-bound
     //    so the wallet sees the same canonical bytes the Worker stored
@@ -172,6 +269,7 @@ export class PrsonLogin {
     //    in the path — the Worker is the single API surface and waits
     //    for the wallet to claim before allocating real capacity.
     const draft = await createDraft(request);
+    checkAborted();
 
     // 4. Render the QR encoding the deep-link URL the wallet scans /
     //    the mobile browser taps.
@@ -185,6 +283,10 @@ export class PrsonLogin {
     });
     const qrMount = resolveMount(opts.ui?.mountQrInto);
     const qrHandle = qrMount ? renderLoginQr(qrUrl, qrMount, opts.ui?.theme ?? "auto") : null;
+    // Register QR teardown FIRST so an abort during signaling/connect
+    // immediately removes the on-screen artefact even before the
+    // network resources close.
+    if (qrHandle) me.pushTeardown(() => qrHandle.dispose());
 
     // 5. Open the WS to the Cloudflare Worker. The DO is in DRAFT until
     //    a wallet's /session/claim flips it to ACTIVE; we'll still
@@ -194,6 +296,8 @@ export class PrsonLogin {
       role: "browser",
       sigToken: draft.draftToken,
     });
+    me.pushTeardown(() => signaling.close());
+    checkAborted();
 
     // 6. Bring up the RTCPeerConnection + data channel. The browser
     //    side uses STUN only — relay capacity is allocated only after
@@ -206,11 +310,17 @@ export class PrsonLogin {
       signaling,
       role: "browser",
     });
+    // From here on, `transport` owns the signaling channel — its
+    // close() will close the WS too. Replace the prior signaling
+    // teardown so we don't double-close.
+    me.pushTeardown(() => transport.close());
+    checkAborted();
 
     // 7. Wait for the wallet's encrypted envelope on the data channel.
     //    The wallet emits exactly one `prson_vp_v1 / msg=presentation`
     //    on initial sign-in; renewals come later via the session handle.
     const first = await transport.awaitFirstMessage();
+    checkAborted();
     const envelope = await decryptEnvelope(first, ephKeys);
     if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
       throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
@@ -234,8 +344,13 @@ export class PrsonLogin {
       throw new Error(`Presentation rejected: ${verified.reason}`);
     }
 
-    // 9. Tear down the QR + WS now that the sign-in is complete. The
-    //    transport stays open for renewals; the session handle owns it.
+    // 9. Tear down the QR now that the sign-in is complete. The
+    //    transport stays open for renewals; the session handle owns
+    //    it from here on. We DON'T fire `transport.close()` — that
+    //    teardown stays registered until the `finally` block clears
+    //    the inflight slot, which happens AFTER this point but
+    //    BEFORE the session uses the transport (so an abort racing
+    //    a successful sign-in still wins until we resolve).
     qrHandle?.dispose();
 
     const session = new PrsonLoginSession({
@@ -258,6 +373,13 @@ export class PrsonLogin {
       credential: verified.credential,
       session,
     };
+    } finally {
+      // Release the slot ONLY if we still own it. If a newer signIn()
+      // displaced us mid-flight, `_inflight` already points at
+      // someone else; we mustn't clobber their entry. The displacing
+      // signIn() already called our `abort()`, so the teardowns ran.
+      if (_inflight === me) _inflight = null;
+    }
   }
 
   /**

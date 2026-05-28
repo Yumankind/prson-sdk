@@ -1,0 +1,49 @@
+{
+  "name": "@prson/login-sdk-ui",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Optional batteries-included UI for @prson/login-sdk: a styled, themed QR card with a TTL countdown + refresh affordance. Side-effect import that registers itself on window.__prsonLoginQrRenderer; the base SDK reads that global at signIn() time. Drop-in script tag; partners with their own UI can ignore this package entirely.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=dist/index.js --sourcemap",
+    "build:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login-ui.js --sourcemap",
+    "watch:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login-ui.js --sourcemap --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "peerDependencies": {
+    "@prson/login-sdk": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@prson/login-sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.5",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.4.0"
+  },
+  "keywords": [
+    "prson",
+    "sign-in",
+    "qr-code",
+    "ui",
+    "passwordless"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Yumankind/prson-network",
+    "directory": "login-sdk/packages/browser-ui"
+  },
+  "license": "TBD"
+}

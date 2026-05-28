@@ -7,6 +7,14 @@
 
 ---
 
+## Packages
+
+| Package | Status | What it ships |
+|---|---|---|
+| [`@prson/login-sdk`](packages/browser) | base, headless | The crypto, signaling, and encryption pipeline. Reads `window.__prsonLoginQrRenderer` at `signIn()` time; bring your own QR drawing or use the companion below. |
+| [`@prson/login-sdk-ui`](packages/browser-ui) | optional UI | Drop-in styled QR card with TTL countdown + refresh affordance. Side-effect registers itself on the global the base SDK reads; one extra `<script>` tag and `signIn()` Just Works. Partners with their own design system can omit it. |
+| [`@prson/login-verifier`](packages/verifier-node) | server-side helper | Re-verifies an SD-JWT-VC presentation on the verifier's backend. Independent of the relay path. |
+
 ## 0. Notation
 
 - `b64u(x)`     — base64url(x), no padding (`=` characters stripped).

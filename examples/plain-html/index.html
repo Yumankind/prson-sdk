@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Sign in with Prson — plain-HTML example</title>
     <style>
+      /*
+       * Page-level chrome ONLY. The QR card + countdown + refresh
+       * affordance are styled by `@prson/login-sdk-ui`, which
+       * injects its own `<style data-prson-login-ui>` block on
+       * import. Don't duplicate those rules here — partner-side
+       * overrides should target `[data-prson-login-ui]` selectors
+       * with higher specificity instead.
+       */
       :root {
         color-scheme: light dark;
         font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
@@ -16,7 +24,6 @@
         --shadow: 0 8px 24px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.05);
         --accent: #111;
         --accent-on: #ffffff;
-        --radius: 16px;
       }
       @media (prefers-color-scheme: dark) {
         :root {
@@ -73,134 +80,8 @@
       .signin:hover { opacity: 0.92; }
       .signin:active { transform: translateY(1px); }
       .signin:disabled { opacity: 0.5; cursor: not-allowed; }
-
-      /* ── QR card ─────────────────────────────────────────────── */
       #prson-login-qr { display: contents; }
-      .prson-qr-card {
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        box-shadow: var(--shadow);
-        padding: 24px;
-        margin-top: 28px;
-        width: 320px;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 16px;
-        animation: fadeUp 220ms ease-out;
-      }
-      @keyframes fadeUp {
-        from { opacity: 0; transform: translateY(6px); }
-        to   { opacity: 1; transform: none; }
-      }
-      .prson-qr-card-head {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 4px;
-        text-align: center;
-      }
-      .prson-qr-card-title {
-        font-weight: 600;
-        font-size: 15px;
-        letter-spacing: -0.2px;
-      }
-      .prson-qr-card-subtitle {
-        font-size: 12.5px;
-        color: var(--muted);
-        line-height: 1.45;
-      }
-      .prson-qr-frame {
-        position: relative;
-        padding: 14px;
-        border-radius: 12px;
-        background: #ffffff; /* QR contrast — always-white, even in dark mode */
-        box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.04);
-      }
-      .prson-qr-frame svg {
-        display: block;
-        width: 240px;
-        height: 240px;
-      }
-      .prson-qr-foot {
-        font-size: 11.5px;
-        color: var(--muted);
-        line-height: 1.4;
-        text-align: center;
-        max-width: 260px;
-      }
-      .prson-qr-foot a {
-        color: var(--fg);
-        text-decoration: underline;
-        text-underline-offset: 2px;
-      }
 
-      /* Countdown sits between the QR and the footer. The progress
-         bar shrinks left-to-right; the colour shifts amber→red in the
-         last 15s so a glance at the card tells you "hurry" without
-         reading the digits. */
-      .prson-qr-countdown {
-        width: 100%;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 6px;
-      }
-      .prson-qr-countdown-label {
-        font-size: 11.5px;
-        color: var(--muted);
-        letter-spacing: 0.2px;
-        font-variant-numeric: tabular-nums;
-      }
-      .prson-qr-countdown-track {
-        width: 100%;
-        height: 3px;
-        background: var(--border);
-        border-radius: 2px;
-        overflow: hidden;
-      }
-      .prson-qr-countdown-fill {
-        height: 100%;
-        background: var(--accent);
-        width: 100%;
-        transform-origin: left center;
-        transition: transform 1s linear, background-color 0.3s ease;
-      }
-      .prson-qr-countdown[data-state="warn"] .prson-qr-countdown-fill {
-        background: #e07b00;
-      }
-      .prson-qr-countdown[data-state="warn"] .prson-qr-countdown-label {
-        color: #e07b00;
-      }
-      .prson-qr-countdown[data-state="expired"] .prson-qr-countdown-fill {
-        background: #b02a2a;
-      }
-      .prson-qr-countdown[data-state="expired"] .prson-qr-countdown-label {
-        color: #b02a2a;
-      }
-
-      /* Expired state — the QR fades, gets a frosted overlay, and the
-         footer swaps to a refresh prompt. */
-      .prson-qr-frame { transition: opacity 0.2s ease; }
-      .prson-qr-card[data-expired="1"] .prson-qr-frame {
-        opacity: 0.35;
-        filter: grayscale(1);
-      }
-      .prson-qr-refresh {
-        font-size: 13px;
-        font-weight: 500;
-        padding: 8px 16px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        background: var(--card);
-        color: var(--fg);
-        cursor: pointer;
-        margin-top: 2px;
-      }
-      .prson-qr-refresh:hover { background: var(--bg); }
-
-      /* ── Result panel ─────────────────────────────────────────── */
       .result-card {
         margin-top: 40px;
         max-width: 560px;
@@ -250,209 +131,32 @@
     </div>
 
     <!--
-      ─────────────────────────────────────────────────────────────────
-      QR renderer — installed on `window` BEFORE the SDK calls signIn.
+      ─── @prson/login-sdk-ui ────────────────────────────────────────
+      Optional companion bundle. Side-effect import: registers a styled
+      QR card renderer on `window.__prsonLoginQrRenderer` before the
+      base SDK calls signIn(). If you remove this script tag the
+      base SDK still works — it'll fall back to a text-only QR url
+      with a console warning.
 
-      The SDK delegates rendering via `window.__prsonLoginQrRenderer`
-      so partner sites can bring their own QR library and styling
-      without ballooning the SDK bundle. Here we use `qrcode` from
-      esm.sh + a tiny opinionated card. Strips down to nothing if
-      removed; the SDK's text-only fallback would kick back in.
-      ─────────────────────────────────────────────────────────────────
+      Built from `login-sdk/packages/browser-ui` via:
+        cd login-sdk/packages/browser-ui
+        npm run build:example
+      ────────────────────────────────────────────────────────────────
     -->
-    <script type="module">
-      import QRCode from "https://esm.sh/qrcode@1.5.4?bundle";
-
-      // Draft TTL in seconds — must mirror DRAFT_TTL_SECONDS in the
-      // signaling Worker. The QR is generated against a server-stamped
-      // serverTs we pull out of the URL's `t=` query param, so the
-      // countdown matches what the Worker will actually accept.
-      const DRAFT_TTL_SECONDS = 60;
-      // Warn-state threshold (seconds remaining). When the timer drops
-      // below this the bar + label flip amber.
-      const COUNTDOWN_WARN_SECONDS = 15;
-
-      /** Extract the server-issued timestamp from the QR URL. */
-      function extractServerTs(url) {
-        try {
-          // The URL is either `prson://login/v1?...` or
-          // `https://app.prson.net/login/v1?...`; both carry `t=` in
-          // the query string. The custom scheme isn't a valid base
-          // for URL() in some browsers, so parse manually as a
-          // belt-and-suspenders fallback.
-          try {
-            const parsed = new URL(url);
-            const t = parsed.searchParams.get("t");
-            if (t) return parseInt(t, 10);
-          } catch { /* fall through */ }
-          const m = url.match(/[?&]t=([0-9]+)/);
-          return m ? parseInt(m[1], 10) : null;
-        } catch {
-          return null;
-        }
-      }
-
-      window.__prsonLoginQrRenderer = (url, mount, _theme) => {
-        // We don't honour the `theme` parameter for the QR itself —
-        // QR codes scan more reliably when they're always
-        // dark-on-white regardless of the surrounding page palette.
-        // The card chrome around the QR follows `prefers-color-scheme`
-        // via CSS custom properties, which is enough.
-
-        const card = document.createElement("div");
-        card.className = "prson-qr-card";
-
-        const head = document.createElement("div");
-        head.className = "prson-qr-card-head";
-        const title = document.createElement("div");
-        title.className = "prson-qr-card-title";
-        title.textContent = "Scan with your Prson wallet";
-        const subtitle = document.createElement("div");
-        subtitle.className = "prson-qr-card-subtitle";
-        subtitle.textContent =
-          "Open the app and point your camera at this code.";
-        head.append(title, subtitle);
-
-        const frame = document.createElement("div");
-        frame.className = "prson-qr-frame";
-
-        QRCode.toString(
-          url,
-          {
-            type: "svg",
-            errorCorrectionLevel: "M",
-            margin: 1,
-            color: {
-              // High-contrast QR — always dark-on-white regardless of
-              // the surrounding theme. Phone cameras struggle with
-              // inverted QRs and some wallets refuse to scan them.
-              dark: "#000000",
-              light: "#FFFFFF",
-            },
-          },
-          (err, svgString) => {
-            if (err) {
-              frame.textContent = "QR render failed";
-              return;
-            }
-            frame.innerHTML = svgString;
-          },
-        );
-
-        // ── Countdown row ────────────────────────────────────────
-        // Two-line widget — a tabular-numbers label ("Expires in 0:42")
-        // above a thin progress bar that shrinks left→right. Both
-        // recolour in the warn / expired states.
-        const countdown = document.createElement("div");
-        countdown.className = "prson-qr-countdown";
-        const countdownLabel = document.createElement("div");
-        countdownLabel.className = "prson-qr-countdown-label";
-        const track = document.createElement("div");
-        track.className = "prson-qr-countdown-track";
-        const fill = document.createElement("div");
-        fill.className = "prson-qr-countdown-fill";
-        track.append(fill);
-        countdown.append(countdownLabel, track);
-
-        const foot = document.createElement("div");
-        foot.className = "prson-qr-foot";
-        const footActive =
-          'Or <a href="' +
-          url +
-          '">tap here</a> if you\'re on the same device.';
-        foot.innerHTML = footActive;
-
-        card.append(head, frame, countdown, foot);
-        mount.append(card);
-
-        // ── Countdown logic ──────────────────────────────────────
-        // Anchor the deadline to the server-issued timestamp when we
-        // can. Falls back to "now + DRAFT_TTL_SECONDS" if the URL
-        // doesn't carry t= (legacy QRs / weird parsing failure).
-        const serverTs = extractServerTs(url);
-        const deadlineMs = serverTs
-          ? serverTs * 1000 + DRAFT_TTL_SECONDS * 1000
-          : Date.now() + DRAFT_TTL_SECONDS * 1000;
-
-        let tickHandle = null;
-        let expired = false;
-
-        function fmt(seconds) {
-          const s = Math.max(0, seconds);
-          const m = Math.floor(s / 60);
-          const r = s % 60;
-          return m + ":" + String(r).padStart(2, "0");
-        }
-
-        function tick() {
-          const remainingMs = deadlineMs - Date.now();
-          const remaining = Math.max(0, Math.ceil(remainingMs / 1000));
-          countdownLabel.textContent = remaining > 0
-            ? "Expires in " + fmt(remaining)
-            : "QR code expired";
-          // Bar width = remaining / total. The 1s linear transition
-          // on the fill smooths over the ticks so the bar appears
-          // to drain continuously rather than step.
-          const ratio = Math.max(0, Math.min(1, remainingMs / (DRAFT_TTL_SECONDS * 1000)));
-          fill.style.transform = "scaleX(" + ratio + ")";
-
-          if (remaining <= 0 && !expired) {
-            expired = true;
-            countdown.dataset.state = "expired";
-            card.dataset.expired = "1";
-            // Replace the same-device-tap link with a Refresh button.
-            foot.innerHTML = "";
-            const note = document.createElement("div");
-            note.textContent = "This code is no longer valid.";
-            const refresh = document.createElement("button");
-            refresh.className = "prson-qr-refresh";
-            refresh.type = "button";
-            refresh.textContent = "Generate a new code";
-            refresh.addEventListener("click", () => {
-              // Trigger the outer Sign-in button. The SDK's prior
-              // session is still in flight from the SDK's perspective
-              // — but a click re-enters `signIn`, which tears the
-              // current QR down via dispose() before mounting a new
-              // one with a fresh serverTs.
-              document.querySelector("#signin")?.click();
-            });
-            foot.append(note, refresh);
-          } else if (remaining <= COUNTDOWN_WARN_SECONDS && remaining > 0) {
-            countdown.dataset.state = "warn";
-          } else if (remaining > COUNTDOWN_WARN_SECONDS) {
-            countdown.dataset.state = "";
-          }
-        }
-
-        tick();
-        tickHandle = window.setInterval(tick, 1000);
-
-        // Tell the SDK how to tear the QR back down when the session
-        // completes (or the user cancels). Stopping the interval here
-        // is critical — without it the ticker keeps running after
-        // the card detaches, leaking a setInterval per sign-in.
-        return {
-          dispose() {
-            if (tickHandle != null) {
-              window.clearInterval(tickHandle);
-              tickHandle = null;
-            }
-            card.remove();
-          },
-        };
-      };
-    </script>
+    <script type="module" src="./prson-login-ui.js"></script>
 
     <script type="module">
-      // Local development bundle produced via:
+      // ─── @prson/login-sdk (the base, headless SDK) ───────────────
+      // Built from `login-sdk/packages/browser` via:
       //   cd login-sdk/packages/browser
       //   npx esbuild src/index.ts --bundle --format=esm \
       //     --target=es2020 --platform=browser \
       //     --outfile=../../examples/plain-html/prson-login.js \
       //     --sourcemap
       //
-      // In production, host the bundle on your own CDN or npm-install
-      // `@prson/login-sdk` and import the dist entry from there.
+      // In production: host the bundle on your own CDN or
+      // npm-install `@prson/login-sdk` + (optional)
+      // `@prson/login-sdk-ui`.
       import { PrsonLogin } from "./prson-login.js";
 
       const out = document.querySelector("#out");
@@ -490,6 +194,16 @@
         } finally {
           btn.disabled = false;
         }
+      });
+
+      // ─── Refresh contract ────────────────────────────────────────
+      // When the QR's TTL expires the UI's refresh button dispatches
+      // a bubbling `prson-login-refresh-requested` event. We listen
+      // at document level and re-click the main Sign-in button —
+      // the SDK tears the prior card down via dispose() and mounts
+      // a new one with a fresh server timestamp.
+      document.addEventListener("prson-login-refresh-requested", () => {
+        btn.click();
       });
     </script>
   </body>
