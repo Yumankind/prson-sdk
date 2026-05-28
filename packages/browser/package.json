@@ -1,0 +1,46 @@
+{
+  "name": "@prson/login-sdk",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Frontend-first sign-in SDK that delivers a verifiable credential from a Prson mobile wallet to your website over an end-to-end-encrypted WebRTC channel. See README.md.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'TODO: vitest' && exit 0"
+  },
+  "peerDependencies": {
+    "livekit-client": "^2.x"
+  },
+  "dependencies": {
+    "@stablelib/nacl": "^1.0.4",
+    "@stablelib/random": "^1.0.2",
+    "@stablelib/base64": "^1.0.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "keywords": [
+    "sd-jwt-vc",
+    "verifiable-credentials",
+    "openid4vp",
+    "passwordless",
+    "prson",
+    "webrtc",
+    "livekit",
+    "sign-in"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Yumankind/prson-network",
+    "directory": "login-sdk/packages/browser"
+  },
+  "license": "TBD"
+}

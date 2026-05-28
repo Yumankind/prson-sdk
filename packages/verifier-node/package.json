@@ -1,0 +1,41 @@
+{
+  "name": "@prson/login-verifier",
+  "version": "0.1.0",
+  "description": "Node.js verifier for SD-JWT-VC presentations issued by the Prson notary and delivered via @prson/login-sdk. Pure-function; no Prson account or API key required.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'TODO: vitest' && exit 0"
+  },
+  "dependencies": {
+    "jose": "^5.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "sd-jwt-vc",
+    "verifiable-credentials",
+    "prson",
+    "did-web",
+    "verifier"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Yumankind/prson-network",
+    "directory": "login-sdk/packages/verifier-node"
+  },
+  "license": "TBD"
+}

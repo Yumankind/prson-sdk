@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in with Prson — plain-HTML example</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { max-width: 540px; margin: 60px auto; padding: 0 20px; }
+      h1 { font-weight: 600; letter-spacing: -0.4px; }
+      button { font-size: 16px; padding: 10px 18px; border-radius: 8px; border: 0; cursor: pointer; }
+      #prson-login-qr { margin-top: 24px; min-height: 280px; }
+      pre { background: #11111122; padding: 12px; border-radius: 8px; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Sign in with Prson</h1>
+    <p>
+      This is a static page. No backend. The SDK opens an end-to-end-encrypted
+      channel to your phone, the phone returns a verifiable credential, and we
+      log it here.
+    </p>
+    <p>
+      Production use: <strong>also</strong> POST <code>result.sdJwtVc</code>
+      to your backend and re-verify with
+      <code>@prson/login-verifier</code> before granting any access.
+    </p>
+
+    <button id="signin">Sign in</button>
+    <div id="prson-login-qr"></div>
+
+    <h2>Result</h2>
+    <pre id="out">(awaiting a successful sign-in)</pre>
+
+    <script type="module">
+      // In production, host the SDK on your own CDN OR npm-install.
+      // The placeholder URL below is for illustration; phase 2 ships
+      // the actual bundle.
+      import { PrsonLogin } from "https://cdn.prson.net/login-sdk/0.x/index.js";
+
+      document.querySelector("#signin").addEventListener("click", async () => {
+        try {
+          const result = await PrsonLogin.signIn({
+            required: { minVerificationLevel: 5, predicates: ["age_gte_18"] },
+            ttlMinutes: 10,
+            ui: { mountQrInto: "#prson-login-qr" },
+          });
+
+          document.querySelector("#out").textContent =
+            JSON.stringify(
+              {
+                cnfJwkX: result.cnf.jwk.x,
+                vct: result.credential.vct,
+                expiresAt: new Date(result.credential.expiresAt).toISOString(),
+                claims: result.claims,
+              },
+              null,
+              2,
+            );
+
+          result.session.onRenewed((fresh) => {
+            document.querySelector("#out").textContent +=
+              `\n\nrenewed at ${new Date().toISOString()}`;
+          });
+          result.session.onExpiry((reason) => {
+            document.querySelector("#out").textContent +=
+              `\n\nexpired: ${reason}`;
+          });
+        } catch (err) {
+          document.querySelector("#out").textContent = `error: ${err.message}`;
+        }
+      });
+    </script>
+  </body>
+</html>
