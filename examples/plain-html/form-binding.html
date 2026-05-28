@@ -151,6 +151,45 @@
         border-radius: 999px;
         margin-left: 8px;
       }
+      .signed-in-card {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin-top: 10px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .signed-in-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #10b981;
+        box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.15);
+        flex-shrink: 0;
+      }
+      .signed-in-text {
+        flex: 1;
+        min-width: 0;
+      }
+      .signed-in-title {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .signed-in-summary {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 2px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #signout {
+        margin: 0;
+        padding: 6px 12px;
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>
@@ -162,18 +201,30 @@
         Open the wallet, scan the QR, then try each demo below.
       </p>
 
-      <!-- 1. Sign-in entry point: the QR mounts here on demand. -->
+      <!-- 1. Sign-in entry point: QR opens in a modal overlay. -->
       <section>
         <h2>1. Sign in <span class="pill">required first</span></h2>
         <p class="muted">
-          Click sign in once; the QR appears below. Once the wallet
-          delivers the credential, the buttons in the sections that
-          follow become enabled and route through that session.
+          Click sign in — the QR appears in a centred modal. Press
+          Esc or click outside to cancel. Once the wallet delivers the
+          credential, the modal closes and the buttons in the
+          sections below become enabled.
         </p>
         <div class="signin-host">
           <button id="signin" type="button">Sign in with Prson</button>
         </div>
-        <div id="qr"></div>
+        <div id="signed-in-state" hidden>
+          <div class="signed-in-card">
+            <span aria-hidden="true" class="signed-in-dot"></span>
+            <div class="signed-in-text">
+              <div class="signed-in-title">Signed in</div>
+              <div id="signed-in-summary" class="signed-in-summary"></div>
+            </div>
+            <button id="signout" type="button" class="secondary">
+              Sign out
+            </button>
+          </div>
+        </div>
       </section>
 
       <!-- 2. bindInput on a single email field. -->

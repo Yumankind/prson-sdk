@@ -3443,6 +3443,37 @@ async function establishTransport(opts) {
 }
 
 // src/qr.ts
+function createModalQrMount(opts) {
+  const scrim = document.createElement("div");
+  scrim.setAttribute("data-prson-login-modal", "1");
+  scrim.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.5);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;";
+  const mount = document.createElement("div");
+  mount.setAttribute("data-prson-login-modal-mount", "1");
+  mount.style.cssText = "display:flex;align-items:center;justify-content:center;";
+  scrim.append(mount);
+  document.body.append(scrim);
+  let disposed = false;
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    document.removeEventListener("keydown", onKey, true);
+    scrim.remove();
+  }
+  function onKey(e) {
+    if (e.key === "Escape" || e.key === "Esc") {
+      e.preventDefault();
+      e.stopPropagation();
+      opts.onDismiss();
+    }
+  }
+  scrim.addEventListener("click", (e) => {
+    if (e.target === scrim || e.target === mount) {
+      opts.onDismiss();
+    }
+  });
+  document.addEventListener("keydown", onKey, true);
+  return { mount, dispose };
+}
 function renderLoginQr(url, mount, theme) {
   const override = window.__prsonLoginQrRenderer;
   if (override) return override(url, mount, theme);
@@ -4075,9 +4106,25 @@ var PrsonLogin = class {
         request,
         serverTs: draft.serverTs
       });
-      const qrMount = resolveMount(opts.ui?.mountQrInto);
-      const qrHandle = qrMount ? renderLoginQr(qrUrl, qrMount, opts.ui?.theme ?? "auto") : null;
+      const explicitMount = resolveMount(opts.ui?.mountQrInto);
+      let qrHandle = null;
+      let modalHandle = null;
+      if (explicitMount) {
+        qrHandle = renderLoginQr(qrUrl, explicitMount, opts.ui?.theme ?? "auto");
+      } else {
+        modalHandle = createModalQrMount({
+          onDismiss: () => {
+            void me.abort();
+          }
+        });
+        qrHandle = renderLoginQr(
+          qrUrl,
+          modalHandle.mount,
+          opts.ui?.theme ?? "auto"
+        );
+      }
       if (qrHandle) me.pushTeardown(() => qrHandle.dispose());
+      if (modalHandle) me.pushTeardown(() => modalHandle.dispose());
       const signaling = await connectSignaling({
         url: draft.signalingWss,
         role: "browser",
