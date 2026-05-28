@@ -275,6 +275,14 @@
       </section>
     </main>
 
+    <!--
+      Side-effect import: the UI bundle registers
+      `window.__prsonLoginQrRenderer` so signIn() renders the styled
+      card with a TTL countdown + "Generate a new code" button. Without
+      this, the SDK falls back to a plain-text QR URL with no refresh.
+    -->
+    <script type="module" src="./prson-login-ui.js"></script>
+
     <script type="module">
       import {
         PrsonLogin,
@@ -377,6 +385,17 @@
         });
         log("bindMouse magic reply", reply);
         controller.dispose();
+      });
+
+      // ─── Refresh contract ────────────────────────────────────────
+      // When the QR's TTL expires, the UI bundle's card swaps to a
+      // "Generate a new code" button which dispatches a bubbling
+      // `prson-login-refresh-requested` event. Listen at document
+      // level and re-click the main Sign-in button — the SDK tears
+      // the prior card down via dispose() and mounts a new one with a
+      // fresh server timestamp.
+      document.addEventListener("prson-login-refresh-requested", () => {
+        document.getElementById("signin").click();
       });
     </script>
   </body>

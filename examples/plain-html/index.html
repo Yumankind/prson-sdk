@@ -167,7 +167,7 @@
         out.textContent = "starting…";
         try {
           const result = await PrsonLogin.signIn({
-            required: { minVerificationLevel: 5, predicates: ["age_gte_18"] },
+            required: { },
             ttlMinutes: 10,
             ui: { mountQrInto: "#prson-login-qr", theme: "auto" },
           });
