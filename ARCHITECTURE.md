@@ -36,31 +36,88 @@ on the fly; the browser keeps X25519 (KX) and never signs with it.
 ## 2. Surfaces
 
 ```
-                                     ┌────────────────────────────────┐
-                                     │ Prson cloud functions          │
-                                     │  · createLoginSession (callable│
-                                     │     unauth — anyone can mint)  │
-                                     │  · resolveLoginSession (callable│
-                                     │     wallet-auth, room metadata)│
-                                     │  · LiveKit room provisioning   │
-                                     └────────────────────────────────┘
-                                                  ▲
-            ┌─────────────────────────────────────┴────────────────────────────────┐
-            │                                                                      │
-            ▼                                                                      ▼
-┌──────────────────────────────┐                                ┌──────────────────────────────┐
-│ Browser (SDK)                │                                │ Mobile wallet                │
-│  · @prson/login-sdk          │                                │  · IdentityCredentialService │
-│  · X25519 ephemeral keypair  │ ◄═════ E2E-encrypted via NaCl  │  · Ed25519 identity key      │
-│  · LiveKit subscriber        │      box over LiveKit data ch  │  · LiveKit subscriber        │
-│  · QR renderer + verifier    │                                │  · Login drawer UI           │
-└──────────────────────────────┘                                └──────────────────────────────┘
+   ┌────────────────────────────────┐        ┌────────────────────────────────┐
+   │ Prson Firebase functions       │        │ Cloudflare Workers (edge)      │
+   │  · createLoginSession (unauth, │        │  · wss://signaling.prson.net   │
+   │     IP-rate-limited; returns   │        │     /login/v1/<reqId>          │
+   │     reqId + signed sig token   │        │  · Durable Object per reqId    │
+   │     + TURN creds)              │        │     · offer + answer           │
+   │  · resolveLoginSession (wallet │        │     · iceCandidates[]          │
+   │     auth; returns canonical    │        │     · auto-destroys at 15 min  │
+   │     request + TURN creds)      │        │  · Cloudflare TURN (cheap relay│
+   │  · issueIdentityCredentialFor- │        │     on NAT fallback only)      │
+   │     Domain (per-domain rekey)  │        │                                │
+   └────────────────────────────────┘        └────────────────────────────────┘
+              ▲                                          ▲
+              │ HTTPS callable                           │ WebSocket
+              │                                          │ (signed sigToken
+              │                                          │  for browser;
+              │                                          │  Firebase ID token
+              │                                          │  for wallet)
+              │                                          │
+   ┌──────────┴───────────────────┐          ┌───────────┴────────────────┐
+   │ Browser (SDK)                │          │ Mobile wallet              │
+   │  · X25519 ephemeral keypair  │          │  · Ed25519 identity key    │
+   │  · QR renderer + verifier    │          │  · per-domain rekey HKDF   │
+   │  · RTCPeerConnection         │ ◄══ NaCl ══► RTCPeerConnection         │
+   │    + TURN ICE servers        │   box      │  + TURN ICE servers      │
+   └──────────────────────────────┘  P2P data  └────────────────────────────┘
+                                     channel
 ```
 
-Prson's LiveKit cluster is a **dumb relay** — the payload that crosses
-it is encrypted to the browser's ephemeral pk; Prson never holds the
-plaintext. The LiveKit token is bound to a one-shot room with no
-recording, expires within the session TTL.
+Two separate planes:
+
+1. **Cloudflare Worker (single API surface for the relay)** — exposes
+   three routes: `POST /session/draft` (anonymous, IP-rate-limited),
+   `POST /session/claim` (wallet-signed via Ed25519), and the
+   `wss://…/login/v1/<reqId>` WebSocket upgrade. Browser SDK + wallet
+   talk to the Worker directly; **no Firebase Functions in the path**.
+   The Worker is the only place Cloudflare TURN credentials are minted
+   (so the API token never leaves it).
+2. **Firebase callables** — only for the credential-issuance path
+   (`issueIdentityCredential` / `issueIdentityCredentialForDomain` /
+   `revokeIdentityCredential`). Those are wallet-only calls,
+   Firebase-authenticated, and unrelated to the relay.
+
+The transport is **WebRTC peer-to-peer with Cloudflare TURN as a
+fallback relay** — chosen over a hosted SFU because we're moving
+~50 KB of data-channel messages per session, not media. Cost
+profile is ~1000× lower (see [`SECURITY.md` §6](./SECURITY.md)).
+
+Cloudflare's TURN only sees relayed bytes — which are NaCl-boxed
+ciphertext anyway — and only when direct P2P is impossible. Most
+users get a direct connection; the credential never traverses Prson's
+or Cloudflare's servers in plaintext.
+
+### 2.1 Per-domain holder key (cnf.jwk) rekey
+
+The holder's `cnf.jwk` in the VC is **derived per-verifier-domain**:
+
+```
+sigSeed_for_domain = HKDF-SHA256(
+  ikm   = identityEd25519PrivateKey,
+  salt  = "prson-login-rekey/v1",
+  info  = utf8(verifier_domain),
+  len   = 32,
+)
+sigKey_for_domain  = Ed25519.fromSeed(sigSeed_for_domain)
+```
+
+Consequences:
+
+- **Same user on the same site** → always the same `cnf.jwk.x`. The
+  site uses it as a stable per-user identifier.
+- **Same user on different sites** → unrelated public keys. No
+  observer (including Prson) can link a holder across sites by
+  comparing `cnf.jwk` values.
+- **Migration-safe**: the per-domain key is fully determined by the
+  identity key (which is mnemonic-recoverable), so a new device
+  derives the same per-domain key on a fresh install.
+
+The VC the wallet presents is **re-issued on-demand** with the
+per-domain `cnf.jwk` via the `issueIdentityCredentialForDomain`
+callable (server reuses the existing notary signing path; the only
+difference is the `cnf` bound into the JWS).
 
 ## 3. Flows
 
@@ -79,32 +136,60 @@ recording, expires within the session TTL.
        browserPk: b64u(ephKeys.publicKey),
      }
 
-1. Browser → Prson functions: createLoginSession({ request })
-   ←  { roomName, livekitToken, expiresAt }       // ≤ 15 min
-   (Anyone can call this; abuse-protected by IP rate limit + the request
-    being content-bound: createLoginSession hashes `request` and stores it
-    so the room name is reproducible / dedupable.)
+1. Browser → Cloudflare Worker: POST /session/draft  { request }
+   ←  { reqId,
+        draftToken,                                  // role-tagged HMAC, browser
+        signalingWss: "wss://signaling.prson.net/login/v1/<reqId>",
+        draftExpiresAt }                             // 60 s
+   (Anonymous, IP-rate-limited at 30 drafts/IP/min in a KV-backed
+    counter. The Worker stores `canonical(request)` content-addressed
+    in the Durable Object — the wallet later proves consent by signing
+    the matching tuple. NO TURN allocated yet; the relay capacity is
+    only allocated once a wallet signs §step 3.)
 
 2. Browser:
-   - Joins LiveKit room with livekitToken (subscriber + publisher of
-     data channel).
+   - Creates RTCPeerConnection with **STUN only** (the browser side
+     does not allocate any TURN relay — see §6).
+   - Creates a data channel ("prson-login").
+   - Opens WebSocket to signalingWss with draftToken in
+     Sec-WebSocket-Protocol.
+   - Generates SDP offer → sends as { msg: "offer", sdp } over the WS.
+   - As ICE candidates trickle in → sends as { msg: "candidate", ... }.
+   - Listens for the wallet's { msg: "answer", sdp } and
+     { msg: "candidate", ... } on the same WS (cached by the DO until
+     a wallet joins).
    - Renders QR encoding the deep-link URL:
        prson://login/v1?
          s=<reqId>&
-         r=<roomName>&
-         k=<livekitToken_for_wallet>&         // separate, short-TTL
          p=<browserPk>&
          n=<nonce>&
          d=<domain>&
          req=<b64u(request)>
-   - Listens on the LiveKit data channel for "prson_vp_v1" messages.
 
-3. Wallet:
-   - User scans QR (or taps a same-device deep link with the same URL).
-   - Wallet calls resolveLoginSession({ reqId }) to double-check the
-     session is still alive on the server-side and pull canonical
-     metadata (so a tampered QR can't lie about the domain). Server
-     returns the SAME request payload it received in step 1.
+3. Wallet (on Approve):
+   - User scans QR (or taps a same-device deep link).
+   - Wallet signs the claim tuple with its persistent identity Ed25519
+     key:
+       sigBytes = Ed25519.sign(
+         "prson-login-claim/v1\n" + reqId + "\n" + walletPkX + "\n" +
+           ts + "\n" + domain
+       )
+   - Wallet calls POST /session/claim on the Worker with
+     { reqId, walletPk: <Ed25519 OKP JWK>, ts, domain, signature }.
+     The Worker:
+       · verifies the Ed25519 signature against `walletPk`,
+       · echoes-checks the domain against the stored draft (anti-tamper),
+       · promotes the DO from DRAFT → ACTIVE (resetting the alarm to a
+         full 15-min TTL),
+       · mints Cloudflare TURN credentials (the API token is a Worker
+         secret; the wallet never sees the long-lived secret).
+     Worker returns { request, walletSessionToken, signalingWss, turn,
+                       expiresAt }.
+   - Wallet derives the per-domain holder key:
+       sigSeed = HKDF(identityKey, salt="prson-login-rekey/v1", info=domain)
+       sigKey  = Ed25519.fromSeed(sigSeed)
+     and asks the Firebase notary to re-issue the chosen VC with the
+     matching cnf.jwk via issueIdentityCredentialForDomain (see §5).
    - Wallet shows the login drawer:
         Sign in to <domain>?
         Required: <required claims + predicates>
@@ -112,32 +197,33 @@ recording, expires within the session TTL.
         Disclosing: <toggle list>           [...]
         Credential will be valid for <ttlMinutes> min      [renew]
         [Approve]  [Decline]
+   - On Approve: wallet sets up its own RTCPeerConnection (with TURN
+     creds from /session/claim), opens its own WS to signalingWss using
+     walletSessionToken in Sec-WebSocket-Protocol, exchanges SDP answer
+     + ICE candidates with the browser.
 
-4. Wallet (on Approve):
+4. Wallet (on Approve, after WebRTC connection is established):
    - presentationPrefix = presentSdJwt(storedSdJwt, chosenClaimNames)
        → "<JWS>~<d_i>~…~"
    - kbJwt = SdJwtKb.buildAndSign({
         presentationPrefix,
         audience: "https://<domain>",
         nonce,
-        signer: Ed25519.sign(identityKey, _) })
-   - presentation = presentationPrefix + kbJwt   // SD-JWT-VC compact
+        signer: Ed25519.sign(sigKey, _) })            // per-domain key
+   - presentation = presentationPrefix + kbJwt
    - envelope = {
         v: "prson_vp_v1",
-        ttlMinutes,
-        domain,
-        issuedAt,
-        // The credential.
+        msg: "presentation",
+        ttlMinutes, domain, issuedAt,
         presentation,
-        // Optional on-demand fragments (age_gte_18 etc.) signed by the
-        // notary just-in-time per the user's predicate selections.
         fragments: [SignedFragment, ...]
      }
-   - ciphertext = box(walletEphSk, browserPk, JSON(envelope))
-   - Wallet publishes ciphertext on the LiveKit data channel.
+   - walletPerMsgSk = X25519.keypair()
+   - ciphertext = box(walletPerMsgSk, browserPk, JSON(envelope))
+   - Wallet sends ciphertext on the data channel.
 
 5. Browser:
-   - Receives ciphertext, decrypts with browserSk.
+   - Receives ciphertext, decrypts with browserSk + walletPerMsgPk.
    - Verifies the issuer JWS over the SD-JWT-VC (resolves issuer key
      via did:web:app.prson.net or /.well-known/jwt-vc-issuer).
    - Verifies the KB-JWT signature against the SD-JWT's cnf.jwk.
@@ -145,13 +231,16 @@ recording, expires within the session TTL.
              nonce === requested nonce,
              sd_hash === sha256(presentationPrefix).
    - Reassembles disclosed claims.
+   - Tears down the signaling Firestore doc.
    - Resolves the SDK's signIn() Promise with `result`.
 
 6. Session lifecycle:
-   - Wallet remembers the LiveKit room (it can rejoin to push renewals).
-   - Wallet stores an "Active web session" entry per (domain, identity).
+   - Wallet remembers the signalingDocPath (it can re-establish the
+     RTCPeerConnection for renewals by reposting an offer).
+   - Wallet stores an "Active web session" entry per (domain, identity)
+     locally — see "Active web sessions" tile on the identity screen.
    - At T-60s the wallet fires a local notification asking the user to
-     renew. On approve → repeat steps 4-5 with a fresh KB-JWT (new
+     renew. On approve → repeat steps 3-5 with a fresh KB-JWT (new
      nonce, refreshed iat). On ignore → session lapses; browser drops
      the cookie via the SDK's `onExpiry` callback.
 ```
@@ -289,16 +378,59 @@ type SignInResult = {
 
 ## 5. Server-side surface
 
-Two new cloud functions in `functions/api/login-sessions.js` (TODO —
-not built yet; see phase 2 in [README.md](./README.md)):
+### 5.1 Cloudflare Worker (login-sdk/infra/signaling-worker/)
+
+The **single API surface for the relay path**. Three routes plus a
+Durable Object per `reqId`.
+
+| Route | Auth | Description |
+|---|---|---|
+| `POST /session/draft` | anonymous, IP-rate-limited (default 30/IP/min, in a KV namespace) | Browser-initiated. Hashes `request` → `reqId`. Stores canonical bytes in the DO (status `DRAFT`). Returns `{reqId, draftToken, signalingWss, draftExpiresAt}`. **No TURN allocated.** Draft auto-expires in 60 s if not claimed. |
+| `POST /session/claim` | Ed25519 signature over the canonical claim tuple `"prson-login-claim/v1\n" + reqId + "\n" + walletPkX + "\n" + ts + "\n" + domain` | Wallet-initiated. Worker verifies signature, echoes-checks the domain against the stored draft, promotes DO to `ACTIVE`, mints Cloudflare TURN creds (Worker secret-bound `CF_TURN_KEY_ID` + `CF_TURN_API_TOKEN`), returns `{request, walletSessionToken, signalingWss, turn, expiresAt}`. |
+| `GET wss://…/login/v1/<reqId>` | role-tagged HMAC: `<exp>.<role>.<HMAC-SHA256(reqId\nrole\nexp)>` issued by the routes above | WS upgrade for either peer. The Worker reads the token from `Sec-WebSocket-Protocol`, verifies, then forwards into the DO. |
+
+Token formats (single Worker secret `SIG_TOKEN_HMAC_SECRET` signs both):
+
+- `draftToken` = HMAC over `reqId\n"browser"\n<exp=now+60s>`.
+- `walletSessionToken` = HMAC over `reqId\n"wallet"\n<exp=now+15min>`.
+
+Inside the Durable Object `LoginSession`:
+
+- `state = { status: "draft"|"active"|"closed", canonical, domain,
+             draftExp, sessionExp, walletPkX, cached: SignalingMessage[] }`
+- DRAFT alarm fires at `draftExp` → closes if unclaimed.
+- ACTIVE alarm fires at `sessionExp` (= 15 min after claim) → closes.
+- On WS upgrade: only the role from the verified token is allowed
+  (one socket per role; reconnects replace the prior).
+- Caches SDP offer/answer + ICE candidates so the late-joining wallet
+  receives the browser's already-emitted handshake immediately.
+
+Cost: ~$0.10 per 100K sessions (Workers $0.30/M req + Durable Objects
+$0.15/M req + tiny KV). Latency: <100 ms globally (DOs run at the
+edge nearest to whichever peer connects first).
+
+### 5.2 What stays on Firebase
+
+Only the **credential-issuance** path — unrelated to the relay:
 
 | Callable | Auth | Description |
 |---|---|---|
-| `createLoginSession` | unauthenticated, IP-rate-limited | Browser-initiated. Mints a one-shot LiveKit room + tokens for both browser (subscribe+publish data) and wallet (publish data). Stores `request` content-addressed. |
-| `resolveLoginSession` | wallet-authenticated | Wallet-initiated, called after QR scan. Returns the canonical `request` for verification against the QR. |
+| `issueIdentityCredential` | Firebase ID token (wallet) | Mints the VC. Existing callable; accepts an optional `cnfJwkOverride` + `bindToDomain` to swap the cnf for the per-domain Ed25519 key the wallet derives. |
+| `revokeIdentityCredential` | Firebase ID token (wallet) | Marks the wallet's credentials revoked. |
+| `jwtVcIssuerMetadata` | unauth (HTTPS) | Serves the JWKS at `/.well-known/jwt-vc-issuer`. |
 
-LiveKit token TTL is bounded by the session TTL (15 min hard ceiling)
-+ a 30-second grace.
+Cloudflare TURN credentials are NOT minted here; they're minted by
+the Worker on `/session/claim` where the API token is a Worker secret.
+
+### 5.3 Session TTL
+
+| Surface | TTL |
+|---|---|
+| `draftToken` HMAC | 60 s (must be claimed by a wallet within this window) |
+| `walletSessionToken` HMAC | 15 min (from /session/claim → DO alarm) |
+| Cloudflare TURN credentials | 15 min (minted only on /session/claim) |
+| Durable Object | auto-destroys at draftExp OR sessionExp (whichever applies) |
+| VC the wallet emits | `exp` = min(requested TTL, 15 min) |
 
 ## 6. Standards compatibility
 
@@ -317,19 +449,28 @@ plain SD-JWT-VC.
 
 ## 7. Open questions
 
-These are placeholders flagged before phase 2 — not commitments:
+Resolved (decisions locked into this spec):
 
-- **LiveKit room cost model** — every login attempt mints a room, even
-  if abandoned. We may need to lazy-create the room only after the
-  wallet calls `resolveLoginSession` (i.e. confirmed scan).
-- **Sealed-sender variant** — for stronger metadata privacy against
-  Prson, swap `box` → `box_seal` (browser does not authenticate sender
-  identity). Trade-off: drops wallet replay protection against another
-  wallet replaying the message; mitigated by including a Schnorr-style
-  per-room sender commitment.
-- **Bind cnf.jwk to a per-session salt** — a re-used `cnf.jwk` across
-  sites is the only stable cross-site identifier in this design. For
-  use cases that want unlinkability, add a per-domain rekey derived
-  from `HKDF(identityKey, "site-rekey/" || domain)`. **Default
-  remains linkable** because users frequently want "the same person who
-  signed in last time".
+- **Transport relay**: ✅ Cloudflare TURN (not LiveKit). ~1000× cheaper
+  for our 2-peer data-channel profile; no SFU needed.
+- **Signaling**: ✅ Cloudflare Workers + Durable Objects via WebSocket.
+  No Firestore on the realtime path; third-party sites embedding the
+  SDK never touch our Firebase project.
+- **Holder cnf.jwk binding**: ✅ per-domain rekey via
+  `HKDF(identityKey, "prson-login-rekey/v1", domain)`. Same user on
+  same site → stable id; different sites → unlinkable.
+
+Still open (deferred to v2):
+
+- **Sealed-sender variant** — even with per-domain rekey, Cloudflare
+  TURN sees that a peer is publishing for a given relay session.
+  Future option: derive an ephemeral wallet-side identity per message
+  and use `box_seal` to avoid revealing the per-domain key on the wire.
+  Trade-off is per-message replay protection (currently part of
+  mutual `box`); would need a per-room sender commitment.
+- **Status-list endpoint** — for instant cross-revocation when a VC is
+  revoked mid-session. Currently sessions lapse at TTL after revoke.
+- **Same-origin iframe embedding** — the SDK assumes top-level frame.
+  Iframed-into-a-different-origin scenarios need extra origin-binding
+  rules so a malicious outer page can't impersonate the inner site's
+  domain on the KB-JWT `aud`.

@@ -1,0 +1,42 @@
+name = "prson-login-signaling"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "LOGIN_SESSIONS", class_name = "LoginSession" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["LoginSession"]
+
+# Per-IP draft-creation rate-limit counter. Keys live for 60 seconds.
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "set-via-wrangler"   # cf. `wrangler kv namespace create prson-login-rate-limit`
+
+[vars]
+# Non-secret. Used for cosmetic logging + the canonical issuer string we
+# echo back to verifiers. Real auth is the wallet's Ed25519 signature on
+# /session/claim — no Firebase ID token verification needed here anymore.
+SIGNALING_VERSION = "prson-login-v1"
+
+# Per-IP draft creations allowed per 60-second window. Overridable per
+# env via `wrangler deploy --var DRAFT_RATE_PER_MIN=N`.
+DRAFT_RATE_PER_MIN = "30"
+
+# Secrets — set via `wrangler secret put`:
+#   SIG_TOKEN_HMAC_SECRET  used to mint + verify draftToken /
+#                          walletSessionToken on WS upgrade.
+#   CF_TURN_KEY_ID         Cloudflare TURN key id (semi-secret).
+#   CF_TURN_API_TOKEN      Cloudflare TURN API token (full secret).
+#
+# Deploy:
+#   cd login-sdk/infra/signaling-worker
+#   wrangler kv namespace create prson-login-rate-limit  # update id above
+#   wrangler secret put SIG_TOKEN_HMAC_SECRET
+#   wrangler secret put CF_TURN_KEY_ID
+#   wrangler secret put CF_TURN_API_TOKEN
+#   wrangler deploy

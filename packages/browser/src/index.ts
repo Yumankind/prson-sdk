@@ -1,121 +1,86 @@
 /**
- * @prson/login-sdk — public API surface.
+ * @prson/login-sdk — browser runtime.
  *
- * This file is the contract. The implementation is intentionally
- * stubbed: phase 1 ships the types + docs so partners can typecheck
- * against the API while phase 2 wires the LiveKit transport + crypto.
+ * Top-level entry point: `PrsonLogin.signIn(opts)` orchestrates the
+ * whole flow. The pieces underneath are:
  *
- * See ../../ARCHITECTURE.md for the wire-format spec and
- * ../../SECURITY.md for the threat model.
+ *   ┌── ./session.ts        — PrsonLoginSession (state machine + events)
+ *   ├── ./signaling.ts      — WebSocket to the Cloudflare Worker
+ *   ├── ./transport.ts      — RTCPeerConnection + data channel
+ *   ├── ./crypto.ts         — X25519 ephemeral keypair + NaCl box decrypt
+ *   ├── ./verify.ts         — verify issuer JWS + KB-JWT in the browser
+ *   ├── ./qr.ts             — render the prson://login/v1?... QR
+ *   └── ./api.ts            — typed createLoginSession + resolveLoginSession
+ *
+ * See ../../README.md for integration. See ../../../ARCHITECTURE.md
+ * for the wire spec.
  */
+import {
+  PrsonLoginSession,
+  type ExpiryReason,
+  type Renewal,
+} from "./session.js";
+import { createDraft } from "./api.js";
+import { generateEphemeralKeypair, decryptEnvelope } from "./crypto.js";
+import { connectSignaling } from "./signaling.js";
+import { establishTransport } from "./transport.js";
+import { renderLoginQr } from "./qr.js";
+import { verifyPresentation } from "./verify.js";
 
 // ─────────────────────────────────────────────────────────────────────
-// Public types
+// Public types — these mirror the contract in this folder's README.
 // ─────────────────────────────────────────────────────────────────────
 
 export type SignInOptions = {
-  /**
-   * The verifier identifier bound into the KB-JWT `aud`. Defaults to
-   * `window.location.origin`. Pass explicitly only if the SDK is
-   * embedded in an iframe with a different effective origin than the
-   * host page.
-   */
   domain?: string;
-
-  /**
-   * What the verifier (you) requires from the holder. Surfaces in the
-   * wallet's login drawer; the user can refuse. Unspecified = the
-   * baseline `verified_human` claim only.
-   */
   required?: {
-    /** 1..6. Default: 1. Use 5 to gate on NFC-backed VC. */
     minVerificationLevel?: 1 | 2 | 3 | 4 | 5 | 6;
-
-    /**
-     * Standard SD-JWT-VC claim names from the credential schema —
-     * e.g. `given_name`, `family_name`, `birthdate`, `nationalities`.
-     */
     requiredClaims?: string[];
-
-    /**
-     * Predicate ids from the Prson fragment catalog — e.g.
-     * `age_gte_18`, `issuing_country_in_eu`. Signed by the notary on
-     * demand at presentation; never bakes raw values into the VC.
-     */
     predicates?: string[];
-
-    /** Default `"personal"`. */
     identityType?: "personal" | "organization";
   };
-
-  /** Credential validity in minutes. 1..15, default 10. */
   ttlMinutes?: number;
-
   ui?: {
-    /** Where to mount the QR + status. CSS selector or HTMLElement. */
     mountQrInto?: string | HTMLElement;
-    /** Default: matches the user's `prefers-color-scheme`. */
     theme?: "light" | "dark" | "auto";
   };
-
-  /**
-   * If `true`, the SDK pre-allocates the LiveKit room + ephemeral
-   * keys but waits for `.proceed()` before opening the channel.
-   */
   defer?: boolean;
 };
 
 export type CnfJwk = {
   kty: "OKP";
   crv: "Ed25519";
-  /** Base64url(without-padding) of the holder's 32-byte Ed25519 pk. */
   x: string;
 };
 
 export type SignInResult = {
-  /** Compact SD-JWT-VC presentation: `<JWS>~<d_1>~…~<d_n>~<KB-JWT>`. */
   sdJwtVc: string;
-
-  /** Decoded + verified disclosed claims, ready to consume. */
   claims: Record<string, unknown>;
-
-  /** Holder Ed25519 public JWK from the VC's `cnf.jwk`. */
   cnf: { jwk: CnfJwk };
-
   credential: {
     vct: string;
     iss: string;
     kid: string;
-    /** Ms epoch. The session helper tracks this. */
     expiresAt: number;
   };
-
   session: PrsonLoginSession;
 };
 
-export type ExpiryReason =
-  | "ttl_reached"
-  | "wallet_signed_out"
-  | "user_revoked"
-  | "network_loss"
-  | "credential_revoked";
+export type { ExpiryReason } from "./session.js";
 
-export interface PrsonLoginSession {
-  /** Ms epoch of the current credential's `exp`. Updates on renewal. */
-  readonly expiresAt: number;
-
-  /** Cnf jwk of the credential — stable across renewals. */
-  readonly cnf: { jwk: CnfJwk };
-
-  /** Subscribe to wallet-pushed renewals. */
-  onRenewed(cb: (fresh: SignInResult) => void): void;
-
-  /** Fires when the session ends, for any reason. */
-  onExpiry(cb: (reason: ExpiryReason) => void): void;
-
-  /** Voluntary close; tells the wallet the user signed out. */
-  close(): void;
-}
+// Constants exported for verifier-side consumers + diagnostics.
+export const PROTOCOL_VERSION = "prson_vp_v1";
+export const TRUSTED_ISSUER = "did:web:app.prson.net";
+export const KNOWN_VCTS = [
+  "https://app.prson.net/credentials/verified-human/v1",
+  "https://app.prson.net/credentials/verified-identity/v1",
+] as const;
+export const DEFAULT_TTL_MINUTES = 10;
+export const MAX_TTL_MINUTES = 15;
+/** Cloudflare Worker single-API-surface base URL. Override in dev with
+ *  `PrsonLogin.signIn({ ... signalingBase: "https://localhost:8787" })`
+ *  via your own wrapper if you've stood up a local Worker. */
+export const SIGNALING_BASE = "https://signaling.prson.net";
 
 // ─────────────────────────────────────────────────────────────────────
 // Public façade
@@ -123,21 +88,126 @@ export interface PrsonLoginSession {
 
 export class PrsonLogin {
   /**
-   * Start a sign-in flow. Resolves once the wallet has delivered a
-   * verified SD-JWT-VC. The returned session lives until cancelled,
-   * the credential expires, or the wallet revokes.
+   * Drive a full sign-in. The promise resolves once the wallet has
+   * delivered a verified SD-JWT-VC; the returned session lives until
+   * one of the four `ExpiryReason` triggers.
    */
-  static async signIn(_opts: SignInOptions = {}): Promise<SignInResult> {
-    throw new Error(
-      "[@prson/login-sdk] phase 1 stub — runtime not yet implemented; " +
-        "see login-sdk/README.md for the build order.",
+  static async signIn(opts: SignInOptions = {}): Promise<SignInResult> {
+    const domain = opts.domain ?? window.location.origin.replace(/^https?:\/\//, "");
+    const ttlMaxMinutes = Math.min(
+      Math.max(opts.ttlMinutes ?? DEFAULT_TTL_MINUTES, 1),
+      MAX_TTL_MINUTES,
     );
+
+    // 1. Generate the ephemeral X25519 keypair the wallet will encrypt
+    //    its envelope to. Stays in memory only — never written to
+    //    storage, never crosses any network boundary.
+    const ephKeys = await generateEphemeralKeypair();
+
+    // 2. Build the verifier request blob. The reqId is content-bound
+    //    so the wallet's `resolveLoginSession` returns the byte-for-byte
+    //    same payload (anti-tamper, see SECURITY.md §3).
+    const nonce = b64u(crypto.getRandomValues(new Uint8Array(32)));
+    const request = {
+      domain,
+      nonce,
+      browserPk: ephKeys.publicKeyB64u,
+      required: opts.required ?? {},
+      ttlMaxMinutes,
+    };
+
+    // 3. Register the draft directly with the Cloudflare Worker.
+    //    Anonymous + IP rate-limited. NO TURN allocation, NO Firebase
+    //    in the path — the Worker is the single API surface and waits
+    //    for the wallet to claim before allocating real capacity.
+    const draft = await createDraft(request);
+
+    // 4. Render the QR encoding the deep-link URL the wallet scans /
+    //    the mobile browser taps.
+    const qrUrl = buildDeepLinkUrl({
+      reqId: draft.reqId,
+      browserPk: ephKeys.publicKeyB64u,
+      nonce,
+      domain,
+      request,
+    });
+    const qrMount = resolveMount(opts.ui?.mountQrInto);
+    const qrHandle = qrMount ? renderLoginQr(qrUrl, qrMount, opts.ui?.theme ?? "auto") : null;
+
+    // 5. Open the WS to the Cloudflare Worker. The DO is in DRAFT until
+    //    a wallet's /session/claim flips it to ACTIVE; we'll still
+    //    receive cached SDP/ICE from the wallet at that point.
+    const signaling = await connectSignaling({
+      url: draft.signalingWss,
+      role: "browser",
+      sigToken: draft.draftToken,
+    });
+
+    // 6. Bring up the RTCPeerConnection + data channel. The browser
+    //    side uses STUN only — relay capacity is allocated only after
+    //    the wallet signs /session/claim, and the wallet is the peer
+    //    that allocates the TURN relay. The browser reaches the
+    //    wallet's relayed candidates as a remote address, no client-
+    //    side TURN credentials needed.
+    const transport = await establishTransport({
+      stunOnly: true,
+      signaling,
+      role: "browser",
+    });
+
+    // 7. Wait for the wallet's encrypted envelope on the data channel.
+    //    The wallet emits exactly one `prson_vp_v1 / msg=presentation`
+    //    on initial sign-in; renewals come later via the session handle.
+    const first = await transport.awaitFirstMessage();
+    const envelope = await decryptEnvelope(first, ephKeys);
+    if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
+      throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
+    }
+
+    // 8. Verify the presentation cryptographically before we hand it
+    //    to the host application. The five rules in SECURITY.md §7
+    //    are enforced here.
+    const verified = await verifyPresentation(envelope.presentation, {
+      expectedAudience: `https://${domain}`,
+      expectedNonce: nonce,
+      acceptedVcts: [...KNOWN_VCTS],
+      trustedIssuer: TRUSTED_ISSUER,
+    });
+    if (!verified.ok) {
+      throw new Error(`Presentation rejected: ${verified.reason}`);
+    }
+
+    // 9. Tear down the QR + WS now that the sign-in is complete. The
+    //    transport stays open for renewals; the session handle owns it.
+    qrHandle?.dispose();
+
+    const session = new PrsonLoginSession({
+      cnf: verified.cnf,
+      credential: verified.credential,
+      transport,
+      ephKeys,
+      verifierContext: {
+        expectedAudience: `https://${domain}`,
+        expectedNonceFactory: () => nonce, // renewals carry a fresh nonce; see session.ts
+        acceptedVcts: [...KNOWN_VCTS],
+        trustedIssuer: TRUSTED_ISSUER,
+      },
+    });
+
+    return {
+      sdJwtVc: envelope.presentation,
+      claims: verified.claims,
+      cnf: verified.cnf,
+      credential: verified.credential,
+      session,
+    };
   }
 
   /**
-   * Rebind to a session that was previously established (e.g. after
-   * a page reload). Returns null if no session is recoverable for the
-   * given holder key.
+   * Rebind to a session that was previously established for the same
+   * holder pk. Phase 2 placeholder — the SDK has no cross-page-load
+   * state today; callers should redirect through `signIn` on each
+   * page load (the cookie-on-the-server is the source of truth).
    */
   static async restore(_opts: {
     cnfJwk: CnfJwk;
@@ -147,25 +217,39 @@ export class PrsonLogin {
   }
 }
 
+// Re-export for verifier-only consumers + custom UIs.
+export { PrsonLoginSession };
+export type { Renewal };
+
 // ─────────────────────────────────────────────────────────────────────
-// Internal protocol constants — exported for the verifier package
-// and for diagnostic tooling. NOT part of the stable public API.
+// Internal helpers
 // ─────────────────────────────────────────────────────────────────────
 
-/** Wire-format version carried in every LiveKit data-channel envelope. */
-export const PROTOCOL_VERSION = "prson_vp_v1";
+function b64u(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]!);
+  return btoa(s).replace(/=+$/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
 
-/** Issuer DID the SDK trusts. Verifiers should match this exactly. */
-export const TRUSTED_ISSUER = "did:web:app.prson.net";
+function resolveMount(into: string | HTMLElement | undefined): HTMLElement | null {
+  if (!into) return null;
+  if (typeof into === "string") return document.querySelector(into);
+  return into;
+}
 
-/** Known VCTs the SDK accepts at present. */
-export const KNOWN_VCTS = [
-  "https://app.prson.net/credentials/verified-human/v1",
-  "https://app.prson.net/credentials/verified-identity/v1",
-] as const;
-
-/** Default TTL in minutes if `ttlMinutes` isn't supplied. */
-export const DEFAULT_TTL_MINUTES = 10;
-
-/** Hard cap enforced by `signIn`. */
-export const MAX_TTL_MINUTES = 15;
+function buildDeepLinkUrl(args: {
+  reqId: string;
+  browserPk: string;
+  nonce: string;
+  domain: string;
+  request: object;
+}): string {
+  const params = new URLSearchParams({
+    s: args.reqId,
+    p: args.browserPk,
+    n: args.nonce,
+    d: args.domain,
+    req: b64u(new TextEncoder().encode(JSON.stringify(args.request))),
+  });
+  return `prson://login/v1?${params.toString()}`;
+}

@@ -87,16 +87,27 @@ Properties:
 
 ### 4.2 What's NOT encrypted
 
-LiveKit can see:
-- That a room exists.
-- The room's two participants are exchanging data.
-- The size + timing of each message.
-- The eventual room timeout / disconnect.
+The Cloudflare Worker Durable Object can see:
+- That a `reqId` exists, when it was created, when it closed.
+- The SDP offer/answer + ICE candidates (these contain only IP/port
+  pairs and codec metadata — never the application payload).
+- The fact that two peers connected to the room.
 
-That's the price of using shared infrastructure. The
-**sealed-sender variant** discussed in [ARCHITECTURE.md §7](./ARCHITECTURE.md#7-open-questions)
-removes even the wallet→browser linkability from Prson's view at the
-cost of dropping per-message sender authentication.
+Cloudflare TURN (only when used as a relay; most connections are
+direct P2P after ICE completes):
+- The relayed bytes (which are NaCl-boxed ciphertext).
+- The total bytes + duration.
+
+Critically, **the application payload (the SD-JWT-VC + KB-JWT) is
+never visible to any third party** — it's NaCl-encrypted to the
+browser's ephemeral X25519 pk, and the data channel runs over DTLS
+on top of that. Two layers of encryption, the inner one with a key
+the relay infrastructure never sees.
+
+The **per-domain rekey** (ARCHITECTURE.md §2.1) means the holder's
+identity is unlinkable across sites — the same wallet signing into
+two different domains looks like two different users to any
+observer comparing `cnf.jwk` values.
 
 ## 5. Replay & freshness
 
@@ -172,9 +183,18 @@ When this ships, we should commission a focused audit covering:
 - [ ] NaCl `box` library used (must be a reviewed implementation —
       we vendor [tweetnacl](https://github.com/dchest/tweetnacl-js) or
       [@stablelib/nacl](https://github.com/StableLib/stablelib)).
+- [ ] HKDF derivation of per-domain Ed25519 keys cannot leak the
+      identity-key seed (constant-time implementation, no observable
+      side channels in the derivation worker).
 - [ ] CSP / SRI for the SDK's hosted bundle.
 - [ ] No way to coerce `aud` other than via the verifier's hostname.
 - [ ] The five verifier checks in §7 are enforced in the reference
       verifier and in any partner code we ship samples of.
 - [ ] The renewal path can't be triggered by anyone other than the
       wallet that signed in originally.
+- [ ] Cloudflare Worker `sigToken` HMAC verifies the issuing Firebase
+      function and rejects replay (single-use; the Worker burns the
+      token on first WS upgrade).
+- [ ] Cloudflare Worker firebase-token verification path uses the
+      official JWKS, validates `aud === <our project>`,
+      `iss === https://securetoken.google.com/<project>`, `exp`.
