@@ -490,10 +490,17 @@ Inside the Durable Object `LoginSession`:
 - ACTIVE alarm fires at `sessionExp` (= 15 min after claim) → closes.
 - On WS upgrade: only the role from the verified token is allowed (one socket per role; reconnects replace the prior). The DO **pins** the first-seen `sha256(token)` per role; a second WS upgrade for the same role with a different token hash is rejected `401 role-token-pin-mismatch` (defends against token forgery after key rotation; §M-2).
 - Caches SDP offer/answer + ICE candidates so the late-joining wallet receives the browser's already-emitted handshake immediately.
+- **WebSocket Hibernation API.** The DO accepts both peers via `state.acceptWebSocket(ws, [role])` rather than `ws.accept()`. Between signaling messages the DO instance unloads from memory; the sockets stay connected, the runtime re-instantiates the DO on the next inbound message, and the `webSocketMessage` / `webSocketClose` / `webSocketError` class methods receive the event. Per-WS metadata (`role`, `joinedAt`) rides in `ws.serializeAttachment(...)` so it survives hibernation; `state.getWebSockets("browser" | "wallet")` returns the peer(s) for fan-out without needing an in-memory `peers` array. This is what keeps the per-100k-sessions duration cost in the included tier (see [`mobile-app/prson_app/docs/wallet_lifecycle.md`](../mobile-app/prson_app/docs/wallet_lifecycle.md) for the cost table).
 
 Cost: ~$0.10 per 100K sessions (Workers $0.30/M req + Durable Objects
-$0.15/M req + tiny KV). Latency: <100 ms globally (DOs run at the
-edge nearest to whichever peer connects first).
+$0.15/M req + tiny KV) **with the WebSocket Hibernation API engaged**.
+Without hibernation the duration meter alone would cost ~$136 per 100K
+sessions because each WS keeps the DO ACTIVE for its 15-min TTL; with
+hibernation the DO is ACTIVE only while a message handler is running
+(low-millisecond bursts), and the 400 k GB-s monthly free tier covers
+tens of millions of sessions before duration starts billing. Latency:
+<100 ms globally (DOs run at the edge nearest to whichever peer
+connects first).
 
 ### 5.2 What stays on Firebase
 
