@@ -30,6 +30,15 @@ export type DraftResult = {
   signalingWss: string;
   /** Epoch s — caller has until this moment for a wallet to claim. */
   draftExpiresAt: number;
+  /**
+   * **Server-issued timestamp** (epoch seconds, M-3 / v2). The Worker
+   * stamped it at draft creation and stored it in the DO. The wallet
+   * MUST echo this value verbatim in its `prson-login-claim/v2`
+   * signature — the Worker rebuilds the canonical bytes using its
+   * stored copy, so any tamper breaks the signature. The SDK threads
+   * it through the QR (`t=` param).
+   */
+  serverTs: number;
 };
 
 /**

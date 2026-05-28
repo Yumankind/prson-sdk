@@ -74,7 +74,6 @@ export interface Env {
 const WS_SUBPROTOCOL = "prson-login-v1";
 const DRAFT_TTL_SECONDS = 60;
 const SESSION_TTL_SECONDS = 15 * 60;
-const CLAIM_MAX_SKEW_SECONDS = 5 * 60;
 
 // ─────────────────────────────────────────────────────────────────────
 // Router
@@ -215,6 +214,7 @@ async function handleDraft(req: Request, env: Env): Promise<Response> {
   await stub.fetch("https://x/internal/init-draft", {
     method: "POST",
     body: JSON.stringify({
+      reqId,
       canonical,
       domain: body.request.domain,
       draftExp,
@@ -242,13 +242,13 @@ interface ClaimRequest {
   // derivable from a Prson mnemonic is the proof; no separate Firebase
   // check is required (see ARCHITECTURE.md §2).
   walletPk: { kty: "OKP"; crv: "Ed25519"; x: string };
-  // Timestamp (epoch seconds). Worker rejects if more than
-  // CLAIM_MAX_SKEW_SECONDS off.
-  ts: number;
-  // Echoed for binding (anti-replay across drafts).
+  // Echoed domain. The DO cross-checks this against the canonical
+  // stored at draft time (anti-tamper). NOTE: no `ts` field — the
+  // timestamp the wallet signed is the SERVER-issued one carried
+  // through the QR and re-read from DO state at verify time.
   domain: string;
-  // base64url Ed25519 signature over the canonical claim tuple — see
-  // canonicalClaimBytes() below. Identical bytes the wallet signed.
+  // base64url Ed25519 signature over the v2 canonical claim tuple — see
+  // canonicalClaimBytes() below + the DO's `/internal/verify-and-activate`.
   signature: string;
 }
 
@@ -263,38 +263,20 @@ async function handleClaim(req: Request, env: Env): Promise<Response> {
   if (v) return jsonError(400, v);
 
   const nowSec = Math.floor(Date.now() / 1000);
-  if (Math.abs(nowSec - body.ts) > CLAIM_MAX_SKEW_SECONDS) {
-    return jsonError(400, "ts-skew");
-  }
 
-  // Verify the Ed25519 signature against walletPk.
-  let okSig = false;
-  try {
-    const key = await crypto.subtle.importKey(
-      "jwk",
-      body.walletPk as JsonWebKey,
-      { name: "Ed25519" },
-      false,
-      ["verify"],
-    );
-    okSig = await crypto.subtle.verify(
-      "Ed25519",
-      key,
-      base64UrlToBytes(body.signature),
-      canonicalClaimBytes(body),
-    );
-  } catch {
-    okSig = false;
-  }
-  if (!okSig) return jsonError(401, "bad-signature");
-
-  // Promote the DO to ACTIVE + fetch the canonical request back.
+  // Hand the full claim payload to the DO. The DO reads its stored
+  // `serverTs` (set at draft init), reconstructs the canonical
+  // claim-bytes verbatim, verifies the Ed25519 signature, and on
+  // success promotes the session to ACTIVE in one atomic step. This
+  // eliminates client-supplied timestamp drift + binds the signature
+  // to a specific draft (M-3).
   const stub = env.LOGIN_SESSIONS.get(env.LOGIN_SESSIONS.idFromName(body.reqId));
-  const activateRes = await stub.fetch("https://x/internal/activate", {
+  const activateRes = await stub.fetch("https://x/internal/verify-and-activate", {
     method: "POST",
     body: JSON.stringify({
-      walletPkX: body.walletPk.x,
+      walletPk: body.walletPk,
       claimDomain: body.domain,
+      signature: body.signature,
       sessionExp: nowSec + SESSION_TTL_SECONDS,
     }),
   });
@@ -307,11 +289,6 @@ async function handleClaim(req: Request, env: Env): Promise<Response> {
     domain: string;
     sessionExp: number;
   };
-  if (activated.domain !== body.domain) {
-    // The wallet signed for a different domain than the browser drafted
-    // — that's a tampered QR. Refuse.
-    return jsonError(401, "domain-mismatch");
-  }
 
   // Mint TURN credentials. Cloudflare's TURN API runs here on the same
   // vendor, so the API token is a Worker secret with no exposure.
@@ -335,17 +312,34 @@ async function handleClaim(req: Request, env: Env): Promise<Response> {
 }
 
 /**
- * The exact bytes the wallet must Ed25519-sign. ANY change to this
- * format is a wire-breaking change; bump SIGNALING_VERSION + add a
- * new branch instead of editing in place.
+ * The exact bytes the wallet must Ed25519-sign for `/session/claim`.
+ * ANY change to this format is a wire-breaking change; bump the
+ * version suffix + add a new branch instead of editing in place.
  *
- *   "prson-login-claim/v1\n" + reqId + "\n" + walletPkX + "\n" + ts + "\n" + domain
+ * **v2** (current):
+ *
+ *   "prson-login-claim/v2\n" + reqId + "\n" + walletPkX + "\n" +
+ *     serverTs + "\n" + domain
+ *
+ * where `serverTs` is the **server-issued** epoch-seconds timestamp
+ * the Worker assigned at `/session/draft` time. The wallet reads it
+ * from the QR; the Worker's DO uses its stored value (no client
+ * input) when re-computing the bytes at verify time. This binds the
+ * signature to a specific draft + eliminates clock-skew issues
+ * (the wallet never computes time). Closes SECURITY-AUDIT §M-3.
  *
  * Plain ASCII; trivial to reproduce on any wallet (no canonical-JSON
  * pitfalls). The version prefix prevents cross-protocol replay.
  */
-function canonicalClaimBytes(c: ClaimRequest): Uint8Array {
-  const s = `prson-login-claim/v1\n${c.reqId}\n${c.walletPk.x}\n${c.ts}\n${c.domain}`;
+function canonicalClaimBytesV2(opts: {
+  reqId: string;
+  walletPkX: string;
+  serverTs: number;
+  domain: string;
+}): Uint8Array {
+  const s =
+    `prson-login-claim/v2\n${opts.reqId}\n${opts.walletPkX}\n` +
+    `${opts.serverTs}\n${opts.domain}`;
   return new TextEncoder().encode(s);
 }
 
@@ -414,14 +408,19 @@ interface ConnectedPeer {
 
 interface SessionState {
   status: Status;
+  /** Content-addressed session id — duplicated here so the DO can
+   *  re-build the canonical claim-bytes without needing the route
+   *  layer to thread reqId through every internal call. */
+  reqId?: string;
   canonical?: string;
   domain?: string;
   draftExp?: number;
   /**
-   * Server-issued timestamp the wallet must echo verbatim in the
-   * canonical claim-bytes (`prson-login-claim/v2`). Stored at draft-
-   * init time; the claim handler rejects any claim whose `body.ts`
-   * doesn't match this stored value. See M-3.
+   * Server-issued timestamp the wallet folds into the canonical
+   * claim-bytes (`prson-login-claim/v2`). Stored at draft-init time;
+   * the verify-and-activate handler uses THIS stored value (not any
+   * client-supplied echo) when re-computing the bytes to verify
+   * against. See M-3.
    */
   serverTs?: number;
   sessionExp?: number;
@@ -458,6 +457,7 @@ export class LoginSession {
 
     if (req.method === "POST" && url.pathname === "/internal/init-draft") {
       const body = (await req.json()) as {
+        reqId: string;
         canonical: string;
         domain: string;
         draftExp: number;
@@ -471,6 +471,7 @@ export class LoginSession {
       }
       this.session = {
         status: "draft",
+        reqId: body.reqId,
         canonical: body.canonical,
         domain: body.domain,
         draftExp: body.draftExp,
@@ -483,10 +484,11 @@ export class LoginSession {
       return new Response("ok", { status: 200 });
     }
 
-    if (req.method === "POST" && url.pathname === "/internal/activate") {
+    if (req.method === "POST" && url.pathname === "/internal/verify-and-activate") {
       const body = (await req.json()) as {
-        walletPkX: string;
+        walletPk: { kty: "OKP"; crv: "Ed25519"; x: string };
         claimDomain: string;
+        signature: string;
         sessionExp: number;
       };
       if (this.session.status === "closed") {
@@ -495,10 +497,53 @@ export class LoginSession {
       if (!this.session.canonical) {
         return new Response("no-draft", { status: 404 });
       }
-      // Domain echo check happens at the route level; here we just
-      // store + return the canonical so the route can hand it back.
+      if (this.session.serverTs == null) {
+        // Pre-v2 draft state (shouldn't happen in steady state, but
+        // defends against rolling deploys / replayed alarms).
+        return new Response("no-serverTs", { status: 410 });
+      }
+      // Domain echo check — the wallet signed for whichever domain
+      // it pulled from the QR; the DO knows the canonical domain
+      // from the genuine browser session. Mismatch → tampered QR.
+      if (this.session.domain !== body.claimDomain) {
+        return new Response("domain-mismatch", { status: 401 });
+      }
+      // Reconstruct the canonical claim-bytes using the STORED
+      // reqId + serverTs + domain (never the client-supplied ones).
+      // The wallet must have signed over exactly these bytes; any QR
+      // tampering breaks the signature.
+      if (this.session.reqId == null) {
+        return new Response("no-reqId", { status: 410 });
+      }
+      const toVerify = canonicalClaimBytesV2({
+        reqId: this.session.reqId,
+        walletPkX: body.walletPk.x,
+        serverTs: this.session.serverTs,
+        domain: this.session.domain ?? "",
+      });
+      let ok = false;
+      try {
+        const key = await crypto.subtle.importKey(
+          "jwk",
+          body.walletPk as JsonWebKey,
+          { name: "Ed25519" },
+          false,
+          ["verify"],
+        );
+        ok = await crypto.subtle.verify(
+          "Ed25519",
+          key,
+          base64UrlToBytes(body.signature),
+          toVerify,
+        );
+      } catch {
+        ok = false;
+      }
+      if (!ok) return new Response("bad-signature", { status: 401 });
+
+      // Atomic promotion to ACTIVE.
       this.session.status = "active";
-      this.session.walletPkX = body.walletPkX;
+      this.session.walletPkX = body.walletPk.x;
       this.session.sessionExp = body.sessionExp;
       this.session.cached = []; // wipe any stale draft-era cache
       await this.state.storage.put("session", this.session);
@@ -699,7 +744,8 @@ function validateClaimRequest(c: unknown): string | null {
   if (!wpk || wpk.kty !== "OKP" || wpk.crv !== "Ed25519" || typeof wpk.x !== "string") {
     return "bad-walletPk";
   }
-  if (typeof o.ts !== "number" || !Number.isFinite(o.ts)) return "bad-ts";
+  // No `ts` field in v2 — the timestamp is server-issued + stored
+  // server-side, never accepted from the client.
   if (typeof o.domain !== "string" || o.domain.length < 1) return "bad-domain";
   if (typeof o.signature !== "string" || o.signature.length < 64) return "bad-signature";
   return null;

@@ -181,6 +181,7 @@ export class PrsonLogin {
       nonce,
       domain,
       request,
+      serverTs: draft.serverTs,
     });
     const qrMount = resolveMount(opts.ui?.mountQrInto);
     const qrHandle = qrMount ? renderLoginQr(qrUrl, qrMount, opts.ui?.theme ?? "auto") : null;
@@ -314,6 +315,7 @@ function buildDeepLinkUrl(args: {
   nonce: string;
   domain: string;
   request: object;
+  serverTs: number;
 }): string {
   const params = new URLSearchParams({
     s: args.reqId,
@@ -321,6 +323,10 @@ function buildDeepLinkUrl(args: {
     n: args.nonce,
     d: args.domain,
     req: b64u(new TextEncoder().encode(JSON.stringify(args.request))),
+    // M-3 / v2: the server-issued timestamp the wallet must fold into
+    // its claim signature. The Worker uses its own stored copy at
+    // verify time; tampering this in the QR breaks the signature.
+    t: String(args.serverTs),
   });
   return `https://app.prson.net/login/v1?${params.toString()}`;
 }

@@ -153,18 +153,28 @@ difference is the `cnf` bound into the JWS).
        required: { minVerificationLevel, requiredClaims, predicates,
                    identityType, ttlMaxMinutes },
        browserPk: b64u(ephKeys.publicKey),
+       allowAnonymous: <bool>,    // verifier opts in to self-signed
+                                  // anonymous-wallet credentials
+       ephemeralIdentity: <bool>, // verifier requests a fresh per-sign-in
+                                  // key (no stable per-site identifier)
      }
 
 1. Browser → Cloudflare Worker: POST /session/draft  { request }
    ←  { reqId,
         draftToken,                                  // role-tagged HMAC, browser
         signalingWss: "wss://signaling.prson.net/login/v1/<reqId>",
-        draftExpiresAt }                             // 60 s
+        draftExpiresAt,                              // 60 s
+        serverTs }                                   // epoch-seconds, server-issued
    (Anonymous, IP-rate-limited at 30 drafts/IP/min in a KV-backed
-    counter. The Worker stores `canonical(request)` content-addressed
-    in the Durable Object — the wallet later proves consent by signing
-    the matching tuple. NO TURN allocated yet; the relay capacity is
-    only allocated once a wallet signs §step 3.)
+    counter. The Worker also enforces an **Origin-header check** — the
+    page Origin must match `request.domain`, else 400 `origin-required`
+    / 403 `origin-domain-mismatch` (closes audit §C-1).
+    The Worker stores `canonical(request)` PLUS a freshly-stamped
+    `serverTs = nowSec` in the Durable Object — the wallet never
+    computes time; the same `serverTs` rides the QR back to the wallet
+    via the `t=` param (§4.1) and is reconstructed server-side at
+    verify time (§step 3). NO TURN allocated yet; the relay capacity
+    is only allocated once a wallet signs §step 3.)
 
 2. Browser:
    - Creates RTCPeerConnection with **STUN only** (the browser side
@@ -177,26 +187,34 @@ difference is the `cnf` bound into the JWS).
    - Listens for the wallet's { msg: "answer", sdp } and
      { msg: "candidate", ... } on the same WS (cached by the DO until
      a wallet joins).
-   - Renders QR encoding the deep-link URL:
-       prson://login/v1?
+   - Renders QR encoding the deep-link URL (universal link form;
+     §4.1 lists the schema):
+       https://app.prson.net/login/v1?
          s=<reqId>&
          p=<browserPk>&
          n=<nonce>&
          d=<domain>&
-         req=<b64u(request)>
+         req=<b64u(request)>&
+         t=<serverTs>           // echoed verbatim from /session/draft
 
 3. Wallet (on Approve):
    - User scans QR (or taps a same-device deep link).
-   - Wallet signs the claim tuple with its persistent identity Ed25519
-     key:
+   - Wallet signs the **v2** claim tuple with its persistent identity
+     Ed25519 key. The timestamp is the **server-issued** `serverTs`
+     parsed from the QR's `t=` param — the wallet never computes time:
        sigBytes = Ed25519.sign(
-         "prson-login-claim/v1\n" + reqId + "\n" + walletPkX + "\n" +
-           ts + "\n" + domain
+         "prson-login-claim/v2\n" + reqId + "\n" + walletPkX + "\n" +
+           serverTs + "\n" + domain
        )
    - Wallet calls POST /session/claim on the Worker with
-     { reqId, walletPk: <Ed25519 OKP JWK>, ts, domain, signature }.
-     The Worker:
-       · verifies the Ed25519 signature against `walletPk`,
+     { reqId, walletPk: <Ed25519 OKP JWK>, domain, signature }.
+     **No `ts` field** — the Worker reads its own stored `serverTs`
+     from the Durable Object and reconstructs the canonical bytes
+     itself. The Worker:
+       · loads the DO state, reconstructs the v2 canonical bytes from
+         the STORED serverTs (not anything the wallet supplied),
+       · verifies the Ed25519 signature against `walletPk` inside the
+         Durable Object, atomically with the state transition,
        · echoes-checks the domain against the stored draft (anti-tamper),
        · promotes the DO from DRAFT → ACTIVE (resetting the alarm to a
          full 15-min TTL),
@@ -204,11 +222,21 @@ difference is the `cnf` bound into the JWS).
          secret; the wallet never sees the long-lived secret).
      Worker returns { request, walletSessionToken, signalingWss, turn,
                        expiresAt }.
-   - Wallet derives the per-domain holder key:
+   - If the verifier requested `ephemeralIdentity: true`, the wallet
+     generates a fresh Ed25519 keypair for this sign-in (no HKDF) and
+     uses that as the per-message holder key — no stable per-site id.
+   - Otherwise wallet derives the per-domain holder key:
        sigSeed = HKDF(identityKey, salt="prson-login-rekey/v1", info=domain)
        sigKey  = Ed25519.fromSeed(sigSeed)
      and asks the Firebase notary to re-issue the chosen VC with the
      matching cnf.jwk via issueIdentityCredentialForDomain (see §5).
+   - If the verifier set `allowAnonymous: true` and the user picks an
+     anonymous identity in the drawer, the wallet skips the notary and
+     emits a self-signed **anonymous-wallet credential** instead
+     (VCT `https://app.prson.net/credentials/anonymous-wallet/v1`).
+     The per-domain (or ephemeral) Ed25519 key is BOTH the JWT signer
+     AND the `cnf.jwk`. The browser SDK verifies it via
+     `verifyAnonymousWallet`.
    - Wallet shows the login drawer:
         Sign in to <domain>?
         Required: <required claims + predicates>
@@ -217,9 +245,12 @@ difference is the `cnf` bound into the JWS).
         Credential will be valid for <ttlMinutes> min      [renew]
         [Approve]  [Decline]
    - On Approve: wallet sets up its own RTCPeerConnection (with TURN
-     creds from /session/claim), opens its own WS to signalingWss using
-     walletSessionToken in Sec-WebSocket-Protocol, exchanges SDP answer
-     + ICE candidates with the browser.
+     creds from /session/claim **and `iceTransportPolicy: "relay"` by
+     default** — host + server-reflexive candidates are never gathered
+     so the wallet's local IP never leaves the device; closes audit
+     §M-4). Opens its own WS to signalingWss using `walletSessionToken`
+     in Sec-WebSocket-Protocol, exchanges SDP answer + ICE candidates
+     with the browser.
 
 4. Wallet (on Approve, after WebRTC connection is established):
    - presentationPrefix = presentSdJwt(storedSdJwt, chosenClaimNames)
@@ -267,11 +298,18 @@ difference is the `cnf` bound into the JWS).
 ### 3.2 Same-device deep-link flow
 
 Same protocol as cross-device, just the QR step is skipped — the
-browser opens `prson://login/v1?...` (universal link) on tap, the
-wallet handles it directly, and either:
+browser opens `https://app.prson.net/login/v1?...` (Apple Universal
+Link / Android App Link, claimed by the wallet via AASA +
+`assetlinks.json`) on tap, the wallet handles it directly, and either:
 
 - Returns through a universal-link callback (`https://<domain>/__prson_login_return?token=...`), OR
 - Pushes through the same WebRTC channel (more robust, recommended).
+
+Universal Links replaced the legacy `prson://login/v1?...` custom
+scheme to close audit §C-2 — any installed app can register a custom
+scheme, but only the app whose AASA the OS verified can intercept a
+Universal Link. The wallet's `LoginDeepLink.tryParse` still accepts
+both forms for back-compat with QRs already in the wild.
 
 The SDK auto-detects which fallback to use based on user-agent + the
 WebRTC handshake completion.
@@ -316,13 +354,22 @@ an enterprise SSO product that already does OpenID4VP.
 ### 4.1 QR URL (the deep link)
 
 ```
-prson://login/v1?
+https://app.prson.net/login/v1?               // universal link (preferred)
   s=<b64u reqId, 32 chars>
   p=<b64u(X25519 browser pk, 32 bytes)>
   n=<b64u(nonce, 32 bytes)>
   d=<domain, url-encoded>
   req=<b64u(JSON request)>
+  t=<serverTs, epoch seconds; server-issued at /session/draft>
 ```
+
+The `req` JSON includes the verifier's full requirements blob:
+`{ domain, nonce, browserPk, required, ttlMaxMinutes, allowAnonymous,
+ephemeralIdentity }`. The wallet's parser fails closed if `t=` is
+absent, non-numeric, or zero (v2 requires server-issued time).
+
+The legacy `prson://login/v1?...` custom-scheme form is still parsed
+for back-compat but is no longer emitted — see §3.2.
 
 **Why the request is duplicated** in `req` AND echoed back by the
 Worker: the wallet's `POST /session/claim` returns the canonical
@@ -411,25 +458,28 @@ Durable Object per `reqId`.
 
 | Route | Auth | Description |
 |---|---|---|
-| `POST /session/draft` | anonymous, IP-rate-limited (default 30/IP/min, in a KV namespace) | Browser-initiated. Hashes `request` → `reqId`. Stores canonical bytes in the DO (status `DRAFT`). Returns `{reqId, draftToken, signalingWss, draftExpiresAt}`. **No TURN allocated.** Draft auto-expires in 60 s if not claimed. |
-| `POST /session/claim` | Ed25519 signature over the canonical claim tuple `"prson-login-claim/v1\n" + reqId + "\n" + walletPkX + "\n" + ts + "\n" + domain` | Wallet-initiated. Worker verifies signature, echoes-checks the domain against the stored draft, promotes DO to `ACTIVE`, mints Cloudflare TURN creds (Worker secret-bound `CF_TURN_KEY_ID` + `CF_TURN_API_TOKEN`), returns `{request, walletSessionToken, signalingWss, turn, expiresAt}`. |
-| `GET wss://…/login/v1/<reqId>` | role-tagged HMAC: `<exp>.<role>.<HMAC-SHA256(reqId\nrole\nexp)>` issued by the routes above | WS upgrade for either peer. The Worker reads the token from `Sec-WebSocket-Protocol`, verifies, then forwards into the DO. |
+| `POST /session/draft` | anonymous, IP-rate-limited (default 30/IP/min, in a KV namespace) + `Origin` header must match `request.domain` (§C-1) | Browser-initiated. Hashes `request` → `reqId`. Stores canonical bytes **plus a server-stamped `serverTs = nowSec`** in the DO (status `DRAFT`). Returns `{reqId, draftToken, signalingWss, draftExpiresAt, serverTs}`. **No TURN allocated.** Draft auto-expires in 60 s if not claimed. |
+| `POST /session/claim` | Ed25519 signature over the **v2** canonical claim tuple `"prson-login-claim/v2\n" + reqId + "\n" + walletPkX + "\n" + serverTs + "\n" + domain`. The wallet does NOT supply `serverTs` in the request body — the verifying Durable Object reads it from its own stored draft state. | Wallet-initiated. The Worker route layer is a thin shim; the actual verification + state transition happens **inside the Durable Object** (atomic): DO loads stored `serverTs` + `domain`, reconstructs canonical v2 bytes, Ed25519-verifies against the supplied `walletPk`, echoes-checks the domain against the stored draft, promotes DO to `ACTIVE`, mints Cloudflare TURN creds (Worker secret-bound `CF_TURN_KEY_ID` + `CF_TURN_API_TOKEN`), returns `{request, walletSessionToken, signalingWss, turn, expiresAt}`. Moving verification inside the DO closes a TOCTOU class — the verified `serverTs` is exactly the one promoted. |
+| `GET wss://…/login/v1/<reqId>` | role-tagged keyring HMAC: `<kid>.<exp>.<role>.<HMAC-SHA256(kid\nreqId\nrole\nexp)>` issued by the routes above; legacy 3-segment `<exp>.<role>.<HMAC>` accepted for in-flight back-compat | WS upgrade for either peer. The Worker reads the token from `Sec-WebSocket-Protocol`, verifies against the keyring, **pins** the token's `sha256` to the role in the DO (§M-2), then forwards into the DO. |
 
-Token formats (single Worker secret `SIG_TOKEN_HMAC_SECRET` signs both):
+Token format (kid-prefixed; closes audit §M-1):
 
-- `draftToken` = HMAC over `reqId\n"browser"\n<exp=now+60s>`.
-- `walletSessionToken` = HMAC over `reqId\n"wallet"\n<exp=now+15min>`.
+- Signed via `SIG_TOKEN_HMAC_KEYRING` env binding, a JSON `{active, retired[]}` keyring. `active` is the current minting kid; `retired[]` carry their own `validUntil` epoch so a verifier accepts in-flight tokens for a configurable window after rotation.
+- `draftToken` = `<kid>.<exp=now+60s>.browser.HMAC(kid\nreqId\nbrowser\nexp)`.
+- `walletSessionToken` = `<kid>.<exp=now+15min>.wallet.HMAC(kid\nreqId\nwallet\nexp)`.
+- Legacy `SIG_TOKEN_HMAC_SECRET` still verifies older 3-segment tokens until they expire — see [scripts/cloudflare/login-secret.sh](../scripts/cloudflare/login-secret.sh) for the rotation playbook (`stage`, `rotate`, `prune`).
 
 Inside the Durable Object `LoginSession`:
 
-- `state = { status: "draft"|"active"|"closed", canonical, domain,
-             draftExp, sessionExp, walletPkX, cached: SignalingMessage[] }`
+- `state = { status: "draft"|"active"|"closed", canonical, domain, reqId,
+             serverTs, draftExp, sessionExp, walletPkX,
+             pinnedTokenHashes: { browser?: sha256, wallet?: sha256 },
+             cached: SignalingMessage[] }`
+- `serverTs` is the Worker-issued epoch-seconds value relayed via the QR's `t=` param and re-read at `/session/claim` verification time.
 - DRAFT alarm fires at `draftExp` → closes if unclaimed.
 - ACTIVE alarm fires at `sessionExp` (= 15 min after claim) → closes.
-- On WS upgrade: only the role from the verified token is allowed
-  (one socket per role; reconnects replace the prior).
-- Caches SDP offer/answer + ICE candidates so the late-joining wallet
-  receives the browser's already-emitted handshake immediately.
+- On WS upgrade: only the role from the verified token is allowed (one socket per role; reconnects replace the prior). The DO **pins** the first-seen `sha256(token)` per role; a second WS upgrade for the same role with a different token hash is rejected `401 role-token-pin-mismatch` (defends against token forgery after key rotation; §M-2).
+- Caches SDP offer/answer + ICE candidates so the late-joining wallet receives the browser's already-emitted handshake immediately.
 
 Cost: ~$0.10 per 100K sessions (Workers $0.30/M req + Durable Objects
 $0.15/M req + tiny KV). Latency: <100 ms globally (DOs run at the
@@ -500,3 +550,18 @@ Still open (deferred to v2):
   Iframed-into-a-different-origin scenarios need extra origin-binding
   rules so a malicious outer page can't impersonate the inner site's
   domain on the KB-JWT `aud`.
+- **Exact-token WS replay from XSS** — `pinnedTokenHashes` (§5.1)
+  blocks token *forgery* after rotation, but a client-side XSS can
+  still steal and replay the exact original token before its TTL.
+  Closes with a short-lived refresh-token endpoint that requires a
+  fresh signal from the originating tab.
+
+Shipped since the 2026-05-28 audit (see `SECURITY-AUDIT-2026-05-28.md`):
+
+- **C-1** Origin-header binding at `/session/draft`.
+- **C-2** Universal Links replace the custom `prson://` scheme.
+- **M-1** HMAC keyring with `kid`-prefixed tokens + rotation script.
+- **M-2** Role-token pinning in the Durable Object.
+- **M-3** Claim-tuple v2: server-issued `serverTs`, verification moved into the DO.
+- **M-4** `iceTransportPolicy: "relay"` default on the wallet side.
+- **M-5** Opt-in `ephemeralIdentity: true` SDK flag for unlinkable per-sign-in keys.
