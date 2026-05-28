@@ -55,6 +55,28 @@ export type SignInOptions = {
    * applies to the anonymous fallback. Default false.
    */
   allowAnonymous?: boolean;
+
+  /**
+   * If `true`, the wallet generates a **fresh random Ed25519 keypair**
+   * for this single login instead of the deterministic per-domain
+   * HKDF derivation. The credential's `cnf.jwk` is therefore
+   * **different on every sign-in attempt** — there is no stable per-
+   * user id, and a future mnemonic compromise cannot retroactively
+   * link the user across sessions on this site.
+   *
+   * Trade-off: `cnf.jwk.x` is no longer a per-user identifier on this
+   * domain. Sites that key sessions off `cnf.jwk.x` must derive a
+   * usable account id by some other means (e.g. a user-chosen
+   * username on first visit). Best fit for read-only / single-use
+   * flows where re-identification on return is irrelevant.
+   *
+   * Combine with `allowAnonymous: true` for a fully unlinkable
+   * anonymous flow. Default false.
+   *
+   * Closes [SECURITY-AUDIT §M-5](../../SECURITY-AUDIT-2026-05-28.md).
+   */
+  ephemeralIdentity?: boolean;
+
   ttlMinutes?: number;
   ui?: {
     mountQrInto?: string | HTMLElement;
@@ -138,6 +160,10 @@ export class PrsonLogin {
       // offered. The SDK side enforces acceptance below at verify time;
       // the wallet enforces drawer UX based on this flag.
       allowAnonymous: opts.allowAnonymous === true,
+      // If set, instructs the wallet to mint a fresh random Ed25519
+      // keypair for this single sign-in (no deterministic per-domain
+      // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
+      ephemeralIdentity: opts.ephemeralIdentity === true,
       ttlMaxMinutes,
     };
 
@@ -267,6 +293,21 @@ function resolveMount(into: string | HTMLElement | undefined): HTMLElement | nul
   return into;
 }
 
+/**
+ * Build the deep-link URL the QR encodes. We emit the **universal-link
+ * form** (`https://app.prson.net/login/v1?…`) — see
+ * [SECURITY-AUDIT-2026-05-28.md §C-2](../../SECURITY-AUDIT-2026-05-28.md).
+ *
+ * Custom URI schemes (`prson://…`) have no cryptographic app-binding;
+ * any installed app can register the same scheme and intercept the
+ * tap. Universal Links (iOS) + App Links (Android) are bound to our
+ * domain via `apple-app-site-association` + `assetlinks.json`, which
+ * are signed against the wallet's signing-cert hash + our TLS cert.
+ * A malicious app cannot register a competing handler.
+ *
+ * The wallet's `LoginDeepLink.tryParse` already accepts both forms,
+ * so this change is one-sided.
+ */
 function buildDeepLinkUrl(args: {
   reqId: string;
   browserPk: string;
@@ -281,5 +322,5 @@ function buildDeepLinkUrl(args: {
     d: args.domain,
     req: b64u(new TextEncoder().encode(JSON.stringify(args.request))),
   });
-  return `prson://login/v1?${params.toString()}`;
+  return `https://app.prson.net/login/v1?${params.toString()}`;
 }

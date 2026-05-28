@@ -28,8 +28,22 @@ SIGNALING_VERSION = "prson-login-v1"
 DRAFT_RATE_PER_MIN = "30"
 
 # Secrets — set via `wrangler secret put`:
-#   SIG_TOKEN_HMAC_SECRET  used to mint + verify draftToken /
-#                          walletSessionToken on WS upgrade.
+#   SIG_TOKEN_HMAC_KEYRING preferred. JSON of the form
+#                          `{ "active": { "kid": "k1", "secret": "<b64>" },
+#                             "retired": [
+#                               { "kid": "k0", "secret": "<b64>",
+#                                 "validUntil": <epoch sec> }
+#                             ] }`
+#                          The Worker mints under `active.kid` and accepts
+#                          any kid whose entry is active OR retired (until
+#                          `validUntil`). Rotation: add new active, demote
+#                          the prior active to retired with
+#                          `validUntil = now + 900s`, deploy.
+#   SIG_TOKEN_HMAC_SECRET  legacy single-secret fallback — used only when
+#                          KEYRING is unset, OR to verify 3-segment tokens
+#                          issued before the keyring was rolled out
+#                          (these tokens have a 15-min TTL so the back-
+#                          compat window closes fast).
 #   CF_TURN_KEY_ID         Cloudflare TURN key id (semi-secret).
 #   CF_TURN_API_TOKEN      Cloudflare TURN API token (full secret).
 #

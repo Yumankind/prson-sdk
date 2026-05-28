@@ -39,7 +39,32 @@
 export interface Env {
   LOGIN_SESSIONS: DurableObjectNamespace;
   RATE_LIMIT_KV: KVNamespace;
+
+  /**
+   * Single-secret legacy binding. Used when the keyring binding below
+   * isn't set (greenfield deploys still work without rotation infra).
+   * If both are set, the keyring wins.
+   */
   SIG_TOKEN_HMAC_SECRET: string;
+
+  /**
+   * Versioned HMAC keyring (M-1, see SECURITY-AUDIT-2026-05-28.md §M-1).
+   * JSON-encoded:
+   *   `{
+   *      "active": { "kid": "<id>", "secret": "<base64>" },
+   *      "retired": [
+   *        { "kid": "<id>", "secret": "<base64>",
+   *          "validUntil": <epoch sec> }
+   *      ]
+   *    }`
+   *
+   * Rotation: a new key is added as `active` (the prior active moves
+   * to `retired` with `validUntil = now + 15 min`). After 15 minutes
+   * the retired entry can be safely pruned — every in-flight session
+   * has either expired or moved on by then.
+   */
+  SIG_TOKEN_HMAC_KEYRING: string;
+
   CF_TURN_KEY_ID: string;
   CF_TURN_API_TOKEN: string;
   SIGNALING_VERSION: string;
@@ -107,6 +132,13 @@ export interface VerifierRequest {
     predicates?: string[];
     identityType?: "personal" | "organization";
   };
+  /** SDK opt-in: verifier accepts anonymous-wallet credentials. */
+  allowAnonymous?: boolean;
+  /** SDK opt-in: ask the wallet to mint a fresh per-login keypair
+   *  rather than the deterministic per-domain HKDF. The Worker stores
+   *  this verbatim + relays to the wallet in the canonical request
+   *  echo; the wallet enforces the semantics. See SDK README + M-5. */
+  ephemeralIdentity?: boolean;
   ttlMaxMinutes?: number; // 1..15
 }
 
@@ -123,6 +155,39 @@ async function handleDraft(req: Request, env: Env): Promise<Response> {
   const v = validateVerifierRequest(body.request);
   if (v) return jsonError(400, v);
 
+  // C-1 anti-phishing gate (see SECURITY-AUDIT-2026-05-28.md §C-1).
+  // The browser MUST send the `Origin` header on a CORS POST; we
+  // require it to byte-match `request.domain`. This stops a phisher
+  // on `phisher.evil` from claiming `domain: "bank.com"` — their
+  // browser would send `Origin: https://phisher.evil`, which won't
+  // match.
+  //
+  // The CORS preflight (OPTIONS) is unauthenticated by design and
+  // doesn't carry the request body, so we enforce only here, after
+  // the browser has committed to a body it can't fake.
+  const originHeader = req.headers.get("Origin");
+  if (!originHeader) {
+    // No Origin header is a sign the call didn't come from a browser
+    // (CLI, server-to-server). Browser-initiated drafts are the only
+    // supported case; non-browser callers can use the Worker directly
+    // but they're not the threat model the audit was sized for.
+    return jsonError(400, "origin-required");
+  }
+  let originHost: string;
+  try {
+    originHost = new URL(originHeader).host.toLowerCase();
+  } catch {
+    return jsonError(400, "origin-malformed");
+  }
+  // The domain in the request can include a port in dev mode (e.g.
+  // `localhost:5173`); match host:port form for that case, but also
+  // tolerate a missing port on either side.
+  const claimedDomain = body.request.domain.toLowerCase();
+  if (originHost !== claimedDomain &&
+      originHost.split(":")[0] !== claimedDomain.split(":")[0]) {
+    return jsonError(403, "origin-domain-mismatch");
+  }
+
   const canonical = canonicalize(body.request);
   const reqId = await sha256B64u(canonical, 32);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -133,16 +198,28 @@ async function handleDraft(req: Request, env: Env): Promise<Response> {
     reqId,
     role: "browser",
     exp: draftExp,
-    secret: env.SIG_TOKEN_HMAC_SECRET,
+    env,
   });
 
   // Stash the canonical request inside the DO so /session/claim can
   // surface it back to the wallet for verification. The DO entry is
   // DRAFT until claimed; it auto-expires after DRAFT_TTL_SECONDS.
+  //
+  // `serverTs` is the **server-issued timestamp** that the wallet
+  // must echo into the canonical claim-bytes (`prson-login-claim/v2`)
+  // — see M-3. By binding the signature to a Worker-chosen timestamp
+  // stored in the DO, we eliminate both clock-skew issues (the wallet
+  // never computes time) and the theoretical replay window (each
+  // signature is bound to one specific draft).
   const stub = env.LOGIN_SESSIONS.get(env.LOGIN_SESSIONS.idFromName(reqId));
   await stub.fetch("https://x/internal/init-draft", {
     method: "POST",
-    body: JSON.stringify({ canonical, domain: body.request.domain, draftExp }),
+    body: JSON.stringify({
+      canonical,
+      domain: body.request.domain,
+      draftExp,
+      serverTs: nowSec,
+    }),
   });
 
   return jsonOk({
@@ -150,6 +227,7 @@ async function handleDraft(req: Request, env: Env): Promise<Response> {
     draftToken,
     signalingWss: `${selfWssBase(req)}/login/v1/${reqId}`,
     draftExpiresAt: draftExp,
+    serverTs: nowSec,
   });
 }
 
@@ -244,7 +322,7 @@ async function handleClaim(req: Request, env: Env): Promise<Response> {
     reqId: body.reqId,
     role: "wallet",
     exp: activated.sessionExp,
-    secret: env.SIG_TOKEN_HMAC_SECRET,
+    env,
   });
 
   return jsonOk({
@@ -282,12 +360,22 @@ async function handleWsUpgrade(req: Request, env: Env, reqId: string): Promise<R
     return new Response("bad subprotocol", { status: 400 });
   }
   const token = offered[1]!;
-  const verified = await verifyRoleToken(token, reqId, env.SIG_TOKEN_HMAC_SECRET);
+  const verified = await verifyRoleToken(token, reqId, env);
   if (!verified) return new Response("unauthorised", { status: 401 });
 
+  // Hash the token before forwarding so the DO can pin the role to the
+  // first-seen token (M-2: subsequent connections with a different
+  // valid token for the same role are rejected — defends against
+  // forged-but-otherwise-valid tokens, e.g. minted under a leaked
+  // secret before rotation took effect). The Worker hashes here so the
+  // DO never sees the raw token.
+  const tokenHash = await sha256B64u(token);
   const stub = env.LOGIN_SESSIONS.get(env.LOGIN_SESSIONS.idFromName(reqId));
   return stub.fetch(req, {
-    headers: { "x-prson-role": verified.role },
+    headers: {
+      "x-prson-role": verified.role,
+      "x-prson-token-hash": tokenHash,
+    },
   });
 }
 
@@ -329,8 +417,27 @@ interface SessionState {
   canonical?: string;
   domain?: string;
   draftExp?: number;
+  /**
+   * Server-issued timestamp the wallet must echo verbatim in the
+   * canonical claim-bytes (`prson-login-claim/v2`). Stored at draft-
+   * init time; the claim handler rejects any claim whose `body.ts`
+   * doesn't match this stored value. See M-3.
+   */
+  serverTs?: number;
   sessionExp?: number;
   walletPkX?: string;
+  /**
+   * Token-hash pinning per role (M-2). The first WS upgrade for a
+   * given role locks the role to this token hash; subsequent upgrades
+   * with a DIFFERENT hash are refused (401). Same-hash reconnects are
+   * accepted (network blips, app foreground/background) — they still
+   * trigger same-role replacement (4002), but the new socket gets to
+   * keep the role.
+   *
+   * Worker-side it's the sha256(token) base64url; never the token
+   * itself, so a DO storage leak doesn't disclose the bearer.
+   */
+  pinnedTokenHashes?: { browser?: string; wallet?: string };
   /** Replay cache for late-joining peers. */
   cached: SignalingMessage[];
 }
@@ -354,6 +461,7 @@ export class LoginSession {
         canonical: string;
         domain: string;
         draftExp: number;
+        serverTs: number;
       };
       if (this.session.status === "active") {
         // Idempotent: a repeat draft for the same reqId during an active
@@ -366,6 +474,7 @@ export class LoginSession {
         canonical: body.canonical,
         domain: body.domain,
         draftExp: body.draftExp,
+        serverTs: body.serverTs,
         cached: [],
       };
       await this.state.storage.put("session", this.session);
@@ -411,14 +520,34 @@ export class LoginSession {
     }
 
     // WS upgrade arrives via the public route → handleWsUpgrade calls
-    // stub.fetch(originalRequest, { headers: { x-prson-role } }). We
-    // refuse if the session has already lapsed or never existed.
+    // stub.fetch(originalRequest, { headers: { x-prson-role,
+    // x-prson-token-hash } }). We refuse if the session has already
+    // lapsed or never existed, OR if the role is already pinned to a
+    // different token hash (M-2).
     if (req.headers.get("Upgrade") === "websocket") {
       if (this.session.status === "closed") {
         return new Response("session closed", { status: 410 });
       }
       const role = req.headers.get("x-prson-role") as Role | null;
       if (!role) return new Response("missing role", { status: 400 });
+      const tokenHash = req.headers.get("x-prson-token-hash");
+      if (!tokenHash) {
+        return new Response("missing token hash", { status: 400 });
+      }
+      // Role-pin check. First upgrade for the role records the hash;
+      // subsequent upgrades MUST present the same hash to be accepted.
+      const pinned = this.session.pinnedTokenHashes ?? {};
+      const pinnedForRole = pinned[role];
+      if (pinnedForRole != null && pinnedForRole !== tokenHash) {
+        // A second valid token exists for this role — possible only if
+        // the HMAC secret was compromised (M-1 rotation defends going
+        // forward) OR if Worker logic is broken. Either way we refuse.
+        return new Response("role-token-pin-mismatch", { status: 401 });
+      }
+      if (pinnedForRole == null) {
+        this.session.pinnedTokenHashes = { ...pinned, [role]: tokenHash };
+        void this.state.storage.put("session", this.session);
+      }
       const pair = new WebSocketPair();
       const client = pair[0];
       const server = pair[1];
@@ -652,34 +781,150 @@ class RouteError extends Error {
 // ─────────────────────────────────────────────────────────────────────
 
 /**
- * `<exp>.<role>.<base64url(hmacSha256(reqId + "\n" + role + "\n" + exp))>`
- * Worker checks: not expired, role matches, HMAC matches.
+ * Versioned token format:
+ *
+ *   `<kid>.<exp>.<role>.<base64url(HMAC-SHA256(reqId+"\n"+role+"\n"+exp))>`
+ *
+ * The `kid` identifies which keyring entry signed the token; verifiers
+ * accept any kid whose entry is currently active OR retired (until the
+ * retired `validUntil` timestamp). Legacy tokens minted with the
+ * previous 3-segment format (no kid) are still accepted, signed under
+ * the legacy single-secret binding — that branch is the migration off-
+ * ramp; once every issued token has been replaced by a kid-prefixed one
+ * (~15 min after first deploy), the legacy branch can be retired.
  */
 async function mintRoleToken(opts: {
   reqId: string;
   role: Role;
   exp: number;
-  secret: string;
+  env: Env;
 }): Promise<string> {
-  const tag = await hmacSha256B64u(opts.secret, `${opts.reqId}\n${opts.role}\n${opts.exp}`);
-  return `${opts.exp}.${opts.role}.${tag}`;
+  const ring = resolveSignerKeyring(opts.env);
+  const tag = await hmacSha256B64u(
+    ring.active.secret,
+    `${opts.reqId}\n${opts.role}\n${opts.exp}`,
+  );
+  return `${ring.active.kid}.${opts.exp}.${opts.role}.${tag}`;
 }
 
 async function verifyRoleToken(
   token: string,
   reqId: string,
-  secret: string,
-): Promise<{ role: Role; exp: number } | null> {
+  env: Env,
+): Promise<{ role: Role; exp: number; kid: string } | null> {
   const parts = token.split(".");
-  if (parts.length !== 3) return null;
+  // Two accepted shapes:
+  //   4-segment (v2, kid-prefixed): kid.exp.role.tag
+  //   3-segment (v1, legacy):       exp.role.tag       (verifies under
+  //                                                     SIG_TOKEN_HMAC_SECRET)
+  if (parts.length !== 3 && parts.length !== 4) return null;
+
+  if (parts.length === 4) {
+    const kid = parts[0]!;
+    const exp = Number(parts[1]);
+    const role = parts[2] as Role;
+    const tag = parts[3]!;
+    if (!Number.isFinite(exp) || exp * 1000 < Date.now()) return null;
+    if (role !== "browser" && role !== "wallet") return null;
+    const ring = resolveSignerKeyring(env);
+    const entry = ring.entries.get(kid);
+    if (!entry) return null;
+    if (entry.validUntil != null && entry.validUntil * 1000 < Date.now()) {
+      return null;
+    }
+    const expected = await hmacSha256B64u(
+      entry.secret,
+      `${reqId}\n${role}\n${exp}`,
+    );
+    if (!timingSafeEqual(tag, expected)) return null;
+    return { role, exp, kid };
+  }
+
+  // Legacy 3-segment path. Accepted only when SIG_TOKEN_HMAC_SECRET is
+  // configured (deployments that already migrated to the keyring don't
+  // need the back-compat branch — drop SIG_TOKEN_HMAC_SECRET from
+  // bindings and this path becomes a no-op).
+  if (!env.SIG_TOKEN_HMAC_SECRET) return null;
   const exp = Number(parts[0]);
   const role = parts[1] as Role;
   const tag = parts[2]!;
   if (!Number.isFinite(exp) || exp * 1000 < Date.now()) return null;
   if (role !== "browser" && role !== "wallet") return null;
-  const expected = await hmacSha256B64u(secret, `${reqId}\n${role}\n${exp}`);
+  const expected = await hmacSha256B64u(
+    env.SIG_TOKEN_HMAC_SECRET,
+    `${reqId}\n${role}\n${exp}`,
+  );
   if (!timingSafeEqual(tag, expected)) return null;
-  return { role, exp };
+  return { role, exp, kid: "legacy" };
+}
+
+interface SignerEntry {
+  kid: string;
+  secret: string;
+  /** Epoch seconds. Null on the active entry (no upper bound). */
+  validUntil: number | null;
+}
+
+interface SignerKeyring {
+  active: SignerEntry;
+  /** Map of all entries (active + retired) keyed by kid for lookup. */
+  entries: Map<string, SignerEntry>;
+}
+
+/**
+ * Parse `env.SIG_TOKEN_HMAC_KEYRING` (preferred) OR synthesize a
+ * one-entry keyring from `env.SIG_TOKEN_HMAC_SECRET` (back-compat).
+ * Cached per isolate so repeat invocations don't re-parse.
+ */
+let _ringCache: { rawHash: string; ring: SignerKeyring } | null = null;
+function resolveSignerKeyring(env: Env): SignerKeyring {
+  const raw = env.SIG_TOKEN_HMAC_KEYRING?.trim() ?? "";
+  if (raw.length === 0) {
+    // Legacy single-secret path. Synthesise an `active` entry with a
+    // stable kid so tokens minted in this path are still kid-prefixed
+    // (forward-compat — if the operator later sets the keyring, old
+    // tokens still verify because `legacy` lives in the keyring's
+    // back-compat branch).
+    if (!env.SIG_TOKEN_HMAC_SECRET) {
+      throw new Error("No HMAC secret configured (KEYRING nor SECRET set)");
+    }
+    const entry: SignerEntry = {
+      kid: "legacy",
+      secret: env.SIG_TOKEN_HMAC_SECRET,
+      validUntil: null,
+    };
+    return { active: entry, entries: new Map([["legacy", entry]]) };
+  }
+  // Tiny cache so we don't JSON.parse on every signing operation.
+  if (_ringCache && _ringCache.rawHash === raw) return _ringCache.ring;
+  let parsed: {
+    active: { kid: string; secret: string };
+    retired?: Array<{ kid: string; secret: string; validUntil: number }>;
+  };
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`SIG_TOKEN_HMAC_KEYRING is not valid JSON: ${(e as Error).message}`);
+  }
+  if (!parsed.active?.kid || !parsed.active?.secret) {
+    throw new Error("SIG_TOKEN_HMAC_KEYRING.active must have {kid, secret}");
+  }
+  const entries = new Map<string, SignerEntry>();
+  entries.set(parsed.active.kid, {
+    kid: parsed.active.kid,
+    secret: parsed.active.secret,
+    validUntil: null,
+  });
+  for (const r of parsed.retired ?? []) {
+    if (!r.kid || !r.secret || typeof r.validUntil !== "number") continue;
+    entries.set(r.kid, { kid: r.kid, secret: r.secret, validUntil: r.validUntil });
+  }
+  const ring: SignerKeyring = {
+    active: entries.get(parsed.active.kid)!,
+    entries,
+  };
+  _ringCache = { rawHash: raw, ring };
+  return ring;
 }
 
 // ─────────────────────────────────────────────────────────────────────
