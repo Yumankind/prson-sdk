@@ -2468,7 +2468,8 @@ async function verifyPresentation(sdJwt, opts) {
   if (Math.abs(Date.now() / 1e3 - kbPayload.iat) > maxAge) {
     return { ok: false, reason: "kb_iat_stale" };
   }
-  const presentationPrefix = `${jws}~${discTokens.join("~")}~`;
+  const prefixParts = discTokens.length === 0 ? [jws] : [jws, ...discTokens];
+  const presentationPrefix = `${prefixParts.join("~")}~`;
   const sdHash = b64uEncode2(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(presentationPrefix))));
   if (kbPayload.sd_hash !== sdHash) return { ok: false, reason: "sd_hash_mismatch" };
   const holderKey = await crypto.subtle.importKey(

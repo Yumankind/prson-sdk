@@ -174,7 +174,18 @@ export async function verifyPresentation(
   if (Math.abs(Date.now() / 1000 - kbPayload.iat) > maxAge) {
     return { ok: false, reason: "kb_iat_stale" };
   }
-  const presentationPrefix = `${jws}~${discTokens.join("~")}~`;
+  // Per SD-JWT-VC: prefix is "<JWS>~<D_1>~...~<D_n>~" with exactly
+  // ONE trailing tilde — N tildes total for N-1 disclosures. The
+  // naive `${jws}~${discTokens.join("~")}~` produces TWO trailing
+  // tildes when `discTokens.length === 0` (since `[].join === ""`),
+  // breaking every no-disclosure presentation (verified-human only,
+  // anonymous, anything where the holder filtered out all
+  // disclosures). Build it from parts directly so it stays correct
+  // at n=0.
+  const prefixParts = discTokens.length === 0
+    ? [jws]
+    : [jws, ...discTokens];
+  const presentationPrefix = `${prefixParts.join("~")}~`;
   const sdHash = b64uEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(presentationPrefix))));
   if (kbPayload.sd_hash !== sdHash) return { ok: false, reason: "sd_hash_mismatch" };
 
