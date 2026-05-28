@@ -83,16 +83,18 @@ export type DecryptedEnvelope = {
   presentation?: string;
   fragments?: unknown[];
 
-  /** `claim-update` body: per-claim delta. Fired only after the
-   *  bundled `presentation` re-verifies; the SDK then diffs old vs
-   *  new and fires per-name `claim_added` / `claim_updated` /
-   *  `claim_removed` listeners. The wire `delta` is optional — the
-   *  SDK can compute the diff itself by comparing the new VC's
-   *  claims to its cached snapshot. */
+  /** `claim-update` body: per-claim **name-only** delta. The
+   *  wallet MUST NOT include claim values here — the SDK ignores
+   *  the delta entirely and recomputes from the re-verified VC
+   *  for correctness, and emits name-only events to keep raw
+   *  claim values out of telemetry/log surfaces. The wire field
+   *  is kept (typed as name-only) so future wallets can hint at
+   *  what changed without an SDK bump, but the SDK never trusts
+   *  the hint as authoritative. */
   delta?: {
-    added?: Record<string, unknown>;
+    added?: string[];
     removed?: string[];
-    updated?: Record<string, { oldValue?: unknown; newValue: unknown }>;
+    updated?: string[];
   };
 
   /** `display-update` body. Either field independently optional;

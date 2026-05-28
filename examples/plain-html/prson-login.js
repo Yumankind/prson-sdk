@@ -2785,14 +2785,22 @@ var PrsonLoginSession = class {
   }
   /**
    * Verify the embedded presentation, then diff its claims against
-   * the cached snapshot and emit per-claim events. The wire-level
-   * `envelope.delta` is advisory only — we recompute the diff from
-   * the verified SD-JWT so a malicious wallet (or buggy one)
-   * can't lie about which claim changed.
+   * the cached snapshot and emit name-only per-claim events. The
+   * actual claim values land in `this._claimsSnapshot` (accessible
+   * via `session.claims`) but **never** in the event payloads —
+   * see the privacy note on the [LoginEvent] type.
    *
    * Re-verifies against the same audience + accepted-VCT set as the
    * initial sign-in. A `claim-update` whose presentation fails
-   * verification is dropped silently — fail-closed.
+   * verification is dropped silently — fail-closed. Same for a
+   * cnf-mismatch (the wallet swapped per-domain key under us).
+   *
+   * The wire-level `envelope.delta` is intentionally ignored — we
+   * recompute the diff from the verified SD-JWT so a malicious
+   * wallet can't lie about which claim changed. The wallet should
+   * not include values in `envelope.delta` at all (the wire
+   * grammar in `crypto.ts` documents this as name-only); we'd
+   * ignore them even if it did.
    */
   async _handleClaimUpdate(envelope) {
     if (!envelope.presentation) return;
@@ -2811,14 +2819,9 @@ var PrsonLoginSession = class {
     this._claimsSnapshot = { ...newClaims };
     for (const [name, newValue] of Object.entries(newClaims)) {
       if (!(name in oldClaims)) {
-        this._dispatch({ type: "claim_added", name, value: newValue });
+        this._dispatch({ type: "claim_added", name });
       } else if (!_deepEqual(oldClaims[name], newValue)) {
-        this._dispatch({
-          type: "claim_updated",
-          name,
-          oldValue: oldClaims[name],
-          newValue
-        });
+        this._dispatch({ type: "claim_updated", name });
       }
     }
     for (const name of Object.keys(oldClaims)) {

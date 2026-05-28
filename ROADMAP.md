@@ -41,21 +41,44 @@ type LoginEvent =
 
   // Profile / claim updates pushed by the wallet during an active
   // session, without forcing a full re-sign-in cycle. The wallet
-  // emits these when the underlying source changes:
-  | { type: "claim_added";    name: string; value: unknown }
+  // emits these when the underlying source changes.
+  //
+  // Privacy: events are NAME-ONLY. The verified value lands in
+  // `session.claims[name]` after the SDK re-verifies the fresh VC
+  // bundled with the envelope; the event payload itself never
+  // carries the value. This keeps raw identity data out of
+  // `onAny` telemetry surfaces (loggers, analytics pipes,
+  // crash reporters).
+  | { type: "claim_added";    name: string }
   | { type: "claim_removed";  name: string }
-  | { type: "claim_updated";  name: string; oldValue: unknown; newValue: unknown }
+  | { type: "claim_updated";  name: string }
 
   // Display-only updates. Don't carry crypto material; just hints
   // for the host to refresh its UI. The wallet decides whether to
   // include these in the channel (user can disable from the active-
   // sessions tile if a domain shouldn't see live updates).
+  //
+  // These DO carry values — they're explicitly public (the user
+  // chose to expose them), and the host needs them to update
+  // cosmetic UI without a second read step.
   | { type: "display_name_changed"; displayName: string | null }
   | { type: "avatar_changed";       avatar: { url: string; hash: string } | null }
 
   // Compliance / status updates from the issuer (notary) side.
   | { type: "credential_revoked";   reason: "alias_transferred" | "user_revoked" | "key_compromised" };
 ```
+
+> **Why name-only for claim events?** `onAny` is the natural
+> attachment point for telemetry (analytics, error reporters,
+> ML feature pipelines, …). Any of those trivially capture entire
+> event objects. Putting `value` into the event payload would
+> silently leak raw identity data — name, birthdate, verification
+> level — through every such pipe without the host owner
+> noticing. Name-only events let telemetry log **that** a claim
+> changed without ever seeing **what** it changed to. The host
+> reads `session.claims[name]` when (and only when) it needs the
+> value, and that read site becomes the explicit, auditable point
+> where claim values cross from the SDK into host code.
 
 ### 1.2 Wire integration
 
@@ -67,19 +90,36 @@ with `envelope.msg` extended:
 envelope.msg ∈ {
   "presentation",     // existing — full SD-JWT-VC delivery (initial + renewals)
   "revoke",            // existing — wallet-side sign-out
-  "claim-update",      // NEW: { delta: {added,removed,updated} }
+  "claim-update",      // NEW: { presentation, delta?: { added/removed/updated: string[] } }
   "display-update",    // NEW: { displayName?, avatar? }
   "credential-revoked" // NEW: { reason }
 }
 ```
 
+> **`claim-update` payload constraints (wire grammar):** the
+> wallet MUST send the freshly-minted SD-JWT-VC presentation in
+> `envelope.presentation` — that's the only place claim values
+> are allowed to travel. The optional `delta` field is **name-only**
+> (lists of changed claim names). The browser SDK ignores `delta`
+> as a security input — it always recomputes the diff from the
+> re-verified VC — and emits name-only events to the host. A
+> wallet that includes values inside `delta` violates the
+> protocol; the SDK won't error on it, but it will also never
+> trust or propagate those values.
+
 The host subscribes via:
 
 ```ts
 session.on("claim_updated", (e) => {
-  if (e.name === "verification_level") refreshTrustBadge(e.newValue);
+  // Event payload is name-only. Read the current value from the
+  // session's verified-claims snapshot when you need it.
+  if (e.name === "verification_level") {
+    refreshTrustBadge(session.claims.verification_level);
+  }
 });
 session.on("avatar_changed", (e) => {
+  // Display events carry their values directly — explicitly
+  // public, meant for cosmetic UI.
   navAvatar.src = e.avatar?.url ?? defaultAvatarUrl;
 });
 ```

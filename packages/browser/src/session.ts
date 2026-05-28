@@ -66,14 +66,36 @@ export type Renewal = Pick<SignInResult, "sdJwtVc" | "claims" | "credential">;
  * subscription, even though `signIn()` already returns the result
  * synchronously. Useful for `onAny` listeners that want a single
  * log line per lifecycle transition.
+ *
+ * **Privacy policy: claim events never carry raw values.**
+ * `claim_added` / `claim_updated` / `claim_removed` deliver only
+ * the changed claim **name**. The actual value lives in
+ * `session.claims` (the verified snapshot the SDK keeps in sync
+ * with the latest SD-JWT-VC) and is read on-demand by the host.
+ *
+ * Why: `onAny` is the natural attachment point for telemetry
+ * (analytics, error reporters, ML feature pipes, …). Any of those
+ * trivially capture entire event objects. Putting `value` into the
+ * event payload would silently leak raw identity data — name,
+ * birthdate, verification level — through every such pipe without
+ * the host owner noticing. Name-only events let telemetry log
+ * **that** a claim changed without ever seeing **what** it changed
+ * to. The host reads `session.claims[name]` when (and only when)
+ * it needs the value, and is free to scrub that read site
+ * independently of the event surface.
+ *
+ * The exceptions are the explicitly-public display fields
+ * (`display_name_changed`, `avatar_changed`) — those carry their
+ * values directly because they're meant to drive UI without an
+ * extra read step.
  */
 export type LoginEvent =
   | { type: "signed_in"; result: SignInResult }
   | { type: "signed_out"; reason: ExpiryReason }
   | { type: "renewed"; result: SignInResult }
-  | { type: "claim_added"; name: string; value: unknown }
+  | { type: "claim_added"; name: string }
   | { type: "claim_removed"; name: string }
-  | { type: "claim_updated"; name: string; oldValue: unknown; newValue: unknown }
+  | { type: "claim_updated"; name: string }
   | { type: "display_name_changed"; displayName: string | null }
   | { type: "avatar_changed"; avatar: { url: string; hash: string } | null }
   | { type: "credential_revoked"; reason: CredentialRevokedReason };
@@ -325,14 +347,22 @@ export class PrsonLoginSession {
 
   /**
    * Verify the embedded presentation, then diff its claims against
-   * the cached snapshot and emit per-claim events. The wire-level
-   * `envelope.delta` is advisory only — we recompute the diff from
-   * the verified SD-JWT so a malicious wallet (or buggy one)
-   * can't lie about which claim changed.
+   * the cached snapshot and emit name-only per-claim events. The
+   * actual claim values land in `this._claimsSnapshot` (accessible
+   * via `session.claims`) but **never** in the event payloads —
+   * see the privacy note on the [LoginEvent] type.
    *
    * Re-verifies against the same audience + accepted-VCT set as the
    * initial sign-in. A `claim-update` whose presentation fails
-   * verification is dropped silently — fail-closed.
+   * verification is dropped silently — fail-closed. Same for a
+   * cnf-mismatch (the wallet swapped per-domain key under us).
+   *
+   * The wire-level `envelope.delta` is intentionally ignored — we
+   * recompute the diff from the verified SD-JWT so a malicious
+   * wallet can't lie about which claim changed. The wallet should
+   * not include values in `envelope.delta` at all (the wire
+   * grammar in `crypto.ts` documents this as name-only); we'd
+   * ignore them even if it did.
    */
   private async _handleClaimUpdate(envelope: DecryptedEnvelope) {
     if (!envelope.presentation) return;
@@ -353,17 +383,15 @@ export class PrsonLoginSession {
     const newClaims = verified.claims;
     this._claimsSnapshot = { ...newClaims };
 
-    // Added + updated
+    // Added + updated — emit name only. Host reads the value via
+    // `session.claims[name]` when needed; that read site is the
+    // explicit, auditable point where claim values cross from the
+    // SDK into host code.
     for (const [name, newValue] of Object.entries(newClaims)) {
       if (!(name in oldClaims)) {
-        this._dispatch({ type: "claim_added", name, value: newValue });
+        this._dispatch({ type: "claim_added", name });
       } else if (!_deepEqual(oldClaims[name], newValue)) {
-        this._dispatch({
-          type: "claim_updated",
-          name,
-          oldValue: oldClaims[name],
-          newValue,
-        });
+        this._dispatch({ type: "claim_updated", name });
       }
     }
     // Removed
