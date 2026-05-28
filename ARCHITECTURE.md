@@ -54,7 +54,7 @@ on the fly; the browser keeps X25519 (KX) and never signs with it.
    │  · wss://…/login/v1/<r>  — both peers WS-connect with their HMAC    │
    │                            role token; DO fans signals.             │
    │  · Durable Object per reqId   · DRAFT → ACTIVE → closed             │
-   │     · cached offer/answer/ICE · 60 s draft TTL, 15 min session TTL  │
+   │     · cached offer/answer/ICE · 180 s draft TTL, 15 min session TTL │
    │  · Cloudflare TURN minted server-side (API token = Worker secret)   │
    └─────────────────────────────────────────────────────────────────────┘
              ▲                                          ▲
@@ -181,7 +181,7 @@ on this site — and changing devices loses access to the account. See
    ←  { reqId,
         draftToken,                                  // role-tagged HMAC, browser
         signalingWss: "wss://signaling.prson.net/login/v1/<reqId>",
-        draftExpiresAt,                              // 60 s
+        draftExpiresAt,                              // 180 s
         serverTs }                                   // epoch-seconds, server-issued
    (Anonymous, IP-rate-limited at 30 drafts/IP/min in a KV-backed
     counter. The Worker also enforces an **Origin-header check** — the
@@ -476,7 +476,7 @@ Durable Object per `reqId`.
 
 | Route | Auth | Description |
 |---|---|---|
-| `POST /session/draft` | anonymous, IP-rate-limited (default 30/IP/min, in a KV namespace) + `Origin` header must match `request.domain` (§C-1) | Browser-initiated. Hashes `request` → `reqId`. Stores canonical bytes **plus a server-stamped `serverTs = nowSec`** in the DO (status `DRAFT`). Returns `{reqId, draftToken, signalingWss, draftExpiresAt, serverTs}`. **No TURN allocated.** Draft auto-expires in 60 s if not claimed. |
+| `POST /session/draft` | anonymous, IP-rate-limited (default 30/IP/min, in a KV namespace) + `Origin` header must match `request.domain` (§C-1) | Browser-initiated. Hashes `request` → `reqId`. Stores canonical bytes **plus a server-stamped `serverTs = nowSec`** in the DO (status `DRAFT`). Returns `{reqId, draftToken, signalingWss, draftExpiresAt, serverTs}`. **No TURN allocated.** Draft auto-expires in 180 s (3 min) if not claimed. |
 | `POST /session/claim` | Ed25519 signature over the **v2** canonical claim tuple `"prson-login-claim/v2\n" + reqId + "\n" + walletPkX + "\n" + serverTs + "\n" + domain`. The wallet does NOT supply `serverTs` in the request body — the verifying Durable Object reads it from its own stored draft state. | Wallet-initiated. The Worker route layer is a thin shim; the actual verification + state transition happens **inside the Durable Object** (atomic): DO loads stored `serverTs` + `domain`, reconstructs canonical v2 bytes, Ed25519-verifies against the supplied `walletPk`, echoes-checks the domain against the stored draft, promotes DO to `ACTIVE`, mints Cloudflare TURN creds (Worker secret-bound `CF_TURN_KEY_ID` + `CF_TURN_API_TOKEN`), returns `{request, walletSessionToken, signalingWss, turn, expiresAt}`. Moving verification inside the DO closes a TOCTOU class — the verified `serverTs` is exactly the one promoted. |
 | `GET wss://…/login/v1/<reqId>` | role-tagged keyring HMAC: `<kid>.<exp>.<role>.<HMAC-SHA256(kid\nreqId\nrole\nexp)>` issued by the routes above; legacy 3-segment `<exp>.<role>.<HMAC>` accepted for in-flight back-compat | WS upgrade for either peer. The Worker reads the token from `Sec-WebSocket-Protocol`, verifies against the keyring, **pins** the token's `sha256` to the role in the DO (§M-2), then forwards into the DO. |
 
@@ -527,7 +527,7 @@ the Worker on `/session/claim` where the API token is a Worker secret.
 
 | Surface | TTL |
 |---|---|
-| `draftToken` HMAC | 60 s (must be claimed by a wallet within this window) |
+| `draftToken` HMAC | 180 s / 3 min (must be claimed by a wallet within this window) |
 | `walletSessionToken` HMAC | 15 min (from /session/claim → DO alarm) |
 | Cloudflare TURN credentials | 15 min (minted only on /session/claim) |
 | Durable Object | auto-destroys at draftExp OR sessionExp (whichever applies) |

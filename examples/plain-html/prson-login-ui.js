@@ -2104,8 +2104,8 @@ var require_browser = __commonJS({
 
 // src/qr-renderer.ts
 var import_qrcode = __toESM(require_browser(), 1);
-var DRAFT_TTL_SECONDS = 60;
-var COUNTDOWN_WARN_SECONDS = 15;
+var DRAFT_TTL_SECONDS = 180;
+var COUNTDOWN_WARN_SECONDS = 30;
 function extractServerTs(url) {
   try {
     try {

@@ -24,11 +24,17 @@ import QRCode from "qrcode";
  * signaling Worker. The QR is generated against a server-stamped
  * `serverTs` we pull out of the URL's `t=` query param, so the
  * countdown matches what the Worker will actually accept.
+ *
+ * 3 minutes: covers a full mnemonic-holder journey through the
+ * wallet drawer (open app → Face ID → identity pick → disclosure
+ * pick → confirm) without forcing a mid-flow refresh.
  */
-const DRAFT_TTL_SECONDS = 60;
+const DRAFT_TTL_SECONDS = 180;
 
-/** Threshold at which the bar + label flip amber. */
-const COUNTDOWN_WARN_SECONDS = 15;
+/** Threshold at which the bar + label flip amber. Scaled to ~17% of
+ *  the window so the warn state fires with similar relative urgency
+ *  regardless of the absolute TTL. */
+const COUNTDOWN_WARN_SECONDS = 30;
 
 export interface LoginQrHandle {
   dispose(): void;
