@@ -46,23 +46,26 @@ A1 wants to: render a QR on `legit-bank.com` that, when scanned,
 yields a presentation bound to `phisher.evil`. Two mechanisms stop
 them:
 
-1. **The wallet calls `resolveLoginSession({ reqId })`** before
-   showing the consent UI. The server-stored `request` was uploaded
-   *by the genuine browser session*, on `legit-bank.com`'s page. The
-   wallet **rejects the login** if the QR's `req` blob disagrees with
-   the server-stored one — i.e. the QR can't unilaterally lie about
-   the domain.
-2. **The user sees `<domain>` in the drawer**, big, before they tap
-   Approve. Phishers can't paint a non-genuine domain into this
-   string because (1) above already vetoed.
+1. **The Cloudflare Worker echoes the canonical request back to the
+   wallet on `/session/claim`.** That request was uploaded *by the
+   genuine browser session*, on `legit-bank.com`'s page. The wallet
+   side compares the QR's `req` blob with what the Worker returns and
+   **rejects the login** on mismatch — the QR can't unilaterally lie
+   about the domain.
+2. **The Worker also re-checks** the `domain` field of the claim
+   signature against the stored draft. A wallet signing for the wrong
+   domain returns `401 domain-mismatch` — defence in depth even when
+   the wallet skips the local echo check.
+3. **The user sees `<domain>` in the drawer**, big, before they tap
+   Approve. The drawer mirrors exactly what the Worker returned, so
+   a clone site can't even reach this step unless they front-ran the
+   entire flow on their own session, in which case the QR scan signs
+   the user in to *their site*, not the user's legitimate session.
 
 A1 can still display `legit-bank.com` in their browser URL bar
-(homograph IDN attacks, lookalike domains). The drawer mirrors
-**exactly** what `resolveLoginSession` returns, which the genuine
-browser uploaded — so a clone site can't even reach this step unless
-they front-ran the entire flow on their own LiveKit room, in which
-case the QR scan signs them in to *their site*, not the user's
-legitimate session.
+(homograph IDN attacks, lookalike domains). That's a phishing problem,
+not a protocol problem — same risk profile as every "Sign in with X"
+button.
 
 ## 4. Encryption-at-rest-in-transit
 
@@ -192,9 +195,19 @@ When this ships, we should commission a focused audit covering:
       verifier and in any partner code we ship samples of.
 - [ ] The renewal path can't be triggered by anyone other than the
       wallet that signed in originally.
-- [ ] Cloudflare Worker `sigToken` HMAC verifies the issuing Firebase
-      function and rejects replay (single-use; the Worker burns the
-      token on first WS upgrade).
-- [ ] Cloudflare Worker firebase-token verification path uses the
-      official JWKS, validates `aud === <our project>`,
-      `iss === https://securetoken.google.com/<project>`, `exp`.
+- [ ] Cloudflare Worker `draftToken` + `walletSessionToken` HMAC
+      verify cleanly, reject on expired `exp` or mismatched role,
+      and the HMAC secret has rotation playbook.
+- [ ] Wallet's Ed25519 claim signature is verified on the canonical
+      tuple `"prson-login-claim/v1\n" + reqId + "\n" + walletPkX +
+      "\n" + ts + "\n" + domain` — version prefix protects against
+      cross-protocol replay.
+- [ ] `/session/claim` echoes `domain` back through the DO and
+      rejects with `401 domain-mismatch` when the wallet signed for
+      a different domain than the browser drafted.
+- [ ] No TURN credentials are issued before /session/claim succeeds
+      (verified by reading the Worker's `mintCloudflareTurnCreds`
+      call site and confirming it's only inside `handleClaim`).
+- [ ] IP rate-limit on /session/draft prevents anonymous draft-spam
+      from exhausting Durable Object capacity; KV bucket auto-expires
+      after 65 s.
