@@ -428,6 +428,26 @@ export class PrsonLogin {
 export { PrsonLoginSession };
 export type { Renewal };
 
+// Request channel — types + DOM-binding helpers. `bindInput` /
+// `bindForm` are the kiosk-companion entry points; they synthesise
+// a `session.request(...)` call from a DOM element and write the
+// wallet's reply back into the page.
+export type {
+  LoginRequest,
+  LoginResponse,
+  RequestOptions,
+  InputType,
+  InputOption,
+  InputFormField,
+} from "./requests.js";
+export {
+  bindInput,
+  bindForm,
+  bindMouse,
+  type BindController,
+  type BindMouseOptions,
+} from "./bind.js";
+
 // ─────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────

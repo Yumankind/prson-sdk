@@ -2710,6 +2710,22 @@ var PrsonLoginSession = class {
     this._walletSessionPk = null;
     /** Pairs outbound `request` envelopes with inbound `response`s. */
     this._requestController = new RequestController();
+    /**
+     * Per-`requestId` mouse-update subscribers. Populated by
+     * [`bindMouse`] when it opens a `kind: "mouse"` request and torn
+     * down when the controller disposes or the wallet's final
+     * `response` arrives. Keys are RFC-4122 v4 UUIDs (the request id);
+     * values get a stream of decoded `mouse` bodies.
+     */
+    this._mouseSubscribers = /* @__PURE__ */ new Map();
+    /**
+     * User's preferred UI language as a BCP-47 tag. Captured from the
+     * initial `presentation` envelope's `preferredLanguage` field;
+     * updated whenever a fresh envelope arrives with a new value.
+     * Null until the first envelope lands. The host page reads this
+     * to localise its own UI without an extra round-trip.
+     */
+    this._preferredLanguage = null;
     /** Per-type listener map. */
     this._listeners = /* @__PURE__ */ new Map();
     /** "Fire on every event" subscribers — for logging / telemetry. */
@@ -2738,6 +2754,11 @@ var PrsonLoginSession = class {
   /** Snapshot of the most recent verified claims (since last renew / update). */
   get claims() {
     return this._claimsSnapshot;
+  }
+  /** User's preferred UI language (BCP-47 tag) or null if the
+   *  wallet hasn't published one yet. */
+  get preferredLanguage() {
+    return this._preferredLanguage;
   }
   // ─── Subscription API ────────────────────────────────────────────
   /**
@@ -2813,11 +2834,32 @@ var PrsonLoginSession = class {
    * `{ msg: "response", requestId, result | error }`.
    */
   async request(req, opts) {
+    return this._sendRequest(req, opts);
+  }
+  /**
+   * Streaming variant of [request] for `kind: "mouse"`. Identical
+   * to `request()` except [onFrame] is invoked for every
+   * `mouse-update` envelope the wallet emits against the request's
+   * UUID until the terminating `response` arrives. The returned
+   * promise resolves with the final response (i.e. when the user
+   * closes the wallet drawer). Used by [`bindMouse`].
+   *
+   * Separated from `request()` because the subscriber MUST be
+   * attached against the requestId BEFORE the envelope is sent —
+   * otherwise the first `mouse-update` frame can race ahead of the
+   * subscription. `request()` doesn't expose its requestId, so we
+   * provide this dedicated entry point rather than leak the id.
+   */
+  async requestMouse(req, onFrame, opts) {
+    return this._sendRequest(req, opts, onFrame);
+  }
+  async _sendRequest(req, opts, onMouseFrame) {
     if (this._closed) return { ok: false, error: "session-closed" };
     const recipientPk = this._walletSessionPk;
     if (!recipientPk) return { ok: false, error: "no-active-session" };
     const timeoutMs = opts?.timeoutMs ?? 6e4;
     const { requestId, promise } = this._requestController.enqueue(timeoutMs);
+    if (onMouseFrame) this._mouseSubscribers.set(requestId, onMouseFrame);
     const envelope = {
       v: "prson_vp_v1",
       msg: "request",
@@ -2855,12 +2897,23 @@ var PrsonLoginSession = class {
         envelope.inputType = req.inputType;
         envelope.label = req.label;
         if (req.placeholder !== void 0) envelope.placeholder = req.placeholder;
+        if (req.defaultValue !== void 0) envelope.defaultValue = req.defaultValue;
         if (req.minLength !== void 0) envelope.minLength = req.minLength;
         if (req.maxLength !== void 0) envelope.maxLength = req.maxLength;
         if (req.min !== void 0) envelope.min = req.min;
         if (req.max !== void 0) envelope.max = req.max;
         if (req.pattern !== void 0) envelope.pattern = req.pattern;
         if (req.required !== void 0) envelope.required = req.required;
+        if (req.options !== void 0) envelope.options = req.options;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "input-form":
+        envelope.fields = req.fields;
+        if (req.submitLabel !== void 0) envelope.submitLabel = req.submitLabel;
+        if (req.reason) envelope.reason = req.reason;
+        break;
+      case "mouse":
+        envelope.mode = req.mode;
         if (req.reason) envelope.reason = req.reason;
         break;
     }
@@ -2868,6 +2921,7 @@ var PrsonLoginSession = class {
       const boxed = boxToWallet(recipientPk, JSON.stringify(envelope));
       this._transport.send(boxed);
     } catch {
+      if (onMouseFrame) this._mouseSubscribers.delete(requestId);
       return { ok: false, error: "session-closed" };
     }
     return promise;
@@ -2928,6 +2982,9 @@ var PrsonLoginSession = class {
     if (typeof envelope.walletSessionPk === "string") {
       this._walletSessionPk = envelope.walletSessionPk;
     }
+    if (typeof envelope.preferredLanguage === "string") {
+      this._preferredLanguage = envelope.preferredLanguage;
+    }
     switch (envelope.msg) {
       case "revoke":
         this._teardown("wallet_signed_out");
@@ -2947,6 +3004,18 @@ var PrsonLoginSession = class {
         return;
       case "response":
         this._requestController.resolve(envelope);
+        if (envelope.requestId) this._mouseSubscribers.delete(envelope.requestId);
+        return;
+      case "mouse-update":
+        if (envelope.requestId && envelope.mouse) {
+          const sub = this._mouseSubscribers.get(envelope.requestId);
+          if (sub) {
+            try {
+              sub(envelope.mouse);
+            } catch {
+            }
+          }
+        }
         return;
       default:
         return;
@@ -3069,6 +3138,7 @@ var PrsonLoginSession = class {
     } catch {
     }
     this._requestController.closeAll("session-closed");
+    this._mouseSubscribers.clear();
     this._dispatch({ type: "signed_out", reason });
     this._listeners.clear();
     this._anyListeners.clear();
@@ -3319,6 +3389,399 @@ function renderLoginQr(url, mount, theme) {
   };
 }
 
+// src/bind.ts
+function bindInput(session, element) {
+  return {
+    async request(opts) {
+      const req = inputRequestFromElement(element, opts?.reason);
+      const reply = await session.request(req, opts);
+      if (reply.ok) writeValueIntoElement(element, reply.value);
+      return reply;
+    },
+    dispose() {
+    }
+  };
+}
+function bindForm(session, container) {
+  return {
+    async request(opts) {
+      const elements = collectFieldElements(container);
+      if (elements.length === 0) {
+        return {
+          ok: false,
+          error: "unsupported"
+        };
+      }
+      if (elements.length === 1) {
+        const reply2 = await session.request(
+          inputRequestFromElement(elements[0], opts?.reason),
+          opts
+        );
+        if (reply2.ok) writeValueIntoElement(elements[0], reply2.value);
+        if (reply2.ok && container instanceof HTMLFormElement) {
+          tryRequestSubmit(container);
+        }
+        return reply2;
+      }
+      const fields = elements.map((el, i) => fieldFromElement(el, i));
+      const req = {
+        kind: "input-form",
+        fields,
+        submitLabel: container instanceof HTMLFormElement ? "Send" : "Done",
+        reason: opts?.reason
+      };
+      const reply = await session.request(req, opts);
+      if (reply.ok && reply.value && typeof reply.value === "object") {
+        const values = reply.value;
+        for (const el of elements) {
+          const name = nameForElement(el, elements.indexOf(el));
+          if (name in values) writeValueIntoElement(el, values[name]);
+        }
+        if (container instanceof HTMLFormElement) tryRequestSubmit(container);
+      }
+      return reply;
+    },
+    dispose() {
+    }
+  };
+}
+function inputRequestFromElement(el, reason) {
+  if (el instanceof HTMLSelectElement) {
+    return {
+      kind: "input",
+      inputType: "select",
+      label: resolveLabel(el),
+      options: readOptions(el),
+      defaultValue: el.value || void 0,
+      required: el.required,
+      reason
+    };
+  }
+  const inputType = resolveInputType(el);
+  const base = {
+    kind: "input",
+    inputType,
+    label: resolveLabel(el),
+    placeholder: el.placeholder || void 0,
+    defaultValue: el.value || void 0,
+    required: el instanceof HTMLInputElement ? el.required : false,
+    reason
+  };
+  return {
+    ...base,
+    ...textConstraints(el),
+    ...el instanceof HTMLInputElement && inputType === "number" ? numericConstraints(el) : {},
+    ...el instanceof HTMLInputElement && el.pattern ? { pattern: el.pattern } : {}
+  };
+}
+function fieldFromElement(el, index) {
+  const name = nameForElement(el, index);
+  if (el instanceof HTMLSelectElement) {
+    return {
+      name,
+      inputType: "select",
+      label: resolveLabel(el),
+      options: readOptions(el),
+      defaultValue: el.value || void 0,
+      required: el.required
+    };
+  }
+  const inputType = resolveInputType(el);
+  return {
+    name,
+    inputType,
+    label: resolveLabel(el),
+    placeholder: el.placeholder || void 0,
+    defaultValue: el.value || void 0,
+    required: el instanceof HTMLInputElement ? el.required : false,
+    ...textConstraints(el),
+    ...el instanceof HTMLInputElement && inputType === "number" ? numericConstraints(el) : {},
+    ...el instanceof HTMLInputElement && el.pattern ? { pattern: el.pattern } : {}
+  };
+}
+function collectFieldElements(container) {
+  const out = [];
+  const all = container.querySelectorAll(
+    "input, textarea, select"
+  );
+  const SKIPPED = /* @__PURE__ */ new Set([
+    "button",
+    "submit",
+    "reset",
+    "image",
+    "hidden",
+    "file",
+    "checkbox",
+    "radio"
+  ]);
+  for (let i = 0; i < all.length; i++) {
+    const el = all[i];
+    if (el instanceof HTMLInputElement) {
+      const t = (el.type || "text").toLowerCase();
+      if (SKIPPED.has(t)) continue;
+      if (el.disabled || el.readOnly) continue;
+      out.push(el);
+    } else if (el instanceof HTMLTextAreaElement) {
+      if (el.disabled || el.readOnly) continue;
+      out.push(el);
+    } else if (el instanceof HTMLSelectElement) {
+      if (el.disabled) continue;
+      out.push(el);
+    }
+  }
+  return out;
+}
+function resolveInputType(el) {
+  if (el instanceof HTMLTextAreaElement) return "text";
+  const t = (el.type || "text").toLowerCase();
+  switch (t) {
+    case "text":
+    case "search":
+    case "email":
+    case "tel":
+    case "url":
+    case "number":
+    case "password":
+      return t;
+    // HTML5 types we don't have a wallet-side keyboard for — fall
+    // back to `text` so the drawer still renders something useful.
+    case "date":
+    case "datetime-local":
+    case "time":
+    case "month":
+    case "week":
+    case "color":
+    case "range":
+    default:
+      return "text";
+  }
+}
+function resolveLabel(el) {
+  const aria = el.getAttribute("aria-label");
+  if (aria && aria.trim()) return aria.trim();
+  if (el.id) {
+    const lbl = el.ownerDocument.querySelector(
+      `label[for="${cssEscape(el.id)}"]`
+    );
+    if (lbl && lbl.textContent && lbl.textContent.trim()) {
+      return lbl.textContent.trim();
+    }
+  }
+  const closestLabel = el.closest("label");
+  if (closestLabel && closestLabel.textContent) {
+    const raw = closestLabel.textContent.replace(el.value, "").trim();
+    if (raw) return raw;
+  }
+  if ("placeholder" in el && el.placeholder && el.placeholder.trim()) {
+    return el.placeholder.trim();
+  }
+  if (el.name) return prettyName(el.name);
+  return prettyName(el.tagName.toLowerCase());
+}
+function readOptions(el) {
+  const out = [];
+  for (let i = 0; i < el.options.length; i++) {
+    const opt = el.options[i];
+    out.push({
+      value: opt.value,
+      label: opt.label || opt.textContent || opt.value
+    });
+  }
+  return out;
+}
+function textConstraints(el) {
+  const out = {};
+  if ("minLength" in el && el.minLength > 0) out.minLength = el.minLength;
+  if ("maxLength" in el && el.maxLength > 0) out.maxLength = el.maxLength;
+  return out;
+}
+function numericConstraints(el) {
+  const out = {};
+  const minStr = el.getAttribute("min");
+  const maxStr = el.getAttribute("max");
+  if (minStr !== null && minStr !== "") {
+    const n = Number(minStr);
+    if (Number.isFinite(n)) out.min = n;
+  }
+  if (maxStr !== null && maxStr !== "") {
+    const n = Number(maxStr);
+    if (Number.isFinite(n)) out.max = n;
+  }
+  return out;
+}
+function nameForElement(el, index) {
+  if (el.name) return el.name;
+  if (el.id) return el.id;
+  return `_field_${index}`;
+}
+function prettyName(s) {
+  return s.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+function writeValueIntoElement(el, value) {
+  if (value === void 0 || value === null) return;
+  const str = String(value);
+  if (el instanceof HTMLSelectElement) {
+    let matched = false;
+    for (let i = 0; i < el.options.length; i++) {
+      if (el.options[i].value === str) {
+        el.selectedIndex = i;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      for (let i = 0; i < el.options.length; i++) {
+        if (el.options[i].label === str) {
+          el.selectedIndex = i;
+          break;
+        }
+      }
+    }
+  } else {
+    el.value = str;
+  }
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+function tryRequestSubmit(form) {
+  if (typeof form.requestSubmit === "function") {
+    form.requestSubmit();
+  } else {
+    form.submit();
+  }
+}
+function bindMouse(session, opts) {
+  const mode = opts?.mode ?? "touch";
+  const size = Math.max(6, opts?.size ?? 28);
+  const color = opts?.color ?? "rgba(59, 130, 246, 0.65)";
+  const onMove = opts?.onMove;
+  const onClick = opts?.onClick;
+  let cursor = null;
+  let pos = opts?.initialPosition ?? {
+    x: typeof window !== "undefined" ? window.innerWidth / 2 : 0,
+    y: typeof window !== "undefined" ? window.innerHeight / 2 : 0
+  };
+  let disposed = false;
+  function ensureCursor() {
+    if (cursor) return cursor;
+    const el = document.createElement("div");
+    el.setAttribute("data-prson-virtual-cursor", "");
+    el.style.position = "fixed";
+    el.style.width = `${size}px`;
+    el.style.height = `${size}px`;
+    el.style.borderRadius = "50%";
+    el.style.background = color;
+    el.style.border = "2px solid rgba(255, 255, 255, 0.9)";
+    el.style.boxShadow = "0 2px 8px rgba(0, 0, 0, 0.25)";
+    el.style.pointerEvents = "none";
+    el.style.zIndex = "2147483647";
+    el.style.transform = "translate(-50%, -50%)";
+    el.style.transition = "background 120ms ease";
+    applyCursorPosition(el, pos);
+    document.body.appendChild(el);
+    cursor = el;
+    return el;
+  }
+  function applyCursorPosition(el, p) {
+    el.style.left = `${p.x}px`;
+    el.style.top = `${p.y}px`;
+  }
+  function clamp(value, min, max) {
+    return value < min ? min : value > max ? max : value;
+  }
+  function applyFrame(mouse) {
+    if (disposed) return;
+    const el = ensureCursor();
+    switch (mouse.event) {
+      case "move": {
+        pos = {
+          x: clamp(pos.x + (mouse.dx ?? 0), 0, window.innerWidth),
+          y: clamp(pos.y + (mouse.dy ?? 0), 0, window.innerHeight)
+        };
+        applyCursorPosition(el, pos);
+        if (onMove) {
+          try {
+            onMove(pos);
+          } catch {
+          }
+        }
+        break;
+      }
+      case "click":
+      case "double-click": {
+        const prev = el.style.background;
+        el.style.background = "rgba(59, 130, 246, 1)";
+        setTimeout(() => {
+          if (cursor === el) el.style.background = prev;
+        }, 140);
+        const target = document.elementFromPoint(pos.x, pos.y);
+        let allowDefault = true;
+        if (onClick) {
+          try {
+            const ret = onClick(target);
+            if (ret === false) allowDefault = false;
+          } catch {
+          }
+        }
+        if (allowDefault && target) {
+          const init = {
+            bubbles: true,
+            cancelable: true,
+            clientX: pos.x,
+            clientY: pos.y,
+            view: window
+          };
+          target.dispatchEvent(new MouseEvent("mousedown", init));
+          target.dispatchEvent(new MouseEvent("mouseup", init));
+          target.dispatchEvent(new MouseEvent("click", init));
+          if (mouse.event === "double-click") {
+            target.dispatchEvent(new MouseEvent("dblclick", init));
+          }
+        }
+        break;
+      }
+      case "scroll": {
+        window.scrollBy({ left: mouse.dx ?? 0, top: mouse.dy ?? 0 });
+        break;
+      }
+    }
+  }
+  function detach() {
+    if (cursor) {
+      cursor.remove();
+      cursor = null;
+    }
+  }
+  return {
+    async request(callerOpts) {
+      if (disposed) return { ok: false, error: "session-closed" };
+      ensureCursor();
+      const reply = await session.requestMouse(
+        { kind: "mouse", mode, reason: callerOpts?.reason ?? opts?.reason },
+        applyFrame,
+        callerOpts
+      );
+      if (!disposed) {
+        if (cursor) {
+          cursor.remove();
+          cursor = null;
+        }
+      }
+      return reply;
+    },
+    dispose() {
+      disposed = true;
+      detach();
+    }
+  };
+}
+function cssEscape(s) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(s);
+  }
+  return s.replace(/(["\\#.>+~*$^|=:()\[\] ])/g, "\\$1");
+}
+
 // src/index.ts
 var PROTOCOL_VERSION = "prson_vp_v1";
 var TRUSTED_ISSUER = "did:web:app.prson.net";
@@ -3524,6 +3987,9 @@ export {
   PrsonLogin,
   PrsonLoginSession,
   SIGNALING_BASE,
-  TRUSTED_ISSUER
+  TRUSTED_ISSUER,
+  bindForm,
+  bindInput,
+  bindMouse
 };
 //# sourceMappingURL=prson-login.js.map

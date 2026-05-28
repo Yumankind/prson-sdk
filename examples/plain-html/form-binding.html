@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in with Prson — form & mouse binding</title>
+    <style>
+      /*
+       * Demo page showing the three DOM-binding helpers from
+       * `@prson/login-sdk`:
+       *
+       *   bindInput(session, <input>)   — single-field fill
+       *   bindForm(session, <form>)     — multi-field "kiosk" form
+       *   bindMouse(session, {mode})    — phone-as-touchpad cursor
+       *
+       * Drop into a static server (e.g. `npx serve examples/plain-html`)
+       * and visit `form-binding.html`. The bundle paths assume the
+       * stock build output; if you publish under a CDN, swap the
+       * `<script src="…">` URLs accordingly.
+       */
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+        --bg: #fafafa;
+        --fg: #111;
+        --muted: #6b7280;
+        --card: #ffffff;
+        --border: rgba(0, 0, 0, 0.08);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.05);
+        --accent: #111;
+        --accent-on: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b0b0c;
+          --fg: #f5f5f7;
+          --muted: #9ca3af;
+          --card: #18181b;
+          --border: rgba(255, 255, 255, 0.08);
+          --shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+          --accent: #f5f5f7;
+          --accent-on: #0b0b0c;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        min-height: 100vh;
+        padding: 48px 20px;
+        display: flex;
+        justify-content: center;
+      }
+      main {
+        width: 100%;
+        max-width: 720px;
+      }
+      h1 {
+        font-weight: 600;
+        letter-spacing: -0.6px;
+        font-size: 28px;
+        margin: 0 0 8px;
+      }
+      .lead {
+        color: var(--muted);
+        margin: 0 0 28px;
+        line-height: 1.55;
+        font-size: 15px;
+      }
+      section {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: var(--shadow);
+        padding: 24px;
+        margin-bottom: 20px;
+      }
+      h2 {
+        margin: 0 0 4px;
+        font-size: 18px;
+        font-weight: 600;
+      }
+      section p.muted {
+        margin: 0 0 16px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      label {
+        display: block;
+        font-size: 13px;
+        font-weight: 500;
+        margin-top: 12px;
+      }
+      input, select, textarea {
+        width: 100%;
+        margin-top: 6px;
+        padding: 10px 12px;
+        font-size: 15px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        font-family: inherit;
+      }
+      button {
+        font-size: 14px;
+        font-weight: 500;
+        padding: 10px 16px;
+        border-radius: 8px;
+        border: 0;
+        cursor: pointer;
+        background: var(--accent);
+        color: var(--accent-on);
+        margin-top: 12px;
+      }
+      button.secondary {
+        background: transparent;
+        color: var(--fg);
+        border: 1px solid var(--border);
+      }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+      .signin-host {
+        display: flex;
+        justify-content: center;
+        padding: 12px 0 4px;
+      }
+      pre {
+        margin: 12px 0 0;
+        padding: 12px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 180px;
+        overflow: auto;
+      }
+      .pill {
+        display: inline-block;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        background: rgba(59, 130, 246, 0.12);
+        color: #2563eb;
+        padding: 2px 8px;
+        border-radius: 999px;
+        margin-left: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Form &amp; mouse binding</h1>
+      <p class="lead">
+        After signing in with Prson, the page can ask the wallet to
+        fill any input — single field, whole form, or phone-as-cursor.
+        Open the wallet, scan the QR, then try each demo below.
+      </p>
+
+      <!-- 1. Sign-in entry point: the QR mounts here on demand. -->
+      <section>
+        <h2>1. Sign in <span class="pill">required first</span></h2>
+        <p class="muted">
+          Click sign in once; the QR appears below. Once the wallet
+          delivers the credential, the buttons in the sections that
+          follow become enabled and route through that session.
+        </p>
+        <div class="signin-host">
+          <button id="signin" type="button">Sign in with Prson</button>
+        </div>
+        <div id="qr"></div>
+      </section>
+
+      <!-- 2. bindInput on a single email field. -->
+      <section>
+        <h2>2. <code>bindInput</code> — single field</h2>
+        <p class="muted">
+          A single input with a label + validation constraints. The
+          wallet opens a sized keyboard, the user types on their phone,
+          and the value lands in the page on send.
+        </p>
+        <label for="email">Email</label>
+        <input
+          id="email"
+          name="email"
+          type="email"
+          placeholder="you@example.com"
+          required
+        />
+        <button id="ask-email" type="button" disabled>Ask the wallet</button>
+      </section>
+
+      <!-- 3. bindForm on a multi-field form, including a select. -->
+      <section>
+        <h2>3. <code>bindForm</code> — multi-step form</h2>
+        <p class="muted">
+          A <code>&lt;form&gt;</code> with several fields. The wallet
+          opens one drawer with Prev / Next / Send navigation and
+          fills every field at once on Send. <code>bindForm</code>
+          also fires <code>requestSubmit()</code> when the bind target
+          is a <code>&lt;form&gt;</code>.
+        </p>
+        <form id="contact-form" onsubmit="onSubmitContact(event)">
+          <label for="firstName">First name</label>
+          <input id="firstName" name="firstName" required maxlength="40" />
+
+          <label for="lastName">Last name</label>
+          <input id="lastName" name="lastName" required maxlength="40" />
+
+          <label for="phone">Phone</label>
+          <input
+            id="phone"
+            name="phone"
+            type="tel"
+            minlength="6"
+            maxlength="20"
+            placeholder="+351 …"
+          />
+
+          <label for="age">Age</label>
+          <input
+            id="age"
+            name="age"
+            type="number"
+            min="18"
+            max="120"
+          />
+
+          <label for="country">Country</label>
+          <select id="country" name="country" required>
+            <option value="">Pick one…</option>
+            <option value="PT">Portugal</option>
+            <option value="FR">France</option>
+            <option value="DE">Germany</option>
+            <option value="US">United States</option>
+          </select>
+
+          <div class="row">
+            <button id="ask-form" type="button" disabled>Fill from wallet</button>
+            <button type="submit" class="secondary">Submit</button>
+          </div>
+        </form>
+        <pre id="submitted" hidden></pre>
+      </section>
+
+      <!-- 4. bindMouse — phone as touchpad. -->
+      <section>
+        <h2>4. <code>bindMouse</code> — phone as cursor</h2>
+        <p class="muted">
+          Turn the phone into a touchpad (<code>mode: "touch"</code>)
+          or a gyro-driven magic wand (<code>mode: "magic"</code>). A
+          virtual cursor appears on the page and follows the phone
+          input until the user closes the wallet drawer.
+        </p>
+        <div class="row">
+          <button id="mouse-touch" type="button" disabled>Touchpad mode</button>
+          <button id="mouse-magic" type="button" class="secondary" disabled>Magic wand mode</button>
+        </div>
+      </section>
+
+      <!-- 5. Lifecycle log for debugging. -->
+      <section>
+        <h2>5. Session events</h2>
+        <p class="muted">
+          Anything <code>session.onAny</code> sees lands here. Claim
+          events never carry raw values — only the name + canonical
+          SHA-256 of the new value.
+        </p>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script type="module">
+      import {
+        PrsonLogin,
+        bindInput,
+        bindForm,
+        bindMouse,
+      } from "./prson-login.js";
+
+      const $log = document.getElementById("log");
+      const $submitted = document.getElementById("submitted");
+
+      function log(line, payload) {
+        const stamp = new Date().toISOString().slice(11, 19);
+        const body = payload === undefined ? "" : " " + JSON.stringify(payload);
+        $log.textContent = `[${stamp}] ${line}${body}\n` + $log.textContent;
+      }
+
+      function onSubmitContact(e) {
+        e.preventDefault();
+        const data = new FormData(e.currentTarget);
+        const obj = Object.fromEntries(data.entries());
+        $submitted.hidden = false;
+        $submitted.textContent = "submitted: " + JSON.stringify(obj, null, 2);
+        log("form submitted", obj);
+      }
+      window.onSubmitContact = onSubmitContact;
+
+      let session = null;
+
+      document.getElementById("signin").addEventListener("click", async () => {
+        try {
+          const result = await PrsonLogin.signIn({
+            ui: { mountQrInto: "#qr", theme: "auto" },
+            ttlMinutes: 5,
+          });
+          session = result.session;
+          log("signed_in", {
+            displayName: result.claims.display_name,
+            preferredLanguage: session.preferredLanguage,
+          });
+          session.onAny((e) => log("event", e));
+          enableDemoButtons();
+        } catch (err) {
+          log("signIn failed", String(err));
+        }
+      });
+
+      function enableDemoButtons() {
+        for (const id of ["ask-email", "ask-form", "mouse-touch", "mouse-magic"]) {
+          document.getElementById(id).disabled = false;
+        }
+      }
+
+      // 2. bindInput
+      document.getElementById("ask-email").addEventListener("click", async () => {
+        if (!session) return;
+        const controller = bindInput(session, document.getElementById("email"));
+        const reply = await controller.request({
+          reason: "We need an email to send your receipt.",
+        });
+        log("bindInput reply", reply);
+      });
+
+      // 3. bindForm
+      document.getElementById("ask-form").addEventListener("click", async () => {
+        if (!session) return;
+        const controller = bindForm(session, document.getElementById("contact-form"));
+        const reply = await controller.request({
+          reason: "Fill these on your phone — Prev/Next/Send.",
+        });
+        log("bindForm reply", reply);
+      });
+
+      // 4. bindMouse — touchpad
+      document.getElementById("mouse-touch").addEventListener("click", async () => {
+        if (!session) return;
+        const controller = bindMouse(session, { mode: "touch" });
+        const reply = await controller.request({
+          reason: "Use your phone as a touchpad.",
+        });
+        log("bindMouse touch reply", reply);
+        controller.dispose();
+      });
+
+      // 4. bindMouse — magic wand
+      document.getElementById("mouse-magic").addEventListener("click", async () => {
+        if (!session) return;
+        const controller = bindMouse(session, { mode: "magic" });
+        const reply = await controller.request({
+          reason: "Wave your phone to move the cursor.",
+        });
+        log("bindMouse magic reply", reply);
+        controller.dispose();
+      });
+    </script>
+  </body>
+</html>

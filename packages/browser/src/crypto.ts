@@ -75,7 +75,8 @@ export type DecryptedEnvelope = {
     | "claim-update"
     | "display-update"
     | "credential-revoked"
-    | "response";
+    | "response"
+    | "mouse-update";
   issuedAt: number;
   ttlMinutes?: number;
   domain?: string;
@@ -138,6 +139,29 @@ export type DecryptedEnvelope = {
   requestId?: string;
   result?: unknown;
   error?: string;
+
+  /**
+   * `mouse-update` body. Streamed continuously by the wallet while
+   * a `kind: "mouse"` drawer is open, paired by `requestId` to the
+   * originating request. The browser SDK's `bindMouse` helper
+   * consumes these and applies them to a CSS-positioned virtual
+   * cursor on the page.
+   *
+   * Coordinates are deltas — pixels relative to the previous
+   * position — rather than absolute, so phone resolution and page
+   * resolution don't need to match. `event` distinguishes
+   * pointer-motion frames (`move`) from discrete actions
+   * (`click` / `double-click` / `scroll`); `scroll.dy` is positive
+   * for downward scroll, matching `WheelEvent.deltaY`.
+   */
+  mouse?: {
+    event: "move" | "click" | "double-click" | "scroll";
+    dx?: number;
+    dy?: number;
+    /** Active mode at the time of the event (the wallet drawer can
+     *  toggle mid-session). */
+    mode?: "touch" | "magic";
+  };
 };
 
 export async function decryptEnvelope(

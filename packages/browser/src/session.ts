@@ -143,6 +143,15 @@ export class PrsonLoginSession {
   private _requestController = new RequestController();
 
   /**
+   * Per-`requestId` mouse-update subscribers. Populated by
+   * [`bindMouse`] when it opens a `kind: "mouse"` request and torn
+   * down when the controller disposes or the wallet's final
+   * `response` arrives. Keys are RFC-4122 v4 UUIDs (the request id);
+   * values get a stream of decoded `mouse` bodies.
+   */
+  private _mouseSubscribers: Map<string, (mouse: NonNullable<DecryptedEnvelope["mouse"]>) => void> = new Map();
+
+  /**
    * User's preferred UI language as a BCP-47 tag. Captured from the
    * initial `presentation` envelope's `preferredLanguage` field;
    * updated whenever a fresh envelope arrives with a new value.
@@ -309,12 +318,46 @@ export class PrsonLoginSession {
    * `{ msg: "response", requestId, result | error }`.
    */
   async request(req: LoginRequest, opts?: RequestOptions): Promise<LoginResponse> {
+    return this._sendRequest(req, opts);
+  }
+
+  /**
+   * Streaming variant of [request] for `kind: "mouse"`. Identical
+   * to `request()` except [onFrame] is invoked for every
+   * `mouse-update` envelope the wallet emits against the request's
+   * UUID until the terminating `response` arrives. The returned
+   * promise resolves with the final response (i.e. when the user
+   * closes the wallet drawer). Used by [`bindMouse`].
+   *
+   * Separated from `request()` because the subscriber MUST be
+   * attached against the requestId BEFORE the envelope is sent —
+   * otherwise the first `mouse-update` frame can race ahead of the
+   * subscription. `request()` doesn't expose its requestId, so we
+   * provide this dedicated entry point rather than leak the id.
+   */
+  async requestMouse(
+    req: Extract<LoginRequest, { kind: "mouse" }>,
+    onFrame: (mouse: NonNullable<DecryptedEnvelope["mouse"]>) => void,
+    opts?: RequestOptions,
+  ): Promise<LoginResponse> {
+    return this._sendRequest(req, opts, onFrame);
+  }
+
+  private async _sendRequest(
+    req: LoginRequest,
+    opts?: RequestOptions,
+    onMouseFrame?: (mouse: NonNullable<DecryptedEnvelope["mouse"]>) => void,
+  ): Promise<LoginResponse> {
     if (this._closed) return { ok: false, error: "session-closed" };
     const recipientPk = this._walletSessionPk;
     if (!recipientPk) return { ok: false, error: "no-active-session" };
 
     const timeoutMs = opts?.timeoutMs ?? 60_000;
     const { requestId, promise } = this._requestController.enqueue(timeoutMs);
+
+    // Attach the streaming subscriber BEFORE sending so the first
+    // mouse-update frame can never race ahead of the subscription.
+    if (onMouseFrame) this._mouseSubscribers.set(requestId, onMouseFrame);
 
     const envelope: Record<string, unknown> = {
       v: "prson_vp_v1",
@@ -372,6 +415,10 @@ export class PrsonLoginSession {
         if (req.submitLabel !== undefined) envelope.submitLabel = req.submitLabel;
         if (req.reason) envelope.reason = req.reason;
         break;
+      case "mouse":
+        envelope.mode = req.mode;
+        if (req.reason) envelope.reason = req.reason;
+        break;
     }
 
     try {
@@ -380,6 +427,7 @@ export class PrsonLoginSession {
     } catch {
       // Network down, channel closed, encoding bug — surface as
       // session-closed; the timeout would also fire eventually.
+      if (onMouseFrame) this._mouseSubscribers.delete(requestId);
       return { ok: false, error: "session-closed" };
     }
     return promise;
@@ -482,6 +530,25 @@ export class PrsonLoginSession {
         // timeout) silently no-op — the controller already
         // delivered the timeout error.
         this._requestController.resolve(envelope);
+        // If the request was a streaming `mouse` request, the final
+        // `response` also closes the stream — drop the subscriber so
+        // the controller can be reused.
+        if (envelope.requestId) this._mouseSubscribers.delete(envelope.requestId);
+        return;
+      case "mouse-update":
+        // Wallet is streaming pointer events for a `kind: "mouse"`
+        // request. Route by `requestId` to the bindMouse subscriber.
+        // Unknown ids (subscriber already disposed) silently drop.
+        if (envelope.requestId && envelope.mouse) {
+          const sub = this._mouseSubscribers.get(envelope.requestId);
+          if (sub) {
+            try {
+              sub(envelope.mouse);
+            } catch {
+              /* swallow — host bug shouldn't kill the stream */
+            }
+          }
+        }
         return;
       default:
         // Forward-compatible: unknown msg types are ignored, not
@@ -632,6 +699,10 @@ export class PrsonLoginSession {
     // Reject every in-flight request so callers awaiting
     // `session.request(...)` don't hang past the teardown.
     this._requestController.closeAll("session-closed");
+    // Drop any open mouse-update subscribers — the wallet won't be
+    // sending more frames, and `bindMouse` will clean up its
+    // DOM-side state via the `signed_out` event.
+    this._mouseSubscribers.clear();
     this._dispatch({ type: "signed_out", reason });
     // Clear listener sets after dispatch so a host that calls
     // `session.on(...)` after teardown doesn't accumulate forever.

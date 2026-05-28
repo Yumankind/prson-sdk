@@ -167,11 +167,33 @@ type LoginRequest =
     }
   | {
       kind: "input";
-      inputType: "text" | "search" | "email" | "tel" | "url" | "number" | "password";
-      label: string; placeholder?: string;
+      inputType:
+        | "text" | "search" | "email" | "tel" | "url"
+        | "number" | "password" | "select";
+      label: string; placeholder?: string; defaultValue?: string;
       minLength?: number; maxLength?: number;
       min?: number; max?: number;
       pattern?: string; required?: boolean;
+      options?: { value: string; label?: string }[]; // required when inputType === "select"
+      reason?: string;
+    }
+  | {
+      // Multi-field "kiosk form" — one wallet drawer, Prev / Next /
+      // Send navigation, fills every field on Send. The reply is a
+      // `Record<fieldName, string>`.
+      kind: "input-form";
+      fields: InputFormField[];
+      submitLabel?: string;
+      reason?: string;
+    }
+  | {
+      // Virtual mouse — turn the phone into a touchpad or a gyro-
+      // driven magic wand. The wallet streams pointer events as
+      // `mouse-update` envelopes paired by `requestId` until the
+      // user closes the drawer (which fires the terminating
+      // `response`).
+      kind: "mouse";
+      mode: "touch" | "magic";
       reason?: string;
     };
 
@@ -226,6 +248,15 @@ the protocol round-trips end-to-end.
   fragment; verifier re-checks server-side.
 - **Document signature.** PDF byte buffer or short-lived
   upload URL → wallet PAdES-signs with the identity's EC key.
+- **DOM-bound form fill.** `bindInput(session, <input>)` and
+  `bindForm(session, <form>)` synthesise an `input` / `input-form`
+  request from the page's existing markup and write the wallet's
+  reply back into the elements + fire `input` / `change` /
+  `requestSubmit()` so reactive frameworks pick up the changes.
+- **Phone as cursor.** `bindMouse(session, { mode: "touch" })` opens
+  a virtual circular cursor on the page; the phone is a touchpad
+  (drag = move, tap = click, two-finger drag = scroll). `mode:
+  "magic"` swaps to a gyro-driven wand.
 - **Stale-claim refresh.** "What's your current verification
   level?": `kind: "claim-value"` returns the live value
   without a full re-sign-in.

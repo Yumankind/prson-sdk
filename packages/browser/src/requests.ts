@@ -201,6 +201,36 @@ export type LoginRequest =
       /** Label on the final "Send" button. Defaults to "Send". */
       submitLabel?: string;
       reason?: string;
+    }
+
+  /**
+   * Virtual pointer / cursor. The wallet sources pointer events
+   * from the phone and streams them through `mouse-update`
+   * envelopes (paired by `requestId`) until the user closes the
+   * drawer; the final `response` carries the session totals.
+   *
+   * Two modes:
+   *
+   *   * `"touch"` — the phone screen becomes a touchpad. Drag the
+   *     finger to move the cursor; single-tap = click;
+   *     double-tap = double-click; two-finger drag = scroll. The
+   *     [`bindMouse`] helper renders a small circular cursor over
+   *     the page and applies the streamed deltas.
+   *
+   *   * `"magic"` — phone gyro + accelerometer drive a "magic
+   *     wand". Tap on the phone screen = click; double-tap =
+   *     double-click; swipe up / down on the phone = scroll.
+   *     Bigger learning curve but no thumb-on-screen
+   *     drag — useful for hands-free presentation control.
+   *
+   * The host requests a mode; the wallet UI honours it but may
+   * surface a toggle to switch mid-session (in which case the
+   * streamed envelopes carry the actual mode in `mode`).
+   */
+  | {
+      kind: "mouse";
+      mode: "touch" | "magic";
+      reason?: string;
     };
 
 export type LoginResponse =
