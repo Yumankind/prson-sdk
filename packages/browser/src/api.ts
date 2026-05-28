@@ -3,7 +3,7 @@
  *
  * The SDK does NOT depend on Firebase. The Worker is the single API
  * surface: anonymous /session/draft for the browser, wallet-signed
- * /session/claim for the wallet. See `../../infra/signaling-worker`
+ * /session/claim for the wallet. See `../../../../cloudflare-workers/signaling-worker`
  * for the server impl and `../../ARCHITECTURE.md` for the spec.
  */
 import { SIGNALING_BASE } from "./index.js";

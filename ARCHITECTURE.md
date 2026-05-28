@@ -451,7 +451,7 @@ type SignInResult = {
 
 ## 5. Server-side surface
 
-### 5.1 Cloudflare Worker (login-sdk/infra/signaling-worker/)
+### 5.1 Cloudflare Worker (cloudflare-workers/signaling-worker/)
 
 The **single API surface for the relay path**. Three routes plus a
 Durable Object per `reqId`.

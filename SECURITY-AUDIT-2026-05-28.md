@@ -33,7 +33,7 @@
 
 | Finding | Implementation |
 |---|---|
-| **C-1** | `handleDraft` in [signaling-worker/src/index.ts](./infra/signaling-worker/src/index.ts) rejects `POST /session/draft` when the `Origin` header host doesn't match `request.domain`. Returns `400 origin-required` if Origin is missing, `403 origin-domain-mismatch` on disagreement. |
+| **C-1** | `handleDraft` in [signaling-worker/src/index.ts](../cloudflare-workers/signaling-worker/src/index.ts) rejects `POST /session/draft` when the `Origin` header host doesn't match `request.domain`. Returns `400 origin-required` if Origin is missing, `403 origin-domain-mismatch` on disagreement. |
 | **C-2** | `buildDeepLinkUrl` in [packages/browser/src/index.ts](./packages/browser/src/index.ts) now emits `https://app.prson.net/login/v1?…`. `/login/v1*` added to the AASA at [mobile-app/web/.well-known/apple-app-site-association](../mobile-app/web/.well-known/apple-app-site-association). Android already uses `handle_all_urls` so no change there. The wallet's `LoginDeepLink.tryParse` already accepted both forms — back-compat is automatic. |
 | **M-1** | New `SIG_TOKEN_HMAC_KEYRING` env binding with `{active, retired[]}` JSON. Tokens are kid-prefixed (`<kid>.<exp>.<role>.<HMAC>`). Verifier accepts any kid still in the keyring (active or retired within `validUntil`). Legacy 3-segment tokens still verify under `SIG_TOKEN_HMAC_SECRET` for in-flight back-compat. Rotation playbook in [scripts/cloudflare/login-secret.sh](../scripts/cloudflare/login-secret.sh) — `stage`, `rotate`, `prune`. |
 | **M-2** | `SessionState.pinnedTokenHashes` in the Durable Object locks each role to the first-seen `sha256(token)`. Second WS upgrade for the same role with a different hash returns `401 role-token-pin-mismatch`. Defends against token forgery (e.g. compromised-but-rotated-out HMAC key) but does NOT block exact-token replay from XSS — that needs the refresh-token-endpoint design proposed in the audit, deferred. |
@@ -279,7 +279,7 @@ Cost: ~40 LoC in `ActiveWebSessionsService` + a small reconnect helper in `Login
 |---|---|
 | `aud` mismatch rejected | [sd_jwt_kb_test.dart](../mobile-app/prson_app/test/core/utils/sd_jwt_kb_test.dart) `buildAndSign → verify with real Ed25519 round-trip` |
 | Disclosure tampering detected | [sd_jwt_present_test.dart](../mobile-app/prson_app/test/core/utils/sd_jwt_present_test.dart) `tampered Disclosure not bound` |
-| Worker `/session/claim` Ed25519 signature verification | [signaling-worker/src/index.ts](./infra/signaling-worker/src/index.ts) `canonicalClaimBytes` |
+| Worker `/session/claim` Ed25519 signature verification | [signaling-worker/src/index.ts](../cloudflare-workers/signaling-worker/src/index.ts) `canonicalClaimBytes` |
 | Browser openBox byte-compat with wallet pinenacl | [login_crypto_test.dart](../mobile-app/prson_app/test/core/utils/login_crypto_test.dart) `encryptToBrowser → browser openBox round-trip` |
 | Anti-tamper QR: URL domain must agree with req-blob domain | [login_deep_link_test.dart](../mobile-app/prson_app/test/core/utils/login_deep_link_test.dart) `rejects when domain in URL disagrees` |
 | Worker rejects MRZ-only credential issuance | [identityCredentials.test.js](../functions/test/services/identityCredentials.test.js) |

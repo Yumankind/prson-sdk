@@ -4,7 +4,7 @@
  * messages between us.
  *
  * Wire format mirrors the Worker's `SignalingMessage` discriminated
- * union (see infra/signaling-worker/src/index.ts). We don't import
+ * union (see cloudflare-workers/signaling-worker/src/index.ts). We don't import
  * those types directly because cross-package type sharing would
  * bloat the SDK; the two definitions are kept in sync by the spec.
  */
