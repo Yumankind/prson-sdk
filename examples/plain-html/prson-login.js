@@ -2719,6 +2719,14 @@ var PrsonLoginSession = class {
      */
     this._mouseSubscribers = /* @__PURE__ */ new Map();
     /**
+     * Remote-navigation listener — installed by
+     * [`enableRemoteNavigation`]. Receives every inbound `nav`,
+     * `value`, and `logout` envelope. Only one listener at a time
+     * (later registrations replace the prior). Null when remote-nav
+     * is not active for this session.
+     */
+    this._remoteNavListener = null;
+    /**
      * User's preferred UI language as a BCP-47 tag. Captured from the
      * initial `presentation` envelope's `preferredLanguage` field;
      * updated whenever a fresh envelope arrives with a new value.
@@ -2852,6 +2860,48 @@ var PrsonLoginSession = class {
    */
   async requestMouse(req, onFrame, opts) {
     return this._sendRequest(req, opts, onFrame);
+  }
+  /**
+   * Push the currently-focused input's metadata + value to the
+   * wallet so the user can edit it on the phone. Pass `null` to
+   * clear the wallet's focus mirror (blur, page change, etc.).
+   *
+   * Used by [`enableRemoteNavigation`]; not part of the documented
+   * public API but exposed so the helper lives in a separate module
+   * without reaching into private fields. NaCl-boxed to the wallet's
+   * session pk on the way out.
+   *
+   * @internal
+   */
+  async _sendFocus(focus) {
+    if (this._closed) return;
+    const recipientPk = this._walletSessionPk;
+    if (!recipientPk) return;
+    const payload = {
+      v: "prson_vp_v1",
+      msg: "focus",
+      issuedAt: Math.floor(Date.now() / 1e3),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+      focus
+    };
+    try {
+      const boxed = boxToWallet(recipientPk, JSON.stringify(payload));
+      this._transport.send(boxed);
+    } catch {
+    }
+  }
+  /**
+   * Install the remote-navigation listener. Replaces any prior
+   * listener — only one is active at a time. Returns an unsubscribe
+   * handle. Used by [`enableRemoteNavigation`].
+   *
+   * @internal
+   */
+  _setRemoteNavListener(cb) {
+    this._remoteNavListener = cb;
+    return () => {
+      if (this._remoteNavListener === cb) this._remoteNavListener = null;
+    };
   }
   async _sendRequest(req, opts, onMouseFrame) {
     if (this._closed) return { ok: false, error: "session-closed" };
@@ -3014,6 +3064,32 @@ var PrsonLoginSession = class {
               sub(envelope.mouse);
             } catch {
             }
+          }
+        }
+        return;
+      case "nav":
+      case "logout":
+        if (this._remoteNavListener) {
+          try {
+            if (envelope.msg === "nav" && envelope.action) {
+              this._remoteNavListener({ msg: "nav", action: envelope.action });
+              return;
+            }
+            if (envelope.msg === "logout") {
+              this._remoteNavListener({ msg: "logout" });
+              this._teardown("user_revoked");
+              return;
+            }
+          } catch {
+          }
+        }
+        if (envelope.msg === "logout") this._teardown("user_revoked");
+        return;
+      case "value":
+        if (this._remoteNavListener && typeof envelope.value === "string") {
+          try {
+            this._remoteNavListener({ msg: "value", value: envelope.value });
+          } catch {
           }
         }
         return;
@@ -3650,6 +3726,132 @@ function tryRequestSubmit(form) {
     form.submit();
   }
 }
+function enableRemoteNavigation(session, opts) {
+  const root = opts?.root ?? document.body;
+  let currentFocused = null;
+  let disposed = false;
+  function isBindable(el) {
+    if (el instanceof HTMLInputElement) {
+      const t = (el.type || "text").toLowerCase();
+      if (t === "hidden" || t === "submit" || t === "button" || t === "reset" || t === "image" || t === "file" || t === "checkbox" || t === "radio") return false;
+      return !el.disabled && !el.readOnly;
+    }
+    if (el instanceof HTMLTextAreaElement) {
+      return !el.disabled && !el.readOnly;
+    }
+    if (el instanceof HTMLSelectElement) {
+      return !el.disabled;
+    }
+    return false;
+  }
+  function collectFields() {
+    if (opts?.collectFields) return opts.collectFields();
+    const out = [];
+    const all = root.querySelectorAll("input, textarea, select");
+    for (let i = 0; i < all.length; i++) {
+      const el = all[i];
+      if (isBindable(el)) out.push(el);
+    }
+    return out;
+  }
+  function focusPayloadFor(el) {
+    const name = nameForElement(el, 0);
+    if (el instanceof HTMLSelectElement) {
+      return {
+        name,
+        label: resolveLabel(el),
+        inputType: "select",
+        value: el.value,
+        options: readOptions(el),
+        required: el.required
+      };
+    }
+    const inputType = resolveInputType(el);
+    return {
+      name,
+      label: resolveLabel(el),
+      inputType,
+      value: el.value,
+      placeholder: "placeholder" in el ? el.placeholder || void 0 : void 0,
+      required: el instanceof HTMLInputElement ? el.required : false,
+      ...textConstraints(el),
+      ...el instanceof HTMLInputElement && inputType === "number" ? numericConstraints(el) : {},
+      ...el instanceof HTMLInputElement && el.pattern ? { pattern: el.pattern } : {}
+    };
+  }
+  let pendingFrame = null;
+  function scheduleValuePush() {
+    if (pendingFrame !== null) return;
+    pendingFrame = requestAnimationFrame(() => {
+      pendingFrame = null;
+      if (disposed || !currentFocused) return;
+      void session._sendFocus(focusPayloadFor(currentFocused));
+    });
+  }
+  function onFocusIn(ev) {
+    const t = ev.target;
+    if (!(t instanceof Element) || !isBindable(t)) return;
+    currentFocused = t;
+    void session._sendFocus(focusPayloadFor(t));
+  }
+  function onFocusOut(ev) {
+    const t = ev.target;
+    if (t !== currentFocused) return;
+    currentFocused = null;
+    void session._sendFocus(null);
+  }
+  function onInputChange(ev) {
+    if (ev.target !== currentFocused) return;
+    scheduleValuePush();
+  }
+  function applyNav(action) {
+    if (action === "submit") {
+      const form = currentFocused?.closest("form") ?? root.querySelector("form");
+      if (form instanceof HTMLFormElement) tryRequestSubmit(form);
+      return;
+    }
+    const fields = collectFields();
+    if (fields.length === 0) return;
+    let idx = currentFocused ? fields.indexOf(currentFocused) : -1;
+    if (idx === -1) idx = action === "prev" ? fields.length : -1;
+    const target = action === "next" ? fields[(idx + 1) % fields.length] : fields[(idx - 1 + fields.length) % fields.length];
+    target.focus();
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      const len = target.value.length;
+      try {
+        target.setSelectionRange(len, len);
+      } catch {
+      }
+    }
+  }
+  function applyValue(value) {
+    if (!currentFocused) return;
+    writeValueIntoElement(currentFocused, value);
+  }
+  const unsubscribe = session._setRemoteNavListener((envelope) => {
+    if (envelope.msg === "nav") applyNav(envelope.action);
+    else if (envelope.msg === "value") applyValue(envelope.value);
+    else if (envelope.msg === "logout") dispose();
+  });
+  const offSignedOut = session.on("signed_out", () => dispose());
+  root.addEventListener("focusin", onFocusIn, true);
+  root.addEventListener("focusout", onFocusOut, true);
+  root.addEventListener("input", onInputChange, true);
+  root.addEventListener("change", onInputChange, true);
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    if (pendingFrame !== null) cancelAnimationFrame(pendingFrame);
+    pendingFrame = null;
+    root.removeEventListener("focusin", onFocusIn, true);
+    root.removeEventListener("focusout", onFocusOut, true);
+    root.removeEventListener("input", onInputChange, true);
+    root.removeEventListener("change", onInputChange, true);
+    unsubscribe();
+    offSignedOut();
+  }
+  return { dispose };
+}
 function bindMouse(session, opts) {
   const mode = opts?.mode ?? "touch";
   const size = Math.max(6, opts?.size ?? 28);
@@ -3857,6 +4059,10 @@ var PrsonLogin = class {
         // keypair for this single sign-in (no deterministic per-domain
         // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
         ephemeralIdentity: opts.ephemeralIdentity === true,
+        // QR-mode remote navigation — wallet surfaces Prev / Next /
+        // Submit / Logout / Mouse on a persistent banner. See
+        // SignInOptions.remoteNavigation + bind.ts:enableRemoteNavigation.
+        remoteNavigation: opts.remoteNavigation === true,
         ttlMaxMinutes
       };
       const draft = await createDraft(request);
@@ -3990,6 +4196,7 @@ export {
   TRUSTED_ISSUER,
   bindForm,
   bindInput,
-  bindMouse
+  bindMouse,
+  enableRemoteNavigation
 };
 //# sourceMappingURL=prson-login.js.map

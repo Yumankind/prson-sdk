@@ -83,6 +83,24 @@ export type SignInOptions = {
     theme?: "light" | "dark" | "auto";
   };
   defer?: boolean;
+
+  /**
+   * QR-mode only: opt in to **remote navigation**. The wallet shows a
+   * persistent banner that opens a bottom drawer with Prev / Next /
+   * Submit (Enter) / Logout / (optional) Mouse buttons. The host
+   * page's currently-focused input is mirrored on the phone so the
+   * user can edit / clear / replace the value with the phone
+   * keyboard, and edits stream back into the DOM in real time.
+   *
+   * Auto-wires when the SDK detects a QR-mode sign-in (the QR encodes
+   * `remoteNavigation: true` for the wallet to honour). Same-device
+   * universal-link flows ignore the flag — the banner would be
+   * redundant when the wallet is on the same device as the page.
+   *
+   * Pair with [`enableRemoteNavigation`] to install the DOM focus
+   * listeners that mirror the active input. Default false.
+   */
+  remoteNavigation?: boolean;
 };
 
 export type CnfJwk = {
@@ -261,6 +279,10 @@ export class PrsonLogin {
       // keypair for this single sign-in (no deterministic per-domain
       // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
       ephemeralIdentity: opts.ephemeralIdentity === true,
+      // QR-mode remote navigation — wallet surfaces Prev / Next /
+      // Submit / Logout / Mouse on a persistent banner. See
+      // SignInOptions.remoteNavigation + bind.ts:enableRemoteNavigation.
+      remoteNavigation: opts.remoteNavigation === true,
       ttlMaxMinutes,
     };
 
@@ -444,8 +466,11 @@ export {
   bindInput,
   bindForm,
   bindMouse,
+  enableRemoteNavigation,
   type BindController,
   type BindMouseOptions,
+  type RemoteNavController,
+  type RemoteNavOptions,
 } from "./bind.js";
 
 // ─────────────────────────────────────────────────────────────────────

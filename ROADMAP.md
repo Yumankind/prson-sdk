@@ -257,6 +257,16 @@ the protocol round-trips end-to-end.
   a virtual circular cursor on the page; the phone is a touchpad
   (drag = move, tap = click, two-finger drag = scroll). `mode:
   "magic"` swaps to a gyro-driven wand.
+- **Remote navigation banner (QR mode).** `signIn({ remoteNavigation:
+  true })` + `enableRemoteNavigation(session)` surface a persistent
+  banner in the wallet with Prev / Next / Submit / Logout buttons
+  (semantically Shift+Tab / Tab / Enter / `session.close()`). On
+  focus the page pushes the current input value to the wallet, the
+  user edits on the phone keyboard, and edits stream back via the
+  `value` envelope. Mouse buttons live in the same drawer but stay
+  disabled until the site opens a `kind: "mouse"` request. Wire
+  grammar: outbound `focus` envelope from the browser; inbound
+  `nav`, `value`, `logout` from the wallet.
 - **Stale-claim refresh.** "What's your current verification
   level?": `kind: "claim-value"` returns the live value
   without a full re-sign-in.

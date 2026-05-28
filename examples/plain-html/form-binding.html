@@ -281,6 +281,7 @@
         bindInput,
         bindForm,
         bindMouse,
+        enableRemoteNavigation,
       } from "./prson-login.js";
 
       const $log = document.getElementById("log");
@@ -309,6 +310,11 @@
           const result = await PrsonLogin.signIn({
             ui: { mountQrInto: "#qr", theme: "auto" },
             ttlMinutes: 5,
+            // QR-mode only. Surfaces the persistent remote-control
+            // banner in the wallet with Prev / Next / Submit /
+            // Logout buttons; the host page's focused input is
+            // mirrored to the phone for edit-from-phone flows.
+            remoteNavigation: true,
           });
           session = result.session;
           log("signed_in", {
@@ -316,6 +322,9 @@
             preferredLanguage: session.preferredLanguage,
           });
           session.onAny((e) => log("event", e));
+          // Install the DOM-side glue: focus listeners + nav / value
+          // / logout handlers. Cleans up on signed_out automatically.
+          enableRemoteNavigation(session);
           enableDemoButtons();
         } catch (err) {
           log("signIn failed", String(err));

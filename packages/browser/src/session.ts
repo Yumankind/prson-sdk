@@ -152,6 +152,22 @@ export class PrsonLoginSession {
   private _mouseSubscribers: Map<string, (mouse: NonNullable<DecryptedEnvelope["mouse"]>) => void> = new Map();
 
   /**
+   * Remote-navigation listener — installed by
+   * [`enableRemoteNavigation`]. Receives every inbound `nav`,
+   * `value`, and `logout` envelope. Only one listener at a time
+   * (later registrations replace the prior). Null when remote-nav
+   * is not active for this session.
+   */
+  private _remoteNavListener:
+    | ((
+        envelope:
+          | { msg: "nav"; action: "prev" | "next" | "submit" }
+          | { msg: "value"; value: string }
+          | { msg: "logout" },
+      ) => void)
+    | null = null;
+
+  /**
    * User's preferred UI language as a BCP-47 tag. Captured from the
    * initial `presentation` envelope's `preferredLanguage` field;
    * updated whenever a fresh envelope arrives with a new value.
@@ -341,6 +357,77 @@ export class PrsonLoginSession {
     opts?: RequestOptions,
   ): Promise<LoginResponse> {
     return this._sendRequest(req, opts, onFrame);
+  }
+
+  /**
+   * Push the currently-focused input's metadata + value to the
+   * wallet so the user can edit it on the phone. Pass `null` to
+   * clear the wallet's focus mirror (blur, page change, etc.).
+   *
+   * Used by [`enableRemoteNavigation`]; not part of the documented
+   * public API but exposed so the helper lives in a separate module
+   * without reaching into private fields. NaCl-boxed to the wallet's
+   * session pk on the way out.
+   *
+   * @internal
+   */
+  async _sendFocus(
+    focus:
+      | {
+          name: string;
+          label?: string;
+          inputType?: string;
+          value?: string;
+          placeholder?: string;
+          minLength?: number;
+          maxLength?: number;
+          min?: number;
+          max?: number;
+          pattern?: string;
+          required?: boolean;
+          options?: { value: string; label?: string }[];
+        }
+      | null,
+  ): Promise<void> {
+    if (this._closed) return;
+    const recipientPk = this._walletSessionPk;
+    if (!recipientPk) return;
+    const payload: Record<string, unknown> = {
+      v: "prson_vp_v1",
+      msg: "focus",
+      issuedAt: Math.floor(Date.now() / 1000),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+      focus,
+    };
+    try {
+      const boxed = boxToWallet(recipientPk, JSON.stringify(payload));
+      this._transport.send(boxed);
+    } catch {
+      /* swallow — channel down */
+    }
+  }
+
+  /**
+   * Install the remote-navigation listener. Replaces any prior
+   * listener — only one is active at a time. Returns an unsubscribe
+   * handle. Used by [`enableRemoteNavigation`].
+   *
+   * @internal
+   */
+  _setRemoteNavListener(
+    cb:
+      | ((
+          envelope:
+            | { msg: "nav"; action: "prev" | "next" | "submit" }
+            | { msg: "value"; value: string }
+            | { msg: "logout" },
+        ) => void)
+      | null,
+  ): Unsubscribe {
+    this._remoteNavListener = cb;
+    return () => {
+      if (this._remoteNavListener === cb) this._remoteNavListener = null;
+    };
   }
 
   private async _sendRequest(
@@ -547,6 +634,49 @@ export class PrsonLoginSession {
             } catch {
               /* swallow — host bug shouldn't kill the stream */
             }
+          }
+        }
+        return;
+      case "nav":
+      case "logout":
+        // Remote-navigation commands from the wallet's persistent
+        // banner. Without an installed listener (i.e. the host
+        // didn't call `enableRemoteNavigation`), `nav` is silently
+        // dropped and `logout` falls through to the default teardown
+        // below — the user tapping logout MUST sign the session out
+        // even if the host never wired the optional helper.
+        if (this._remoteNavListener) {
+          try {
+            if (envelope.msg === "nav" && envelope.action) {
+              this._remoteNavListener({ msg: "nav", action: envelope.action });
+              return;
+            }
+            if (envelope.msg === "logout") {
+              this._remoteNavListener({ msg: "logout" });
+              // Logout also tears the session down — the helper may
+              // have already done it, but tearing again is a no-op.
+              this._teardown("user_revoked");
+              return;
+            }
+          } catch {
+            /* swallow */
+          }
+        }
+        if (envelope.msg === "logout") this._teardown("user_revoked");
+        return;
+      case "value":
+        // Wallet edited the value of the focused field. The remote-
+        // nav helper is the only consumer; without it the edit is
+        // silently dropped (the host page never asked for remote
+        // input control). `value: null` is "no change" — we ignore.
+        if (
+          this._remoteNavListener &&
+          typeof envelope.value === "string"
+        ) {
+          try {
+            this._remoteNavListener({ msg: "value", value: envelope.value });
+          } catch {
+            /* swallow */
           }
         }
         return;

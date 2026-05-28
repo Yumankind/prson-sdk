@@ -76,7 +76,10 @@ export type DecryptedEnvelope = {
     | "display-update"
     | "credential-revoked"
     | "response"
-    | "mouse-update";
+    | "mouse-update"
+    | "nav"
+    | "value"
+    | "logout";
   issuedAt: number;
   ttlMinutes?: number;
   domain?: string;
@@ -162,6 +165,37 @@ export type DecryptedEnvelope = {
      *  toggle mid-session). */
     mode?: "touch" | "magic";
   };
+
+  /**
+   * `nav` body — wallet's remote-navigation command. Sent when the
+   * user taps Prev / Next / Submit on the persistent banner drawer.
+   *
+   *   * `"prev"` / `"next"` — move DOM focus to the previous /
+   *      next tabbable input on the page. Semantically equivalent
+   *      to Shift+Tab / Tab. SDK fires the matching `focus` event
+   *      on the new element so reactive UIs pick up the move.
+   *   * `"submit"` — fire `requestSubmit()` on the closest enclosing
+   *      `<form>` of the currently focused element. Semantically
+   *      equivalent to Enter.
+   *
+   * Only meaningful when the verifier opted in to
+   * `remoteNavigation: true` at sign-in time AND the SDK side called
+   * `enableRemoteNavigation(session)`.
+   */
+  action?: "prev" | "next" | "submit";
+
+  /**
+   * `value` body — wallet's edit of the currently-focused input. The
+   * SDK applies it via `el.value = ...` + an `input` / `change`
+   * event pair. The wallet streams these on every keystroke so the
+   * page updates live.
+   *
+   * Empty string is a valid "clear the field" message and is
+   * propagated as-is. A `null` `value` means "no change" — the SDK
+   * ignores it; used by the wallet to ack a focus push without
+   * actually editing.
+   */
+  value?: string | null;
 };
 
 export async function decryptEnvelope(

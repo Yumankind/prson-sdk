@@ -428,6 +428,232 @@ function tryRequestSubmit(form: HTMLFormElement): void {
   }
 }
 
+// ─── Remote navigation ─────────────────────────────────────────────
+
+export interface RemoteNavController {
+  /**
+   * Stop pushing focus events to the wallet + stop listening for
+   * inbound nav/value/logout commands. The session itself stays
+   * live; only the helper detaches.
+   */
+  dispose(): void;
+}
+
+export interface RemoteNavOptions {
+  /**
+   * Root to scan for tabbable inputs. Defaults to `document.body`.
+   * Limit to a region (e.g. a checkout form) if the page has
+   * unrelated inputs you don't want the wallet to step through.
+   */
+  root?: HTMLElement;
+  /**
+   * Override the default tab order. By default we use a generous
+   * `:is(input, textarea, select)` filter excluding hidden / disabled
+   * / readonly / type=hidden / type=submit. Return your own
+   * NodeList-like array to take full control.
+   */
+  collectFields?: () => Array<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>;
+}
+
+/**
+ * Wire up **remote navigation**. Pushes the page's currently-focused
+ * input to the wallet (metadata + current value) and applies inbound
+ * `nav` / `value` / `logout` commands as the user interacts with the
+ * wallet's persistent navigation banner.
+ *
+ * Wiring summary:
+ *
+ *   * `focusin` on any tabbable input → `session._sendFocus(focus)`.
+ *   * `focusout` on the same → `session._sendFocus(null)`.
+ *   * `input` on the focused element → push the new value to the
+ *      wallet so the phone mirror stays in sync if the user typed on
+ *      the desktop. Debounced to one frame to avoid flooding.
+ *   * Inbound `nav: "prev" | "next"` → move DOM focus along the
+ *      tabbable-input order from the focused element.
+ *   * Inbound `nav: "submit"` → `form.requestSubmit()` on the closest
+ *      enclosing form.
+ *   * Inbound `value` → write to the focused element + dispatch
+ *      `input` + `change`. Reactive frameworks pick it up.
+ *   * Inbound `logout` → session already torn down by the dispatcher;
+ *      helper just detaches.
+ *
+ * Call this once after `signIn()` resolves when you passed
+ * `remoteNavigation: true`. The returned controller's `dispose()` is
+ * idempotent and runs on `signed_out` automatically.
+ */
+export function enableRemoteNavigation(
+  session: PrsonLoginSession,
+  opts?: RemoteNavOptions,
+): RemoteNavController {
+  const root = opts?.root ?? document.body;
+  let currentFocused:
+    | HTMLInputElement
+    | HTMLTextAreaElement
+    | HTMLSelectElement
+    | null = null;
+  let disposed = false;
+
+  function isBindable(
+    el: Element,
+  ): el is HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement {
+    if (el instanceof HTMLInputElement) {
+      const t = (el.type || "text").toLowerCase();
+      if (
+        t === "hidden" || t === "submit" || t === "button" ||
+        t === "reset" || t === "image" || t === "file" ||
+        t === "checkbox" || t === "radio"
+      ) return false;
+      return !el.disabled && !el.readOnly;
+    }
+    if (el instanceof HTMLTextAreaElement) {
+      return !el.disabled && !el.readOnly;
+    }
+    if (el instanceof HTMLSelectElement) {
+      return !el.disabled;
+    }
+    return false;
+  }
+
+  function collectFields(): Array<
+    HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+  > {
+    if (opts?.collectFields) return opts.collectFields();
+    const out: Array<
+      HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+    > = [];
+    const all = root.querySelectorAll<HTMLElement>("input, textarea, select");
+    for (let i = 0; i < all.length; i++) {
+      const el = all[i]!;
+      if (isBindable(el)) out.push(el);
+    }
+    return out;
+  }
+
+  function focusPayloadFor(
+    el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+  ): Parameters<PrsonLoginSession["_sendFocus"]>[0] {
+    const name = nameForElement(el, 0);
+    if (el instanceof HTMLSelectElement) {
+      return {
+        name,
+        label: resolveLabel(el),
+        inputType: "select",
+        value: el.value,
+        options: readOptions(el),
+        required: el.required,
+      };
+    }
+    const inputType = resolveInputType(el);
+    return {
+      name,
+      label: resolveLabel(el),
+      inputType,
+      value: el.value,
+      placeholder:
+        "placeholder" in el ? (el as HTMLInputElement).placeholder || undefined : undefined,
+      required: el instanceof HTMLInputElement ? el.required : false,
+      ...textConstraints(el),
+      ...(el instanceof HTMLInputElement && inputType === "number"
+        ? numericConstraints(el)
+        : {}),
+      ...(el instanceof HTMLInputElement && el.pattern
+        ? { pattern: el.pattern }
+        : {}),
+    };
+  }
+
+  // Debounced "current value changed locally" notifier — keeps the
+  // wallet mirror in sync if the user types on the desktop while the
+  // wallet drawer is open. requestAnimationFrame caps push rate
+  // at ~60 Hz which is well below the wallet's processing budget.
+  let pendingFrame: number | null = null;
+  function scheduleValuePush() {
+    if (pendingFrame !== null) return;
+    pendingFrame = requestAnimationFrame(() => {
+      pendingFrame = null;
+      if (disposed || !currentFocused) return;
+      void session._sendFocus(focusPayloadFor(currentFocused));
+    });
+  }
+
+  function onFocusIn(ev: Event) {
+    const t = ev.target;
+    if (!(t instanceof Element) || !isBindable(t)) return;
+    currentFocused = t;
+    void session._sendFocus(focusPayloadFor(t));
+  }
+
+  function onFocusOut(ev: Event) {
+    const t = ev.target;
+    if (t !== currentFocused) return;
+    currentFocused = null;
+    void session._sendFocus(null);
+  }
+
+  function onInputChange(ev: Event) {
+    if (ev.target !== currentFocused) return;
+    scheduleValuePush();
+  }
+
+  function applyNav(action: "prev" | "next" | "submit") {
+    if (action === "submit") {
+      const form =
+        currentFocused?.closest("form") ?? root.querySelector("form");
+      if (form instanceof HTMLFormElement) tryRequestSubmit(form);
+      return;
+    }
+    const fields = collectFields();
+    if (fields.length === 0) return;
+    let idx = currentFocused ? fields.indexOf(currentFocused) : -1;
+    if (idx === -1) idx = action === "prev" ? fields.length : -1;
+    const target =
+      action === "next"
+        ? fields[(idx + 1) % fields.length]!
+        : fields[(idx - 1 + fields.length) % fields.length]!;
+    target.focus();
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      const len = target.value.length;
+      try { target.setSelectionRange(len, len); } catch { /* select-type inputs don't support it */ }
+    }
+  }
+
+  function applyValue(value: string) {
+    if (!currentFocused) return;
+    writeValueIntoElement(currentFocused, value);
+  }
+
+  const unsubscribe = session._setRemoteNavListener((envelope) => {
+    if (envelope.msg === "nav") applyNav(envelope.action);
+    else if (envelope.msg === "value") applyValue(envelope.value);
+    else if (envelope.msg === "logout") dispose();
+  });
+
+  // `signed_out` cleanup — the dispatcher's `logout` case also tears
+  // the session down; this catches every other terminal path (TTL,
+  // wallet-side revoke, transport loss).
+  const offSignedOut = session.on("signed_out", () => dispose());
+
+  root.addEventListener("focusin", onFocusIn, true);
+  root.addEventListener("focusout", onFocusOut, true);
+  root.addEventListener("input", onInputChange, true);
+  root.addEventListener("change", onInputChange, true);
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    if (pendingFrame !== null) cancelAnimationFrame(pendingFrame);
+    pendingFrame = null;
+    root.removeEventListener("focusin", onFocusIn, true);
+    root.removeEventListener("focusout", onFocusOut, true);
+    root.removeEventListener("input", onInputChange, true);
+    root.removeEventListener("change", onInputChange, true);
+    unsubscribe();
+    offSignedOut();
+  }
+
+  return { dispose };
+}
+
 // ─── Mouse / virtual cursor ────────────────────────────────────────
 
 /**
