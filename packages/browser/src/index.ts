@@ -24,7 +24,7 @@ import { createDraft } from "./api.js";
 import { generateEphemeralKeypair, decryptEnvelope } from "./crypto.js";
 import { connectSignaling } from "./signaling.js";
 import { establishTransport } from "./transport.js";
-import { renderLoginQr } from "./qr.js";
+import { renderLoginQr, createModalQrMount } from "./qr.js";
 import { verifyPresentation } from "./verify.js";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -303,12 +303,39 @@ export class PrsonLogin {
       request,
       serverTs: draft.serverTs,
     });
-    const qrMount = resolveMount(opts.ui?.mountQrInto);
-    const qrHandle = qrMount ? renderLoginQr(qrUrl, qrMount, opts.ui?.theme ?? "auto") : null;
+    const explicitMount = resolveMount(opts.ui?.mountQrInto);
+    let qrHandle: ReturnType<typeof renderLoginQr> | null = null;
+    let modalHandle: { mount: HTMLElement; dispose: () => void } | null = null;
+    if (explicitMount) {
+      // Host gave us a mount — render inline (no scrim, host owns
+      // surrounding chrome).
+      qrHandle = renderLoginQr(qrUrl, explicitMount, opts.ui?.theme ?? "auto");
+    } else {
+      // No mount supplied → default to a centred modal with a dark
+      // scrim. Esc / click-outside aborts the in-flight signIn so
+      // `await signIn(...)` rejects with `LoginAbortedError`. This
+      // gives the partner a zero-config sign-in experience.
+      modalHandle = createModalQrMount({
+        onDismiss: () => {
+          // `me.abort()` is async but `onDismiss` is a click /
+          // keyboard handler — fire-and-forget. The in-flight
+          // teardown chain runs the QR + scrim dispose so the
+          // overlay drops immediately. The next `await` in the
+          // signIn flow then throws `LoginAbortedError`.
+          void me.abort();
+        },
+      });
+      qrHandle = renderLoginQr(
+        qrUrl,
+        modalHandle.mount,
+        opts.ui?.theme ?? "auto",
+      );
+    }
     // Register QR teardown FIRST so an abort during signaling/connect
     // immediately removes the on-screen artefact even before the
     // network resources close.
-    if (qrHandle) me.pushTeardown(() => qrHandle.dispose());
+    if (qrHandle) me.pushTeardown(() => qrHandle!.dispose());
+    if (modalHandle) me.pushTeardown(() => modalHandle!.dispose());
 
     // 5. Open the WS to the Cloudflare Worker. The DO is in DRAFT until
     //    a wallet's /session/claim flips it to ACTIVE; we'll still
