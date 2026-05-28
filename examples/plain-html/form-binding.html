@@ -364,10 +364,19 @@
 
       let session = null;
 
-      document.getElementById("signin").addEventListener("click", async () => {
+      const $signinBtn = document.getElementById("signin");
+      const $signedInState = document.getElementById("signed-in-state");
+      const $signedInSummary = document.getElementById("signed-in-summary");
+      const $signoutBtn = document.getElementById("signout");
+
+      $signinBtn.addEventListener("click", async () => {
+        $signinBtn.disabled = true;
         try {
+          // No `mountQrInto` → the SDK pops a centred modal with a
+          // dark scrim. Esc / click-outside aborts; the promise
+          // rejects with LoginAbortedError so we just re-enable the
+          // button. On success the SDK auto-dismisses the modal.
           const result = await PrsonLogin.signIn({
-            ui: { mountQrInto: "#qr", theme: "auto" },
             ttlMinutes: 5,
             // QR-mode only. Surfaces the persistent remote-control
             // banner in the wallet with Prev / Next / Submit /
@@ -380,19 +389,66 @@
             displayName: result.claims.display_name,
             preferredLanguage: session.preferredLanguage,
           });
-          session.onAny((e) => log("event", e));
+          // Subscribe AFTER the session result lands so we can render
+          // an explicit signed-out state when the wallet revokes /
+          // the TTL expires.
+          session.onAny((e) => {
+            log("event", e);
+            if (e.type === "signed_out") showSignedOut();
+          });
           // Install the DOM-side glue: focus listeners + nav / value
           // / logout handlers. Cleans up on signed_out automatically.
           enableRemoteNavigation(session);
-          enableDemoButtons();
+          showSignedIn(result);
         } catch (err) {
           log("signIn failed", String(err));
+          $signinBtn.disabled = false;
         }
       });
+
+      $signoutBtn.addEventListener("click", () => {
+        if (!session) return;
+        log("signout requested");
+        session.close();
+        // The `signed_out` event handler above swaps the UI back to
+        // the signin button.
+      });
+
+      function showSignedIn(result) {
+        const claims = result.claims || {};
+        const displayName =
+          claims.display_name || claims.displayName || "(no display name)";
+        const expiresMs = result.credential?.expiresAt;
+        const expiresIn = expiresMs
+          ? Math.max(0, Math.round((expiresMs - Date.now()) / 60000))
+          : null;
+        $signedInSummary.textContent =
+          displayName +
+          " · " +
+          (result.credential?.vct?.split("/").pop() || "credential") +
+          (expiresIn !== null ? " · expires in " + expiresIn + " min" : "");
+        $signinBtn.hidden = true;
+        $signedInState.hidden = false;
+        enableDemoButtons();
+      }
+
+      function showSignedOut() {
+        session = null;
+        $signedInState.hidden = true;
+        $signinBtn.hidden = false;
+        $signinBtn.disabled = false;
+        disableDemoButtons();
+      }
 
       function enableDemoButtons() {
         for (const id of ["ask-email", "ask-form", "mouse-touch", "mouse-magic"]) {
           document.getElementById(id).disabled = false;
+        }
+      }
+
+      function disableDemoButtons() {
+        for (const id of ["ask-email", "ask-form", "mouse-touch", "mouse-magic"]) {
+          document.getElementById(id).disabled = true;
         }
       }
 
