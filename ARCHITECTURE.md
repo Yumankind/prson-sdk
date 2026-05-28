@@ -36,48 +36,67 @@ on the fly; the browser keeps X25519 (KX) and never signs with it.
 ## 2. Surfaces
 
 ```
-   ┌────────────────────────────────┐        ┌────────────────────────────────┐
-   │ Prson Firebase functions       │        │ Cloudflare Workers (edge)      │
-   │  · createLoginSession (unauth, │        │  · wss://signaling.prson.net   │
-   │     IP-rate-limited; returns   │        │     /login/v1/<reqId>          │
-   │     reqId + signed sig token   │        │  · Durable Object per reqId    │
-   │     + TURN creds)              │        │     · offer + answer           │
-   │  · resolveLoginSession (wallet │        │     · iceCandidates[]          │
-   │     auth; returns canonical    │        │     · auto-destroys at 15 min  │
-   │     request + TURN creds)      │        │  · Cloudflare TURN (cheap relay│
-   │  · issueIdentityCredentialFor- │        │     on NAT fallback only)      │
-   │     Domain (per-domain rekey)  │        │                                │
-   └────────────────────────────────┘        └────────────────────────────────┘
-              ▲                                          ▲
-              │ HTTPS callable                           │ WebSocket
-              │                                          │ (signed sigToken
-              │                                          │  for browser;
-              │                                          │  Firebase ID token
-              │                                          │  for wallet)
-              │                                          │
-   ┌──────────┴───────────────────┐          ┌───────────┴────────────────┐
-   │ Browser (SDK)                │          │ Mobile wallet              │
-   │  · X25519 ephemeral keypair  │          │  · Ed25519 identity key    │
-   │  · QR renderer + verifier    │          │  · per-domain rekey HKDF   │
-   │  · RTCPeerConnection         │ ◄══ NaCl ══► RTCPeerConnection         │
-   │    + TURN ICE servers        │   box      │  + TURN ICE servers      │
-   └──────────────────────────────┘  P2P data  └────────────────────────────┘
-                                     channel
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │ Cloudflare Workers (edge, the ONLY relay-path API surface)          │
+   │  · POST /session/draft   — anonymous, IP-rate-limited; returns     │
+   │                            reqId + draftToken + signalingWss.      │
+   │                            No TURN allocated.                       │
+   │  · POST /session/claim   — wallet-signed (Ed25519); verifies sig,   │
+   │                            promotes DO to ACTIVE, mints CF TURN.    │
+   │  · wss://…/login/v1/<r>  — both peers WS-connect with their HMAC    │
+   │                            role token; DO fans signals.             │
+   │  · Durable Object per reqId   · DRAFT → ACTIVE → closed             │
+   │     · cached offer/answer/ICE · 60 s draft TTL, 15 min session TTL  │
+   │  · Cloudflare TURN minted server-side (API token = Worker secret)   │
+   └─────────────────────────────────────────────────────────────────────┘
+             ▲                                          ▲
+             │ HTTPS POST + WS                          │ HTTPS POST + WS
+             │ (anonymous draft;                        │ (Ed25519 sig on claim;
+             │  draftToken on WS)                       │  walletSessionToken on WS)
+             │                                          │
+   ┌─────────┴───────────────────┐          ┌───────────┴────────────────┐
+   │ Browser (SDK)               │          │ Mobile wallet              │
+   │  · X25519 ephemeral keypair │          │  · Ed25519 identity key    │
+   │  · QR renderer + verifier   │          │  · per-domain rekey HKDF   │
+   │  · RTCPeerConnection        │ ◄══ NaCl ══► RTCPeerConnection         │
+   │    (STUN only — wallet      │   box      │  + Cloudflare TURN ICE   │
+   │     allocates the relay)    │ P2P data   │    creds from /claim     │
+   └─────────────────────────────┘  channel   └────────────────────────────┘
+
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │ Firebase Functions (credential-issuance ONLY — unrelated to relay)  │
+   │  · issueIdentityCredential        — mints the SD-JWT-VC the wallet  │
+   │                                     presents, with cnfJwkOverride   │
+   │                                     for the per-domain holder key.  │
+   │  · revokeIdentityCredential       — wallet-driven sign-out.         │
+   │  · jwtVcIssuerMetadata            — JWKS for verifiers.             │
+   └─────────────────────────────────────────────────────────────────────┘
+                                  ▲
+                                  │ Firebase ID token
+                                  │ (wallet only; the browser SDK never
+                                  │  calls Firebase directly — partner
+                                  │  sites don't need Firebase config)
+                                  │
+                          ┌───────┴────────┐
+                          │  Mobile wallet │
+                          └────────────────┘
 ```
 
-Two separate planes:
+Two separate planes — the **relay** and the **credentials**:
 
-1. **Cloudflare Worker (single API surface for the relay)** — exposes
-   three routes: `POST /session/draft` (anonymous, IP-rate-limited),
-   `POST /session/claim` (wallet-signed via Ed25519), and the
-   `wss://…/login/v1/<reqId>` WebSocket upgrade. Browser SDK + wallet
+1. **Cloudflare Worker** is the **single API surface for the relay**.
+   Three routes (`POST /session/draft`, `POST /session/claim`, the WS
+   upgrade) plus a Durable Object per `reqId`. Browser SDK + wallet
    talk to the Worker directly; **no Firebase Functions in the path**.
-   The Worker is the only place Cloudflare TURN credentials are minted
-   (so the API token never leaves it).
-2. **Firebase callables** — only for the credential-issuance path
-   (`issueIdentityCredential` / `issueIdentityCredentialForDomain` /
-   `revokeIdentityCredential`). Those are wallet-only calls,
-   Firebase-authenticated, and unrelated to the relay.
+   Partner sites embedding the SDK never need Firebase config.
+   Cloudflare TURN credentials are minted inside the Worker (API token
+   is a Worker secret), only after `/session/claim` verifies a wallet
+   Ed25519 signature.
+2. **Firebase callables** handle only the **credential-issuance** path
+   (`issueIdentityCredential` + its per-domain `cnfJwkOverride` mode,
+   `revokeIdentityCredential`, and the public `jwtVcIssuerMetadata`
+   JWKS endpoint). Those are wallet-only calls, Firebase-authenticated,
+   and never traverse the browser SDK.
 
 The transport is **WebRTC peer-to-peer with Cloudflare TURN as a
 fallback relay** — chosen over a hosted SFU because we're moving
@@ -255,13 +274,15 @@ wallet handles it directly, and either:
 - Pushes through the same WebRTC channel (more robust, recommended).
 
 The SDK auto-detects which fallback to use based on user-agent + the
-LiveKit handshake completion.
+WebRTC handshake completion.
 
 ### 3.3 Renewal flow
 
 ```
 1. Wallet (T-60s timer fires OR user taps the active-session tile):
-   - Rejoins the LiveKit room.
+   - Re-opens its WS to the same `signalingWss` and re-runs the
+     SDP/ICE exchange (the Durable Object is still ACTIVE because
+     /session/claim's session TTL has not expired).
    - Repeats steps 4-5 of §3.1 with:
        · fresh `nonce` (new randomBytes(32) generated by the wallet
          and ALSO sent verbatim; the browser doesn't need to coordinate
@@ -296,23 +317,28 @@ an enterprise SSO product that already does OpenID4VP.
 
 ```
 prson://login/v1?
-  s=<b64u reqId, 16 bytes>
-  r=<roomName, opaque string>
-  k=<wallet's LiveKit access token>
+  s=<b64u reqId, 32 chars>
   p=<b64u(X25519 browser pk, 32 bytes)>
   n=<b64u(nonce, 32 bytes)>
   d=<domain, url-encoded>
   req=<b64u(JSON request)>
 ```
 
-**Why the request is duplicated** in `req` AND fetched from
-`resolveLoginSession`: the wallet ALWAYS calls
-`resolveLoginSession({ reqId })` and compares its `request` field
-against the QR's `req`. A tampered QR (e.g. attacker swaps `d`) is
-detected because the server-stored version was uploaded by the
-genuine browser. See [SECURITY.md §3](./SECURITY.md).
+**Why the request is duplicated** in `req` AND echoed back by the
+Worker: the wallet's `POST /session/claim` returns the canonical
+server-stored `request` (uploaded by the genuine browser during
+`POST /session/draft`), which the wallet compares byte-for-byte
+against the QR's `req` blob. A tampered QR (e.g. attacker swaps `d`)
+fails this check. The Worker also independently rejects the claim
+with `401 domain-mismatch` if the wallet signed for a different
+domain than the stored draft. See [SECURITY.md §3](./SECURITY.md)
+for the full anti-tamper argument.
 
-### 4.2 LiveKit data-channel envelope
+The QR carries **no relay credentials** — the wallet obtains its
+TURN credentials + walletSessionToken from `/session/claim` after
+signing, so a leaked QR can't be used to burn relay capacity.
+
+### 4.2 WebRTC data-channel envelope
 
 Plaintext JSON (then box-encrypted, then base64url'd, then sent as a
 single data-channel message):
@@ -335,7 +361,7 @@ single data-channel message):
 Wire format:
 
 ```
-livekit_message = {
+data_channel_message = {
   ephPk:    b64u(wallet's per-message X25519 pk, 32 bytes),
   nonce24:  b64u(24-byte nonce),
   ct:       b64u(secretbox ciphertext + authenticator),

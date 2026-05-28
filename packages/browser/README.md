@@ -13,7 +13,7 @@
 ### Bundled
 
 ```bash
-npm install @prson/login-sdk livekit-client
+npm install @prson/login-sdk
 ```
 
 ```ts
@@ -55,6 +55,14 @@ type SignInOptions = {
     identityType?: "personal" | "organization";
   };
 
+  /** If `true`, the SDK ALSO accepts a self-signed **anonymous-wallet**
+   *  credential — no verified-human claim, no document fields, just a
+   *  proof the user controls a Prson wallet on this domain. The
+   *  wallet's drawer surfaces a "Sign in anonymously" option to the
+   *  user. `result.claims.anonymous === true` indicates this branch
+   *  fired. Default false. */
+  allowAnonymous?: boolean;
+
   /** 1..15. Default 10. The credential's `exp` is clamped to this. */
   ttlMinutes?: number;
 
@@ -69,7 +77,7 @@ type SignInOptions = {
 
   /** Pre-render the QR but DON'T resolve until you call `.proceed()`.
    *  Useful when the QR is shown well before the user is ready to
-   *  scan and you want to control the moment the LiveKit room opens. */
+   *  scan and you want to control the moment the signaling WS opens. */
   defer?: boolean;
 };
 
@@ -113,7 +121,7 @@ type ExpiryReason =
   | "ttl_reached"          // No renewal arrived; the credential lapsed.
   | "wallet_signed_out"    // Wallet pushed a `revoke` message.
   | "user_revoked"         // Host page called session.close().
-  | "network_loss"         // LiveKit room dropped > 60s.
+  | "network_loss"         // WebRTC data channel dropped > 60s.
   | "credential_revoked";  // Future: notary status-list flagged this VC.
 
 class PrsonLogin {
@@ -190,9 +198,10 @@ class PrsonLogin {
   Prson app is installed (universal-link probe), the QR is replaced
   by a "Sign in with Prson" button. The user taps it, the wallet
   opens, the rest is identical.
-- **QR refresh.** Every QR encodes a one-shot LiveKit token with a
-  ≤ 15-min lifetime. If the user idles past expiry, the SDK refreshes
-  the QR automatically.
+- **QR refresh.** Every QR encodes a one-shot `reqId` bound to a
+  Cloudflare-Worker draft that's good for **60 seconds** to be
+  claimed by a wallet. If the user idles past the draft expiry, the
+  SDK calls `POST /session/draft` again and re-renders the QR.
 - **Renewals.** The SDK *receives* renewals but never *requests* them
   — the wallet is in charge. Your backend just needs to accept a new
   presentation on each `onRenewed`.

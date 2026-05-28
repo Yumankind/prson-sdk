@@ -16,22 +16,29 @@ wss://signaling.prson.net/login/v1/<reqId>
   Sec-WebSocket-Protocol: prson-login-v1, <token>
 ```
 
-- One **Durable Object** instance per `reqId` (created lazily on first
-  WS upgrade).
-- Two **roles** accepted at upgrade: `browser` (sigToken HMAC) or
-  `wallet` (Firebase ID token).
+- One **Durable Object** instance per `reqId` (created on the first
+  `POST /session/draft`, lifted from DRAFT → ACTIVE on `/session/claim`).
+- Two **role tokens** accepted at WS upgrade, both **HMAC-signed by
+  the Worker itself** — no Firebase ID-token verification, no
+  externally-resolved JWKS on the hot path:
+  - `browser` → `draftToken` from `POST /session/draft` (60 s TTL).
+  - `wallet`  → `walletSessionToken` from `POST /session/claim` (15 min TTL).
 - The DO **fans out** signaling messages between the two peers, caches
   the offer + answer + ICE candidates so a late-joining peer gets the
   state replayed.
 - **15-min hard TTL** via DO alarms — auto-destroys whether the peers
-  have finished or not.
+  have finished or not. A DRAFT that's never claimed self-destructs
+  after 60 s.
 
 ## Deploy
 
 ```bash
 cd login-sdk/infra/signaling-worker
 npm install
-wrangler secret put SIG_TOKEN_HMAC_SECRET   # paste the secret shared with createLoginSession
+wrangler kv namespace create prson-login-rate-limit  # paste id into wrangler.toml
+wrangler secret put SIG_TOKEN_HMAC_SECRET   # HMAC secret for draftToken + walletSessionToken
+wrangler secret put CF_TURN_KEY_ID          # Cloudflare TURN key id
+wrangler secret put CF_TURN_API_TOKEN       # Cloudflare TURN API token
 wrangler deploy
 ```
 
@@ -59,12 +66,24 @@ Role-message gating is enforced server-side:
 
 ## Security checklist (subset of `../../SECURITY.md` §10)
 
-- [x] HMAC sigToken verification with timing-safe comparison.
-- [x] Firebase ID-token verification via JWK endpoint (no X.509 parsing
-      in Workers).
+- [x] HMAC token verification with timing-safe comparison, role-tagged
+      (`draftToken` for browser, `walletSessionToken` for wallet).
+- [x] Wallet's Ed25519 claim signature verified on
+      `"prson-login-claim/v1\n<reqId>\n<walletPkX>\n<ts>\n<domain>"` —
+      version prefix protects against cross-protocol replay.
+- [x] `/session/claim` echoes the stored draft's `domain` back, and
+      rejects with `401 domain-mismatch` if the wallet signed for a
+      different domain than the browser drafted.
+- [x] Cloudflare TURN credentials minted **only** inside `handleClaim`
+      — never on `/session/draft` (verifiable by audit of the
+      `mintCloudflareTurnCreds` call sites).
 - [x] One peer per role: a second wallet/browser connection replaces
       the first (4002 close code).
 - [x] 15-min DO alarm — no way to keep a session open indefinitely.
+      DRAFT alarm at 60 s catches abandoned drafts before they cost
+      anything beyond a few KB of DO state.
+- [x] Per-IP draft rate limit (KV-backed, default 30/IP/min) prevents
+      anonymous draft-spam.
 - [x] All control message types validated before forwarding.
 
 ## Phase status

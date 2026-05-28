@@ -11,11 +11,11 @@
 | # | Adversary | Capability | What they want |
 |---|---|---|---|
 | A1 | **Phisher running a clone site** | Renders a fake login page with their own SDK call; controls the domain shown in the URL bar. | Trick the user's wallet into binding a presentation to *their* `aud`, so they can replay it elsewhere. |
-| A2 | **MitM at the Prson LiveKit relay** | Sees every byte traversing the data channel; can drop, reorder, or inject packets. | Read the disclosed claims; replay; downgrade. |
+| A2 | **MitM at the Cloudflare relay** (Worker signaling layer, TURN relay when used) | Sees every byte traversing the signaling WS + any TURN-relayed packets; can drop, reorder, or inject. | Read the disclosed claims; replay; downgrade. |
 | A3 | **Hostile other tab / extension** | Same-origin JavaScript on the legitimate site; OR a malicious extension with `<all_urls>` permission. | Steal the X25519 secret key, the SD-JWT-VC, or the session token. |
 | A4 | **Stolen / unlocked phone briefly** | Has the mobile app open for ≤ 60 s. | Approve a login they didn't initiate. |
-| A5 | **Compromised Prson server** | Can mint LiveKit tokens, see room metadata, but cannot forge the **notary RSA key** (HSM-resident in prod). | Approve fake VCs (caught: bad issuer signature), or trick the SDK into a fake session (caught: see §3). |
-| A6 | **Long-term offline attacker** | Records the entire LiveKit traffic now, attacks later. | Decrypt past sessions. |
+| A5 | **Compromised Prson server** | Can mint Worker draftTokens + TURN credentials, see signaling metadata, but cannot forge the **notary RSA key** (HSM-resident in prod). | Approve fake VCs (caught: bad issuer signature), or trick the SDK into a fake session (caught: see §3). |
+| A6 | **Long-term offline attacker** | Records the entire signaling + relay traffic now, attacks later. | Decrypt past sessions. |
 | A7 | **Replay attacker** | Captured a legitimate presentation. | Resubmit it to the same or a different verifier. |
 | A8 | **User loses their phone** | The mnemonic is somewhere else (e.g. recovery card). | Take over the account on a website. |
 
@@ -128,7 +128,7 @@ There are **four** independent paths that kill a session immediately:
 | Path | Initiator | What dies |
 |---|---|---|
 | User taps "Sign out" on the website | Browser → SDK | The SDK drops the cookie + emits `onExpiry("user_revoked")`. Prson server-side does not need to be touched. |
-| User taps "Sign out everywhere" on the wallet | Mobile app → LiveKit data channel (`{msg:"revoke"}`) | All active sessions for this (identity, domain) tear down. SDK fires `onExpiry("wallet_signed_out")`. |
+| User taps "Sign out everywhere" on the wallet | Mobile app → WebRTC data channel (`{msg:"revoke"}`) | All active sessions for this (identity, domain) tear down. SDK fires `onExpiry("wallet_signed_out")`. |
 | **Credential is revoked** on the notary side (e.g. document alias-transferred away — see [`project_identity_sd_jwt_vc`](../mobile-app/prson_app/docs/trust_architecture.md#62-what-s-in-the-vc-vs-signed-on-demand)) | Server → wallet → browser | Wallet stops issuing renewals; browser session lapses at TTL. (A future status-list endpoint enables instant revocation.) |
 | User loses the device | Mnemonic recovery on a new device → re-register → old device deauthorized | All sessions from the old device stop being renewable; they lapse at TTL. The mobile app on the new device sees the active-sessions list and can renew. |
 
@@ -163,7 +163,7 @@ would dispatch by header.alg. The notary side's RSA-2048 is on a
 similar trajectory.
 
 The protocol version `prson_vp_v1` in every envelope (see
-[ARCHITECTURE.md §4.2](./ARCHITECTURE.md#42-livekit-data-channel-envelope))
+[ARCHITECTURE.md §4.2](./ARCHITECTURE.md#42-webrtc-data-channel-envelope))
 gates wire-format upgrades the same way.
 
 ## 9. What we deliberately do NOT do
@@ -174,7 +174,9 @@ gates wire-format upgrades the same way.
   Secure, ≤ session TTL.
 - **No telemetry phoning home.** The SDK does not transmit anything
   to Prson beyond the (unauthenticated, content-bound) call to
-  `createLoginSession`. Once the LiveKit room is up, Prson is a relay.
+  `POST /session/draft`. Once the WS to the Cloudflare Worker is up,
+  Prson is a relay; once WebRTC connects directly, even the Worker
+  drops out of the data path.
 - **No long-lived bearer tokens.** Every session is renewal-bound;
   there are no refresh tokens that survive a wallet logout.
 

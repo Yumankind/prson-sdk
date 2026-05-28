@@ -58,10 +58,23 @@ export type VerifyErr = {
 
 export type VerifyResult = VerifyOk | VerifyErr;
 
+/** VCT for the self-signed anonymous-wallet credential — kept here as
+ *  well as in index.ts so verifier callers don't have to import both. */
+const ANONYMOUS_WALLET_VCT =
+  "https://app.prson.net/credentials/anonymous-wallet/v1";
+
 export async function verifyPresentation(
   sdJwt: string,
   opts: VerifyOptions,
 ): Promise<VerifyResult> {
+  // ── Anonymous-wallet credential path ─────────────────────────────
+  // No SD-JWT tildes — it's a plain JWS. We accept this ONLY when the
+  // calling site opted in via `acceptedVcts` containing the anonymous
+  // VCT. Verification is structurally simpler: cnf.jwk IS the signer,
+  // so the JWS signature + cnf-binding check collapse into one step.
+  if (!sdJwt.includes("~") && opts.acceptedVcts.includes(ANONYMOUS_WALLET_VCT)) {
+    return verifyAnonymousWallet(sdJwt, opts);
+  }
   const parts = sdJwt.split("~");
   if (parts.length < 2) return { ok: false, reason: "malformed" };
 
@@ -267,4 +280,92 @@ function b64uEncode(bytes: Uint8Array): string {
   let s = "";
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]!);
   return btoa(s).replace(/=+$/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+/**
+ * Verify a self-signed anonymous-wallet credential. Spec:
+ *
+ *   header  = { typ: "anon-wallet+jwt", alg: "EdDSA" }
+ *   payload = { iss: <domain>, aud, nonce, iat, exp,
+ *               vct: ANONYMOUS_WALLET_VCT,
+ *               cnf: { jwk: <Ed25519 OKP JWK> } }
+ *
+ * The signing key IS cnf.jwk — there's no separate issuer key to
+ * resolve. The verifier checks aud/nonce/exp and the Ed25519 sig.
+ *
+ * This is only accepted by [verifyPresentation] when `acceptedVcts`
+ * includes ANONYMOUS_WALLET_VCT, which only happens when the host
+ * site passed `allowAnonymous: true` to PrsonLogin.signIn().
+ */
+async function verifyAnonymousWallet(
+  jws: string,
+  opts: VerifyOptions,
+): Promise<VerifyResult> {
+  const [hB64, pB64, sigB64] = jws.split(".");
+  if (!hB64 || !pB64 || !sigB64) return { ok: false, reason: "malformed" };
+  let header: { alg?: string; typ?: string };
+  let payload: Record<string, unknown>;
+  try {
+    header = JSON.parse(new TextDecoder().decode(b64uBytes(hB64)));
+    payload = JSON.parse(new TextDecoder().decode(b64uBytes(pB64)));
+  } catch {
+    return { ok: false, reason: "malformed" };
+  }
+  if (header.alg !== "EdDSA" || header.typ !== "anon-wallet+jwt") {
+    return { ok: false, reason: "malformed" };
+  }
+  if (payload.vct !== ANONYMOUS_WALLET_VCT) {
+    return { ok: false, reason: "vct_not_accepted" };
+  }
+  const cnf = (payload.cnf as { jwk?: CnfJwk } | undefined)?.jwk;
+  if (!cnf || cnf.kty !== "OKP" || cnf.crv !== "Ed25519") {
+    return { ok: false, reason: "kb_missing" };
+  }
+  if (payload.aud !== opts.expectedAudience) {
+    return { ok: false, reason: "aud_mismatch" };
+  }
+  if (payload.nonce !== opts.expectedNonce) {
+    return { ok: false, reason: "nonce_mismatch" };
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp !== "number" || payload.exp < nowSec) {
+    return { ok: false, reason: "vc_expired" };
+  }
+  if (typeof payload.iat !== "number" || Math.abs(nowSec - payload.iat) > (opts.maxKbAgeSeconds ?? 60)) {
+    return { ok: false, reason: "kb_iat_stale" };
+  }
+  // The signing key is cnf.jwk itself — no separate issuer key to
+  // resolve. A correct signature here proves the holder controls the
+  // pk they're claiming.
+  const key = await crypto.subtle.importKey(
+    "jwk",
+    cnf as JsonWebKey,
+    { name: "Ed25519" },
+    false,
+    ["verify"],
+  );
+  const ok = await crypto.subtle.verify(
+    "Ed25519",
+    key,
+    b64uBytes(sigB64),
+    new TextEncoder().encode(`${hB64}.${pB64}`),
+  );
+  if (!ok) return { ok: false, reason: "issuer_sig_invalid" };
+
+  return {
+    ok: true,
+    claims: {
+      // Anonymous credentials carry no profile data — just the marker
+      // that the user controls the signing key. The host site treats
+      // cnf.jwk.x as the stable per-user id on this domain.
+      anonymous: true,
+    },
+    cnf: { jwk: cnf },
+    credential: {
+      vct: ANONYMOUS_WALLET_VCT,
+      iss: typeof payload.iss === "string" ? payload.iss : opts.trustedIssuer,
+      kid: "",
+      expiresAt: (payload.exp as number) * 1000,
+    },
+  };
 }

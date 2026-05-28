@@ -46,15 +46,23 @@ credential signed by the Prson notary key (published as
 [`did:web:app.prson.net`](https://app.prson.net/.well-known/did.json)).
 At sign-in time:
 
-- The **browser** generates an ephemeral X25519 keypair, joins a
-  one-shot WebRTC room on Prson's LiveKit cluster, and renders a QR.
-- The **mobile wallet** scans the QR, the user picks which claims to
-  disclose, the wallet signs an SD-JWT-VC presentation + a KB-JWT bound
-  to the browser's origin + nonce.
-- The **wallet encrypts** the presentation to the browser's ephemeral
-  pk (NaCl `box`) and pushes it over the LiveKit data channel.
+- The **browser** generates an ephemeral X25519 keypair, registers a
+  short-lived **draft** with Prson's Cloudflare Worker (anonymous,
+  IP-rate-limited; no relay capacity allocated yet), opens a
+  WebSocket back to that Worker, and renders a QR.
+- The **mobile wallet** scans the QR. The user picks which claims to
+  disclose; the wallet **signs a claim** with its Ed25519 identity
+  key (proves consent to a real Prson user) and posts it to the
+  Worker's `/session/claim`. The Worker verifies the signature, mints
+  short-lived Cloudflare TURN credentials, and activates the relay.
+- The wallet then builds an SD-JWT-VC presentation + a KB-JWT bound
+  to the browser's origin + nonce, **encrypts** the envelope to the
+  browser's ephemeral X25519 pk (NaCl `box`), and pushes it over the
+  WebRTC data channel (direct peer-to-peer when possible, TURN-relayed
+  on NAT fallback).
 - The **browser** decrypts. Done. Prson's servers never see the
-  credential payload — they only relay encrypted bytes.
+  credential payload — they only relay encrypted bytes, and only
+  for sessions a wallet has actually signed for.
 
 The credential is **standard SD-JWT-VC + standard Ed25519 KB-JWT**, so
 any compliant verifier library (Sphereon, walt.id, EUDI ref, our
@@ -93,30 +101,35 @@ The recommended default. The user is on their laptop, scans the QR
 with their phone, gets signed in. No password, no email round-trip.
 
 ```
-desktop browser                Prson LiveKit              mobile wallet
-┌─────────────┐                ┌───────────┐              ┌────────────┐
-│ generate    │                │           │              │            │
-│ ephemeral   │                │           │              │            │
-│ X25519 pk   │                │           │              │            │
-│             │ ── createSession ──►       │              │            │
-│             │ ◄── { roomTok, browserPk } │              │            │
-│ join room,  │                │           │              │            │
-│ render QR   │ ◄═══════════ data channel ═══════════════►│ scan QR    │
-│ encoding    │                │           │              │ → join room│
-│ { room,     │                │           │              │            │
-│   browserPk,│                │           │              │ user picks │
-│   nonce,    │                │           │              │ disclosures│
-│   req }     │                │           │              │ in login   │
-│             │                │           │              │ drawer     │
-│             │                │           │              │ sign       │
-│             │                │           │              │ SD-JWT-VC  │
-│             │                │           │              │ + KB-JWT   │
-│             │                │           │              │ NaCl-box   │
-│             │ ◄══════════════ encrypted payload ════════│ encrypt    │
-│ decrypt     │                │           │              │            │
-│ verify      │                │           │              │            │
-│ → signed in │                │           │              │            │
-└─────────────┘                └───────────┘              └────────────┘
+desktop browser            Cloudflare Worker            mobile wallet
+┌─────────────┐            ┌────────────────┐           ┌────────────┐
+│ generate    │            │ DRAFT ─60s──┐  │           │            │
+│ ephemeral   │ POST       │              │  │           │            │
+│ X25519 pk   │ /session/  │              │  │           │            │
+│             │  draft  ──►│ DO[reqId]    │  │           │            │
+│             │◄── {reqId, draftToken,    │  │           │            │
+│             │     signalingWss}         │  │           │            │
+│ open WS     │ wss        │              │  │           │            │
+│ render QR ──┼──signal────┤              │  │           │ scan QR    │
+│ (reqId,     │   (offer+  │              │  │           │            │
+│  browserPk, │    ICE)    │              │  │           │            │
+│  nonce,     │            │              │  │           │ user picks │
+│  domain,    │            │              │  │           │ disclosures│
+│  req)       │            │              ▼  │           │            │
+│             │            │ Ed25519 ◄────┘  │ POST      │ sign claim │
+│             │            │   verify  ◄─────┼─/session/─│ with       │
+│             │            │ ACTIVE +        │   claim   │ identity   │
+│             │            │ mint TURN       │           │ Ed25519 sk │
+│             │            │ ──────────────► │           │            │
+│             │            │              ◄──┼ wss WS    │ open WS    │
+│             │◄─────────signal fan-out─────►│           │ answer+ICE │
+│             │            │              │  │           │            │
+│             │◄══════════ WebRTC P2P data channel ═════►│ NaCl-box   │
+│             │             (TURN-relay fallback)        │ encrypt    │
+│ decrypt     │            │              │  │           │            │
+│ verify      │            │              │  │           │            │
+│ → signed in │            │              │  │           │            │
+└─────────────┘            └────────────────┘           └────────────┘
 ```
 
 ### 2. Same-device (mobile browser ↔ wallet on the same phone)
@@ -165,8 +178,8 @@ want to renew (ignoring the notification = letting the session lapse
 = signed out).
 
 Revocation also flows wallet → website: a "Sign out everywhere"
-action on the mobile app tears down all active sessions instantly via
-the LiveKit data channel.
+action on the mobile app tears down all active sessions instantly by
+sending a `revoke` envelope over the WebRTC data channel.
 
 ## Versioning + stability
 
@@ -192,4 +205,5 @@ The browser SDK same.
 | Run a verifier in your backend | [`packages/verifier-node/README.md`](./packages/verifier-node/README.md) |
 | Understand the wire formats | [`ARCHITECTURE.md`](./ARCHITECTURE.md) |
 | Audit the crypto / threat model | [`SECURITY.md`](./SECURITY.md) |
+| See what's coming (events, on-demand signing) | [`ROADMAP.md`](./ROADMAP.md) |
 | See a working end-to-end example | [`examples/plain-html/`](./examples/plain-html/) |

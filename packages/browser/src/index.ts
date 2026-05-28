@@ -39,6 +39,22 @@ export type SignInOptions = {
     predicates?: string[];
     identityType?: "personal" | "organization";
   };
+  /**
+   * If `true`, the SDK ALSO accepts an **anonymous-wallet** credential
+   * — a self-signed JWT issued by the wallet's per-domain Ed25519 key,
+   * with no notary involvement. The wallet's login drawer surfaces an
+   * "Sign in anonymously" option to the user. The credential carries
+   * only `cnf.jwk` + `aud` + `nonce` + `iat` + `exp` (no
+   * `verified_human`, no document fields, no predicates). The
+   * verifier treats `cnf.jwk.x` as the stable per-user identifier on
+   * this domain.
+   *
+   * If a verified credential is presented when `allowAnonymous: true`
+   * AND `required.*` constraints are set, the verified credential is
+   * still checked against those constraints — the relaxation only
+   * applies to the anonymous fallback. Default false.
+   */
+  allowAnonymous?: boolean;
   ttlMinutes?: number;
   ui?: {
     mountQrInto?: string | HTMLElement;
@@ -75,6 +91,11 @@ export const KNOWN_VCTS = [
   "https://app.prson.net/credentials/verified-human/v1",
   "https://app.prson.net/credentials/verified-identity/v1",
 ] as const;
+/** Self-signed wallet credential — accepted only when the SDK is
+ *  invoked with `allowAnonymous: true`. Carries only `cnf.jwk` + the
+ *  KB-JWT fields; no notary signature. */
+export const ANONYMOUS_WALLET_VCT =
+  "https://app.prson.net/credentials/anonymous-wallet/v1";
 export const DEFAULT_TTL_MINUTES = 10;
 export const MAX_TTL_MINUTES = 15;
 /** Cloudflare Worker single-API-surface base URL. Override in dev with
@@ -105,14 +126,18 @@ export class PrsonLogin {
     const ephKeys = await generateEphemeralKeypair();
 
     // 2. Build the verifier request blob. The reqId is content-bound
-    //    so the wallet's `resolveLoginSession` returns the byte-for-byte
-    //    same payload (anti-tamper, see SECURITY.md §3).
+    //    so the wallet sees the same canonical bytes the Worker stored
+    //    (anti-tamper, see SECURITY.md §3).
     const nonce = b64u(crypto.getRandomValues(new Uint8Array(32)));
     const request = {
       domain,
       nonce,
       browserPk: ephKeys.publicKeyB64u,
       required: opts.required ?? {},
+      // Carried into the wallet's drawer so an "Anonymous" option is
+      // offered. The SDK side enforces acceptance below at verify time;
+      // the wallet enforces drawer UX based on this flag.
+      allowAnonymous: opts.allowAnonymous === true,
       ttlMaxMinutes,
     };
 
@@ -166,11 +191,16 @@ export class PrsonLogin {
 
     // 8. Verify the presentation cryptographically before we hand it
     //    to the host application. The five rules in SECURITY.md §7
-    //    are enforced here.
+    //    are enforced here. When allowAnonymous is set, we also accept
+    //    the self-signed anonymous-wallet VCT (different verification
+    //    path: cnf.jwk == issuer, no notary signature to check).
+    const acceptedVcts = opts.allowAnonymous
+      ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT]
+      : [...KNOWN_VCTS];
     const verified = await verifyPresentation(envelope.presentation, {
       expectedAudience: `https://${domain}`,
       expectedNonce: nonce,
-      acceptedVcts: [...KNOWN_VCTS],
+      acceptedVcts,
       trustedIssuer: TRUSTED_ISSUER,
     });
     if (!verified.ok) {
