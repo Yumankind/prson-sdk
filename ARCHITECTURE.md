@@ -138,6 +138,16 @@ per-domain `cnf.jwk` via the `issueIdentityCredentialForDomain`
 callable (server reuses the existing notary signing path; the only
 difference is the `cnf` bound into the JWS).
 
+**Opt-out: ephemeral (device-local) per-domain key.** When the verifier
+opts in to `ephemeralIdentity: true`, the HKDF derivation above is
+skipped: the wallet mints a fresh random Ed25519 keypair on first
+sign-in, persists the 32-byte seed in this-device-only secure storage,
+and reuses it on subsequent sign-ins to the same domain. The verifier
+still sees a stable per-user id (same `cnf.jwk.x` across sessions on
+this device), but mnemonic compromise no longer de-anonymises the user
+on this site — and changing devices loses access to the account. See
+§5.4 for the persistence semantics.
+
 ## 3. Flows
 
 ### 3.1 Cross-device QR flow (the default)
@@ -507,6 +517,31 @@ the Worker on `/session/claim` where the API token is a Worker secret.
 | Cloudflare TURN credentials | 15 min (minted only on /session/claim) |
 | Durable Object | auto-destroys at draftExp OR sessionExp (whichever applies) |
 | VC the wallet emits | `exp` = min(requested TTL, 15 min) |
+
+## 5.4 Wallet-side per-domain persistence
+
+The wallet remembers two things per verifier-domain so the drawer can
+default sensibly on return visits:
+
+| Surface | Where | Sensitivity |
+|---|---|---|
+| `lastIdentity.<domain>` → `DerivedIdentity.id` (or `__ephemeral__` sentinel) | `SharedPreferences` via [LoginSettingsService.rememberLastUsedIdentity](../mobile-app/prson_app/lib/core/services/login_settings_service.dart) | Non-secret — just a UX pointer. |
+| `ephKey.<domain>` → b64u(32-byte Ed25519 seed) | [SecureStorageService](../mobile-app/prson_app/lib/core/storage/secure_storage_service.dart) (`first_unlock_this_device` on iOS, encrypted SharedPreferences excluded from Auto Backup on Android) | **Device-bound secret.** Treated like any other identity key on the device. |
+
+The login drawer ([login_request_drawer.dart](../mobile-app/prson_app/lib/views/identity/login_request_drawer.dart)) pre-selects in this order: last-used identity (if still eligible) → globally-active identity (if eligible) → null (user picks). The picker still always lets the user override.
+
+**Ephemeral-identity persistence trade-off.** When the verifier sets `ephemeralIdentity: true`, the wallet:
+
+1. On the first sign-in to that domain: mints a fresh random Ed25519 keypair, signs the presentation with it, and **persists the seed to secure storage** keyed by domain.
+2. On subsequent sign-ins to the same domain: reads the seed back, rebuilds the same keypair, and signs again — so the verifier sees the SAME `cnf.jwk.x` and the user lands back in the same anonymous account.
+
+Why persist at all? Without persistence, `ephemeralIdentity: true` is write-only — every sign-in creates a brand-new anonymous user on the verifier's side and the previous one is unreachable. Persisting turns it into "stable per-site identifier, **device-local instead of mnemonic-derived**".
+
+The cost is a hard one: the seed is **not** derived from the recovery phrase, so it's irrecoverable on device loss or app wipe. The drawer surfaces this explicitly — see `_deviceBoundKeyBanner()` — and the banner copy distinguishes the first-time case ("the wallet will mint a key for this site") from the returning case ("you'll see the same anonymous account").
+
+Why not derive the ephemeral seed from the mnemonic? Because the whole point of `ephemeralIdentity: true` (audit §M-5) is that a mnemonic compromise must NOT retroactively de-anonymise every site the user ever visited. If the seed were mnemonic-derived, the security property collapses.
+
+When the user revokes an active session for the domain (active-sessions tile → Revoke), the wallet purges both entries — see [LoginSettingsService.forgetLastUsedIdentity](../mobile-app/prson_app/lib/core/services/login_settings_service.dart) + [forgetEphemeralSeed](../mobile-app/prson_app/lib/core/services/login_settings_service.dart). The next sign-in to that domain mints a fresh key.
 
 ## 6. Standards compatibility
 
