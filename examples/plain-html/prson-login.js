@@ -2746,6 +2746,7 @@ var PrsonLoginSession = class {
     this._verifierContext = opts.verifierContext;
     this._claimsSnapshot = { ...opts.initialClaims ?? {} };
     this._walletSessionPk = opts.walletSessionPk ?? null;
+    this._preferredLanguage = opts.initialPreferredLanguage ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
     if (opts.initialSignedInResult) {
@@ -3004,6 +3005,12 @@ var PrsonLoginSession = class {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     const delta = this._expiresAt - Date.now();
     if (delta <= 0) {
+      if (this._expiresAt <= 0) {
+        console.warn(
+          "[@prson/login-sdk] credential has no exp; leaving session open without a TTL timer. Host should set its own deadline."
+        );
+        return;
+      }
       this._teardown("ttl_reached");
       return;
     }
@@ -4161,6 +4168,7 @@ var PrsonLogin = class {
         throw new Error(`Presentation rejected: ${verified.reason}`);
       }
       qrHandle?.dispose();
+      modalHandle?.dispose();
       const result = {
         sdJwtVc: presentationStr,
         claims: verified.claims,
@@ -4189,7 +4197,16 @@ var PrsonLogin = class {
         // deferred inside the constructor, so listeners attached
         // synchronously after this `signIn()` resolves still
         // receive it.
-        initialSignedInResult: result
+        initialSignedInResult: result,
+        // Forward `walletSessionPk` + `preferredLanguage` from the
+        // FIRST envelope (which `signIn()` consumed before the session
+        // existed) so they're available immediately on the session
+        // handle. Without this seed the session would have
+        // `walletSessionPk: null` (breaking the request channel) and
+        // `preferredLanguage: null` (host can't localise on first
+        // paint) until a subsequent envelope arrives.
+        walletSessionPk: envelope.walletSessionPk,
+        initialPreferredLanguage: envelope.preferredLanguage
       });
       result.session = session;
       return result;

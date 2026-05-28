@@ -409,7 +409,13 @@ export class PrsonLogin {
     //    the inflight slot, which happens AFTER this point but
     //    BEFORE the session uses the transport (so an abort racing
     //    a successful sign-in still wins until we resolve).
+    //
+    // Dispose order: QR card FIRST (removes card from DOM), then
+    // the modal scrim (removes the dark-overlay div). If we did the
+    // scrim first the card would briefly orphan in document.body
+    // before the next paint.
     qrHandle?.dispose();
+    modalHandle?.dispose();
 
     // The host needs both the SignInResult (returned synchronously
     // below) AND a `signed_in` event on the typed event stream (so
@@ -446,6 +452,15 @@ export class PrsonLogin {
       // synchronously after this `signIn()` resolves still
       // receive it.
       initialSignedInResult: result,
+      // Forward `walletSessionPk` + `preferredLanguage` from the
+      // FIRST envelope (which `signIn()` consumed before the session
+      // existed) so they're available immediately on the session
+      // handle. Without this seed the session would have
+      // `walletSessionPk: null` (breaking the request channel) and
+      // `preferredLanguage: null` (host can't localise on first
+      // paint) until a subsequent envelope arrives.
+      walletSessionPk: envelope.walletSessionPk,
+      initialPreferredLanguage: envelope.preferredLanguage,
     });
     result.session = session;
 

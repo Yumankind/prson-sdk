@@ -209,6 +209,17 @@ export class PrsonLoginSession {
      * back-compat with older wallets that don't yet publish it.
      */
     walletSessionPk?: string;
+    /**
+     * Initial `preferredLanguage` value from the wallet's first
+     * envelope. The session's own `_handleMessage` only sees
+     * envelopes that arrive AFTER signIn() has consumed the
+     * presentation, so the language tag on the first envelope is
+     * otherwise lost — leaving `session.preferredLanguage` null
+     * until a later renewal envelope. Seeded here so the value
+     * is available immediately when the host inspects it after
+     * `signIn()` resolves.
+     */
+    initialPreferredLanguage?: string;
   }) {
     this._cnf = opts.cnf;
     this._expiresAt = opts.credential.expiresAt;
@@ -217,6 +228,7 @@ export class PrsonLoginSession {
     this._verifierContext = opts.verifierContext;
     this._claimsSnapshot = { ...(opts.initialClaims ?? {}) };
     this._walletSessionPk = opts.walletSessionPk ?? null;
+    this._preferredLanguage = opts.initialPreferredLanguage ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
 
@@ -551,6 +563,29 @@ export class PrsonLoginSession {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     const delta = this._expiresAt - Date.now();
     if (delta <= 0) {
+      // `expiresAt` is zero or in the past. Two scenarios:
+      //   * The credential genuinely expired between issuance and the
+      //     browser's verify pass (clock skew / slow network).
+      //   * The credential's JWS `exp` field is missing or non-numeric,
+      //     so `verify.ts` returned `expiresAt: 0`. In that case
+      //     immediately tearing the session down with
+      //     `ttl_reached` would fire the moment the user signs in
+      //     — visibly wrong since the wallet still thinks the
+      //     session is valid.
+      //
+      // Distinguish: a credential issued ≤ 60 s before "now" but
+      // with a missing/zero exp is almost certainly the second case.
+      // Don't arm a timer at all; the session stays open until the
+      // wallet (or the host) closes it. The host can still read
+      // `session.expiresAt` to make its own decision.
+      if (this._expiresAt <= 0) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[@prson/login-sdk] credential has no exp; leaving session" +
+            " open without a TTL timer. Host should set its own deadline.",
+        );
+        return;
+      }
       this._teardown("ttl_reached");
       return;
     }
