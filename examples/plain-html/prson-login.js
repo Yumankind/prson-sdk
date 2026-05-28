@@ -2611,34 +2611,103 @@ async function verifyAnonymousWallet(jws, opts) {
 // src/session.ts
 var PrsonLoginSession = class {
   constructor(opts) {
-    this._renewedListeners = [];
-    this._expiryListeners = [];
     this._expiryTimer = null;
     this._closed = false;
+    /** Per-type listener map. */
+    this._listeners = /* @__PURE__ */ new Map();
+    /** "Fire on every event" subscribers — for logging / telemetry. */
+    this._anyListeners = /* @__PURE__ */ new Set();
     this._cnf = opts.cnf;
     this._expiresAt = opts.credential.expiresAt;
     this._transport = opts.transport;
     this._ephKeys = opts.ephKeys;
     this._verifierContext = opts.verifierContext;
+    this._claimsSnapshot = { ...opts.initialClaims ?? {} };
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
+    if (opts.initialSignedInResult) {
+      const result = opts.initialSignedInResult;
+      queueMicrotask(() => this._dispatch({ type: "signed_in", result }));
+    }
   }
+  // ─── Public getters ──────────────────────────────────────────────
   get expiresAt() {
     return this._expiresAt;
   }
   get cnf() {
     return this._cnf;
   }
-  onRenewed(cb) {
-    this._renewedListeners.push(cb);
+  /** Snapshot of the most recent verified claims (since last renew / update). */
+  get claims() {
+    return this._claimsSnapshot;
   }
+  // ─── Subscription API ────────────────────────────────────────────
+  /**
+   * Subscribe to a single event type. The callback is invoked with
+   * the typed event variant (TS narrows on the `type` discriminant).
+   * Returns an unsubscribe handle.
+   *
+   *   const off = session.on("claim_updated", (e) => {
+   *     if (e.name === "verification_level") refreshBadge(e.newValue);
+   *   });
+   *   // later:
+   *   off();
+   */
+  on(type, cb) {
+    let set = this._listeners.get(type);
+    if (!set) {
+      set = /* @__PURE__ */ new Set();
+      this._listeners.set(type, set);
+    }
+    const wrapped = cb;
+    set.add(wrapped);
+    return () => set.delete(wrapped);
+  }
+  /** Subscribe to every event. Returns an unsubscribe handle. */
+  onAny(cb) {
+    this._anyListeners.add(cb);
+    return () => this._anyListeners.delete(cb);
+  }
+  // ─── Back-compat shims ───────────────────────────────────────────
+  //
+  // The original SDK exposed `onRenewed(cb)` and `onExpiry(cb)`.
+  // We keep them as thin wrappers around the typed `on()` so
+  // existing host pages compile without changes. New code should
+  // prefer `on()` / `onAny()`.
+  /** @deprecated Use `on("renewed", e => cb(e.result))` instead. */
+  onRenewed(cb) {
+    return this.on("renewed", (e) => cb(e.result));
+  }
+  /** @deprecated Use `on("signed_out", e => cb(e.reason))` instead. */
   onExpiry(cb) {
-    this._expiryListeners.push(cb);
+    return this.on("signed_out", (e) => cb(e.reason));
   }
   close() {
     this._teardown("user_revoked");
   }
   // ─── internals ───────────────────────────────────────────────────
+  /**
+   * Fire a single event to per-type listeners + onAny subscribers.
+   * Listener errors are swallowed so one buggy host listener can't
+   * break the rest of the dispatch (or close the session).
+   */
+  _dispatch(event) {
+    const set = this._listeners.get(event.type);
+    if (set) {
+      for (const cb of set) {
+        try {
+          cb(event);
+        } catch {
+        }
+      }
+    }
+    for (const cb of this._anyListeners) {
+      try {
+        cb(event);
+      } catch {
+      }
+    }
+  }
   _armExpiryTimer() {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     const delta = this._expiresAt - Date.now();
@@ -2656,19 +2725,54 @@ var PrsonLoginSession = class {
     } catch {
       return;
     }
-    if (envelope.msg === "revoke") {
-      this._teardown("wallet_signed_out");
-      return;
+    await this._dispatchDecryptedForTest(envelope);
+  }
+  /**
+   * Pure dispatch entry-point — takes an already-decrypted envelope
+   * and routes it through the same per-message handlers
+   * `_handleMessage` does after decryption. Public-but-prefixed so
+   * unit tests can exercise the dispatch contract without
+   * constructing real NaCl-boxed ciphertext.
+   *
+   * NOT part of the documented public API; treat as @internal.
+   */
+  async _dispatchDecryptedForTest(envelope) {
+    if (this._closed) return;
+    switch (envelope.msg) {
+      case "revoke":
+        this._teardown("wallet_signed_out");
+        return;
+      case "presentation":
+      case "renewal":
+        await this._handleRenewal(envelope);
+        return;
+      case "claim-update":
+        await this._handleClaimUpdate(envelope);
+        return;
+      case "display-update":
+        this._handleDisplayUpdate(envelope);
+        return;
+      case "credential-revoked":
+        this._handleCredentialRevoked(envelope);
+        return;
+      default:
+        return;
     }
-    if (envelope.msg !== "presentation" && envelope.msg !== "renewal") return;
+  }
+  async _handleRenewal(envelope) {
+    if (!envelope.presentation) return;
     const verifierOpts = {
       ...this._verifierContext,
       expectedNonce: extractKbNonce(envelope.presentation) ?? this._verifierContext.expectedNonceFactory()
     };
-    const verified = await verifyPresentation(envelope.presentation, verifierOpts);
+    const verified = await verifyPresentation(
+      envelope.presentation,
+      verifierOpts
+    );
     if (!verified.ok) return;
     if (verified.cnf.jwk.x !== this._cnf.jwk.x) return;
     this._expiresAt = verified.credential.expiresAt;
+    this._claimsSnapshot = { ...verified.claims };
     this._armExpiryTimer();
     const fresh = {
       sdJwtVc: envelope.presentation,
@@ -2677,7 +2781,80 @@ var PrsonLoginSession = class {
       credential: verified.credential,
       session: this
     };
-    for (const cb of this._renewedListeners) cb(fresh);
+    this._dispatch({ type: "renewed", result: fresh });
+  }
+  /**
+   * Verify the embedded presentation, then diff its claims against
+   * the cached snapshot and emit per-claim events. The wire-level
+   * `envelope.delta` is advisory only — we recompute the diff from
+   * the verified SD-JWT so a malicious wallet (or buggy one)
+   * can't lie about which claim changed.
+   *
+   * Re-verifies against the same audience + accepted-VCT set as the
+   * initial sign-in. A `claim-update` whose presentation fails
+   * verification is dropped silently — fail-closed.
+   */
+  async _handleClaimUpdate(envelope) {
+    if (!envelope.presentation) return;
+    const verifierOpts = {
+      ...this._verifierContext,
+      expectedNonce: extractKbNonce(envelope.presentation) ?? this._verifierContext.expectedNonceFactory()
+    };
+    const verified = await verifyPresentation(
+      envelope.presentation,
+      verifierOpts
+    );
+    if (!verified.ok) return;
+    if (verified.cnf.jwk.x !== this._cnf.jwk.x) return;
+    const oldClaims = this._claimsSnapshot;
+    const newClaims = verified.claims;
+    this._claimsSnapshot = { ...newClaims };
+    for (const [name, newValue] of Object.entries(newClaims)) {
+      if (!(name in oldClaims)) {
+        this._dispatch({ type: "claim_added", name, value: newValue });
+      } else if (!_deepEqual(oldClaims[name], newValue)) {
+        this._dispatch({
+          type: "claim_updated",
+          name,
+          oldValue: oldClaims[name],
+          newValue
+        });
+      }
+    }
+    for (const name of Object.keys(oldClaims)) {
+      if (!(name in newClaims)) {
+        this._dispatch({ type: "claim_removed", name });
+      }
+    }
+  }
+  /**
+   * Display-only update. Fires `display_name_changed` and/or
+   * `avatar_changed` based on which fields the envelope carries.
+   * NOT cryptographically verified — partner sites should treat
+   * the payload as advisory (refresh the cosmetic UI) and not
+   * grant any privileged access on the basis of these values.
+   */
+  _handleDisplayUpdate(envelope) {
+    if (envelope.displayName !== void 0) {
+      this._dispatch({
+        type: "display_name_changed",
+        displayName: envelope.displayName
+      });
+    }
+    if (envelope.avatar !== void 0) {
+      this._dispatch({ type: "avatar_changed", avatar: envelope.avatar });
+    }
+  }
+  /**
+   * Credential-revoked. Fires `credential_revoked` with the
+   * wallet-supplied reason, then tears the session down with
+   * `signed_out / reason="credential_revoked"`. Both events land
+   * before the transport closes.
+   */
+  _handleCredentialRevoked(envelope) {
+    const reason = envelope.reason ?? "user_revoked";
+    this._dispatch({ type: "credential_revoked", reason });
+    this._teardown("credential_revoked");
   }
   _teardown(reason) {
     if (this._closed) return;
@@ -2687,7 +2864,9 @@ var PrsonLoginSession = class {
       this._transport.close();
     } catch {
     }
-    for (const cb of this._expiryListeners) cb(reason);
+    this._dispatch({ type: "signed_out", reason });
+    this._listeners.clear();
+    this._anyListeners.clear();
   }
 };
 function extractKbNonce(presentation) {
@@ -2703,6 +2882,16 @@ function extractKbNonce(presentation) {
     return decoded.nonce;
   } catch {
     return void 0;
+  }
+}
+function _deepEqual(a, b) {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  if (a === null || b === null) return false;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
   }
 }
 
@@ -3003,8 +3192,12 @@ var PrsonLogin = class {
       if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
         throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
       }
+      const presentationStr = envelope.presentation;
+      if (!presentationStr) {
+        throw new Error("Initial presentation envelope had no presentation field");
+      }
       const acceptedVcts = opts.allowAnonymous ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT2] : [...KNOWN_VCTS];
-      const verified = await verifyPresentation(envelope.presentation, {
+      const verified = await verifyPresentation(presentationStr, {
         expectedAudience: `https://${domain}`,
         expectedNonce: nonce,
         acceptedVcts,
@@ -3014,6 +3207,15 @@ var PrsonLogin = class {
         throw new Error(`Presentation rejected: ${verified.reason}`);
       }
       qrHandle?.dispose();
+      const result = {
+        sdJwtVc: presentationStr,
+        claims: verified.claims,
+        cnf: verified.cnf,
+        credential: verified.credential,
+        // session is filled in below — temporary placeholder cast
+        // avoids a circular-self-reference in the literal.
+        session: void 0
+      };
       const session = new PrsonLoginSession({
         cnf: verified.cnf,
         credential: verified.credential,
@@ -3025,15 +3227,18 @@ var PrsonLogin = class {
           // renewals carry a fresh nonce; see session.ts
           acceptedVcts: [...KNOWN_VCTS],
           trustedIssuer: TRUSTED_ISSUER
-        }
+        },
+        // Cache the verified claims so the session can diff them
+        // against future `claim-update` envelopes — see ROADMAP §1.
+        initialClaims: verified.claims,
+        // Fire `signed_in` on the typed event stream. Microtask-
+        // deferred inside the constructor, so listeners attached
+        // synchronously after this `signIn()` resolves still
+        // receive it.
+        initialSignedInResult: result
       });
-      return {
-        sdJwtVc: envelope.presentation,
-        claims: verified.claims,
-        cnf: verified.cnf,
-        credential: verified.credential,
-        session
-      };
+      result.session = session;
+      return result;
     } finally {
       if (_inflight === me) _inflight = null;
     }

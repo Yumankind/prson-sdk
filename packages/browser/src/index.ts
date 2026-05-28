@@ -325,6 +325,15 @@ export class PrsonLogin {
     if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
       throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
     }
+    // After the post-ROADMAP-§1 envelope grammar made `presentation`
+    // optional (so it can be absent on `display-update` /
+    // `credential-revoked`), the narrowed `msg === "presentation"`
+    // branch still has it as `string | undefined` to TypeScript.
+    // Defensive runtime check + local rebind for type narrowing.
+    const presentationStr = envelope.presentation;
+    if (!presentationStr) {
+      throw new Error("Initial presentation envelope had no presentation field");
+    }
 
     // 8. Verify the presentation cryptographically before we hand it
     //    to the host application. The five rules in SECURITY.md §7
@@ -334,7 +343,7 @@ export class PrsonLogin {
     const acceptedVcts = opts.allowAnonymous
       ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT]
       : [...KNOWN_VCTS];
-    const verified = await verifyPresentation(envelope.presentation, {
+    const verified = await verifyPresentation(presentationStr, {
       expectedAudience: `https://${domain}`,
       expectedNonce: nonce,
       acceptedVcts,
@@ -353,6 +362,22 @@ export class PrsonLogin {
     //    a successful sign-in still wins until we resolve).
     qrHandle?.dispose();
 
+    // The host needs both the SignInResult (returned synchronously
+    // below) AND a `signed_in` event on the typed event stream (so
+    // `onAny` listeners get a uniform lifecycle log). We build the
+    // result first, hand it to the session as the initial-signed-in
+    // payload (the session fires `signed_in` via microtask), and
+    // return the same object.
+    const result: SignInResult = {
+      sdJwtVc: presentationStr,
+      claims: verified.claims,
+      cnf: verified.cnf,
+      credential: verified.credential,
+      // session is filled in below — temporary placeholder cast
+      // avoids a circular-self-reference in the literal.
+      session: undefined as unknown as PrsonLoginSession,
+    };
+
     const session = new PrsonLoginSession({
       cnf: verified.cnf,
       credential: verified.credential,
@@ -364,15 +389,18 @@ export class PrsonLogin {
         acceptedVcts: [...KNOWN_VCTS],
         trustedIssuer: TRUSTED_ISSUER,
       },
+      // Cache the verified claims so the session can diff them
+      // against future `claim-update` envelopes — see ROADMAP §1.
+      initialClaims: verified.claims,
+      // Fire `signed_in` on the typed event stream. Microtask-
+      // deferred inside the constructor, so listeners attached
+      // synchronously after this `signIn()` resolves still
+      // receive it.
+      initialSignedInResult: result,
     });
+    result.session = session;
 
-    return {
-      sdJwtVc: envelope.presentation,
-      claims: verified.claims,
-      cnf: verified.cnf,
-      credential: verified.credential,
-      session,
-    };
+    return result;
     } finally {
       // Release the slot ONLY if we still own it. If a newer signIn()
       // displaced us mid-flight, `_inflight` already points at

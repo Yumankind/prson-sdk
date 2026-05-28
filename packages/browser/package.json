@@ -16,14 +16,15 @@
     "build:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login.js --sourcemap",
     "watch:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login.js --sourcemap --watch",
     "typecheck": "tsc --noEmit",
-    "test": "echo 'TODO: vitest' && exit 0"
+    "test": "tsc && node --test dist/session.test.js"
   },
   "dependencies": {
+    "@stablelib/base64": "^1.0.1",
     "@stablelib/nacl": "^1.0.4",
-    "@stablelib/random": "^1.0.2",
-    "@stablelib/base64": "^1.0.1"
+    "@stablelib/random": "^1.0.2"
   },
   "devDependencies": {
+    "@types/node": "^25.9.1",
     "esbuild": "^0.24.0",
     "typescript": "^5.4.0"
   },

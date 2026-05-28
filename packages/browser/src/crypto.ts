@@ -50,15 +50,60 @@ export type EncryptedEnvelope = {
   ct: string;
 };
 
-/** Decrypted plaintext envelope — see ARCHITECTURE.md §4.2. */
+/** Decrypted plaintext envelope — see ARCHITECTURE.md §4.2.
+ *
+ * Three of the `msg` types are post-sign-in lifecycle events
+ * (`claim-update`, `display-update`, `credential-revoked`) per the
+ * roadmap §1. They flow on the same WebRTC channel as the initial
+ * `presentation` + renewals, framed with the same NaCl-boxed
+ * envelope so the wallet doesn't need a separate transport for live
+ * profile / claim updates.
+ *
+ * Important: any event whose payload includes claim VALUES (today
+ * only `claim-update`) MUST carry a `presentation` field, and the
+ * SDK MUST re-verify that presentation before firing any listener.
+ * Bare claim deltas without a fresh SD-JWT-VC backing them are NOT
+ * trusted — see ROADMAP §1.3 and SECURITY.md §7.
+ */
 export type DecryptedEnvelope = {
   v: string;
-  msg: "presentation" | "renewal" | "revoke" | "decline";
+  msg:
+    | "presentation"
+    | "renewal"
+    | "revoke"
+    | "decline"
+    | "claim-update"
+    | "display-update"
+    | "credential-revoked";
   issuedAt: number;
-  ttlMinutes: number;
-  domain: string;
-  presentation: string;
+  ttlMinutes?: number;
+  domain?: string;
+
+  /** Present for `presentation`, `renewal`, and `claim-update`. */
+  presentation?: string;
   fragments?: unknown[];
+
+  /** `claim-update` body: per-claim delta. Fired only after the
+   *  bundled `presentation` re-verifies; the SDK then diffs old vs
+   *  new and fires per-name `claim_added` / `claim_updated` /
+   *  `claim_removed` listeners. The wire `delta` is optional — the
+   *  SDK can compute the diff itself by comparing the new VC's
+   *  claims to its cached snapshot. */
+  delta?: {
+    added?: Record<string, unknown>;
+    removed?: string[];
+    updated?: Record<string, { oldValue?: unknown; newValue: unknown }>;
+  };
+
+  /** `display-update` body. Either field independently optional;
+   *  absent means "no change". Pass `null` to clear. No crypto
+   *  re-verify required — display-only hints for the host UI. */
+  displayName?: string | null;
+  avatar?: { url: string; hash: string } | null;
+
+  /** `credential-revoked` body. Closes the session with the
+   *  matching ExpiryReason. */
+  reason?: "alias_transferred" | "user_revoked" | "key_compromised";
 };
 
 export async function decryptEnvelope(

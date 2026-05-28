@@ -15,6 +15,16 @@
 
 ## 1. SDK lifecycle events
 
+> **Status: shipped (SDK side).** The browser SDK now emits the full
+> [`LoginEvent`](packages/browser/src/session.ts) union via
+> `session.on(type, cb)` / `session.onAny(cb)`. The legacy
+> `session.onRenewed()` / `session.onExpiry()` are kept as back-
+> compat shims. Wallet-side emission of the new
+> `claim-update` / `display-update` / `credential-revoked` envelope
+> types is still TODO — until that ships, only `signed_in`,
+> `renewed`, and `signed_out` actually fire on the wire. See the
+> bottom of §1.2 for the wire grammar additions.
+
 **Goal**: let host sites react to wallet-side changes *after* sign-in
 without polling. Today the SDK exposes `session.onRenewed()` and
 `session.onExpiry()`; we'll widen that to a richer event stream so
@@ -201,10 +211,13 @@ reason) over the encrypted WebRTC channel.
 
 ## 3. Implementation order (when we get to it)
 
-1. Lifecycle events (§1) — strict superset of what we have today.
-   Land alongside the mobile login drawer in phase 2b; the wallet
-   already knows which (identity, domain) sessions exist + when
-   their identity changes.
+1. Lifecycle events (§1) — **SDK side shipped.** Wallet side still
+   needs to emit `claim-update` / `display-update` /
+   `credential-revoked` envelopes; until then only `signed_in`,
+   `renewed`, and `signed_out` actually fire. SDK contract is
+   forward-compatible — unknown `envelope.msg` values are silently
+   ignored, so a wallet shipping new events doesn't require an SDK
+   bump.
 2. `session.canSignDocuments()` (§2) — single getter, no transport
    change. Tells host sites whether to expose a "Sign" affordance.
 3. `session.signDocument()` (§2) — depends on (1) for the
