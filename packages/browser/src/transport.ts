@@ -12,6 +12,14 @@ export interface Transport {
   awaitFirstMessage(): Promise<string>;
   /** Subscribe to all data-channel messages as they arrive. */
   onMessage(cb: (raw: string) => void): void;
+  /** Subscribe to terminal-close events from either side or the
+   *  Worker. Fires exactly once per transport with a short string
+   *  reason — the SDK's session layer maps this to the matching
+   *  `signed_out` reason code so the host gets a lifecycle event
+   *  the moment the wire dies (rather than waiting for the
+   *  credential's exp timer, which runs days from now and never
+   *  matches the much-shorter session TTL). */
+  onClose(cb: (reason: string) => void): void;
   /** Send a UTF-8 string over the data channel (used by `revoke` etc.). */
   send(raw: string): void;
   /** Close the RTCPeerConnection + the data channel. */
@@ -103,6 +111,23 @@ export async function establishTransport(opts: {
   // presentation) and steady-state subscribers (renewals).
   const oneShotWaiters: Array<(raw: string) => void> = [];
   const allListeners: Array<(raw: string) => void> = [];
+  // Terminal-close fan-out. Three triggers map onto the same
+  // notification: signaling close (WS code 4000 = Worker DO alarm
+  // fired at session TTL), peer-gone signaling message (wallet
+  // revoked), and the data channel itself closing for any other
+  // reason. Fired at most once — the latch prevents duplicate
+  // signed_out events in the SDK's session layer.
+  const closeListeners: Array<(reason: string) => void> = [];
+  let closeFired = false;
+  function fireClose(reason: string) {
+    if (closeFired) return;
+    closeFired = true;
+    for (const cb of closeListeners) {
+      try { cb(reason); } catch { /* swallow */ }
+    }
+  }
+  opts.signaling.onClose((reason) => fireClose(reason));
+  dc.addEventListener("close", () => fireClose("network_loss"));
   dc.addEventListener("message", (evt) => {
     const raw = typeof evt.data === "string"
       ? evt.data
