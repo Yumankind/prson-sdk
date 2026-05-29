@@ -225,6 +225,21 @@ export class PrsonLoginSession {
   private _mouseSubscribers: Map<string, (mouse: NonNullable<DecryptedEnvelope["mouse"]>) => void> = new Map();
 
   /**
+   * Ambient mouse-update handler. Used when the wallet starts a
+   * mouse stream WITHOUT a prior `kind: "mouse"` request — i.e.
+   * the pre-grant flow enabled by [SignInOptions.mouseControl].
+   * [`bindMouse`] registers itself here; any inbound
+   * `mouse-update` frame whose `requestId` doesn't match a
+   * specific subscriber falls through to this handler so the
+   * cursor moves regardless of who initiated the stream.
+   *
+   * Null when no [`bindMouse`] is mounted; only one ambient
+   * handler is active at a time (last call wins, mirroring the
+   * remote-nav listener semantics).
+   */
+  private _ambientMouseHandler: ((mouse: NonNullable<DecryptedEnvelope["mouse"]>) => void) | null = null;
+
+  /**
    * Remote-navigation listener — installed by
    * [`enableRemoteNavigation`]. Receives every inbound `nav`,
    * `value`, and `logout` envelope. Only one listener at a time
@@ -587,6 +602,24 @@ export class PrsonLoginSession {
       msg: "focus",
       focus,
     });
+  }
+
+  /**
+   * Install the ambient `mouse-update` handler. Mirrors
+   * [`_setRemoteNavListener`] — only one ambient subscriber at a
+   * time (last call wins). Used by [`bindMouse`] when the
+   * session was pre-granted mouse control at sign-in
+   * ([SignInOptions.mouseControl]).
+   *
+   * @internal
+   */
+  _setAmbientMouseHandler(
+    cb: ((mouse: NonNullable<DecryptedEnvelope["mouse"]>) => void) | null,
+  ): Unsubscribe {
+    this._ambientMouseHandler = cb;
+    return () => {
+      if (this._ambientMouseHandler === cb) this._ambientMouseHandler = null;
+    };
   }
 
   /**
@@ -1047,14 +1080,26 @@ export class PrsonLoginSession {
         if (envelope.requestId) this._mouseSubscribers.delete(envelope.requestId);
         return;
       case "mouse-update":
-        // Wallet is streaming pointer events for a `kind: "mouse"`
-        // request. Route by `requestId` to the bindMouse subscriber.
-        // Unknown ids (subscriber already disposed) silently drop.
-        if (envelope.requestId && envelope.mouse) {
-          const sub = this._mouseSubscribers.get(envelope.requestId);
-          if (sub) {
+        // Wallet is streaming pointer events. Two routing paths:
+        //
+        //   1. **Per-request** — there's a pending `requestMouse`
+        //      subscriber keyed by this `requestId`. Used when the
+        //      host explicitly opened a `kind: "mouse"` request.
+        //
+        //   2. **Ambient** — no such subscriber exists. Used by the
+        //      pre-grant flow (`SignInOptions.mouseControl: true`)
+        //      where the wallet's banner drawer starts a stream
+        //      with a wallet-minted id the host never saw. Falls
+        //      through to `_ambientMouseHandler`, which [`bindMouse`]
+        //      installs so its on-page cursor still moves.
+        if (envelope.mouse) {
+          const perRequest = envelope.requestId
+            ? this._mouseSubscribers.get(envelope.requestId)
+            : undefined;
+          const target = perRequest ?? this._ambientMouseHandler;
+          if (target) {
             try {
-              sub(envelope.mouse);
+              target(envelope.mouse);
             } catch {
               /* swallow — host bug shouldn't kill the stream */
             }

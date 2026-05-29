@@ -767,6 +767,33 @@ export function bindMouse(
    *  itself off when the wallet flips back to touch. */
   let activeMode: "touch" | "magic" = mode;
 
+  // Install the ambient mouse-update handler so wallet-initiated
+  // streams (the pre-grant flow — `signIn({mouseControl: true})`)
+  // land on `applyFrame` even when there's no pending
+  // `requestMouse` promise to key the subscriber by. `bindMouse`
+  // owns the handler for its lifetime; `dispose()` removes it.
+  // The handler is installed eagerly (not on first `request()`) so
+  // the wallet can start streaming the moment the user taps
+  // Touchpad / Magic on the banner drawer — even if the host hasn't
+  // called `.request()` at all.
+  const offAmbient = session._setAmbientMouseHandler((mouseBody) => {
+    if (disposed) return;
+    // Treat wallet "begin" / "end" frames as no-ops on the cursor —
+    // they're protocol pairing tokens, not pointer events.
+    if (
+      mouseBody.event !== "move" &&
+      mouseBody.event !== "click" &&
+      mouseBody.event !== "double-click" &&
+      mouseBody.event !== "scroll"
+    ) {
+      // Make sure the cursor exists so the first real frame doesn't
+      // race the lazy initialiser.
+      ensureCursor();
+      return;
+    }
+    applyFrame(mouseBody);
+  });
+
   function ensureCursor(): HTMLDivElement {
     if (cursor) return cursor;
     const el = document.createElement("div");

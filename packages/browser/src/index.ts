@@ -101,6 +101,29 @@ export type SignInOptions = {
    * listeners that mirror the active input. Default false.
    */
   remoteNavigation?: boolean;
+
+  /**
+   * **Mouse control pre-granted at sign-in.** When true, the wallet's
+   * persistent banner drawer enables the Touchpad / Magic wand
+   * buttons from the moment the session lands, so the user can
+   * start driving the cursor without the host ever issuing a
+   * `kind: "mouse"` request.
+   *
+   * The capability **persists** for the session lifetime — closing
+   * the controller doesn't revoke it; the user can re-open it from
+   * the drawer at any time. The host still calls [`bindMouse`] to
+   * mount the on-page cursor; when this flag is set, that call
+   * installs an *ambient* mouse-update subscriber so wallet-
+   * initiated streams (which carry no `requestId` matched to a
+   * pending `request()`) land correctly. Existing `requestMouse`
+   * round-trips still work in parallel.
+   *
+   * The wallet shows a chip in the sign-in drawer so the user
+   * sees mouse control will be active before they approve.
+   *
+   * Default false.
+   */
+  mouseControl?: boolean;
 };
 
 export type CnfJwk = {
@@ -286,6 +309,11 @@ export class PrsonLogin {
       // Submit / Logout / Mouse on a persistent banner. See
       // SignInOptions.remoteNavigation + bind.ts:enableRemoteNavigation.
       remoteNavigation: opts.remoteNavigation === true,
+      // Pre-grant mouse control — wallet enables the Touchpad /
+      // Magic wand buttons on the banner drawer from session start.
+      // See SignInOptions.mouseControl + bindMouse's ambient
+      // subscriber path.
+      mouseControl: opts.mouseControl === true,
       ttlMaxMinutes,
     };
 
