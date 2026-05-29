@@ -190,6 +190,17 @@
         padding: 6px 12px;
         font-size: 13px;
       }
+      /* Magic-mode snap preview. While the wallet is in magic mode
+         the SDK tags the input nearest the virtual cursor with
+         `[data-prson-magic-snap]` (and the matching `.prson-magic-snap`
+         class) so a tap on the phone will land there even if the
+         cursor isn't strictly on top of it. The style is the host
+         page's responsibility — here's a sensible default. */
+      [data-prson-magic-snap] {
+        outline: 2px solid rgba(59, 130, 246, 0.85);
+        outline-offset: 2px;
+        transition: outline 80ms ease;
+      }
     </style>
   </head>
   <body>

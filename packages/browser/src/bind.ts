@@ -748,6 +748,24 @@ export function bindMouse(
     y: typeof window !== "undefined" ? window.innerHeight / 2 : 0,
   };
   let disposed = false;
+  /**
+   * The currently-previewed snap target, if any. Only populated
+   * while magic mode is active — every move frame finds the
+   * nearest interactive element and rewires this state so the
+   * page can style "what would be clicked if I tapped now":
+   *
+   *     [data-prson-magic-snap] { outline: 2px solid #3b82f6; }
+   *
+   * The data-attribute is the public contract; the corresponding
+   * class is added too as a convenience for selector-shy host
+   * stylesheets. Cleared on dispose / mode-change so a left-over
+   * highlight can't outlive the controller.
+   */
+  let snapTarget: Element | null = null;
+  /** Active mode for the current frame stream — kept in sync with
+   *  `mouse.mode` on every applied envelope so snap-preview turns
+   *  itself off when the wallet flips back to touch. */
+  let activeMode: "touch" | "magic" = mode;
 
   function ensureCursor(): HTMLDivElement {
     if (cursor) return cursor;
@@ -779,9 +797,31 @@ export function bindMouse(
     return value < min ? min : value > max ? max : value;
   }
 
+  function setSnapTarget(next: Element | null): void {
+    if (next === snapTarget) return;
+    if (snapTarget) {
+      snapTarget.removeAttribute("data-prson-magic-snap");
+      (snapTarget as Element).classList.remove("prson-magic-snap");
+    }
+    snapTarget = next;
+    if (snapTarget) {
+      snapTarget.setAttribute("data-prson-magic-snap", "");
+      (snapTarget as Element).classList.add("prson-magic-snap");
+    }
+  }
+
   function applyFrame(mouse: NonNullable<import("./crypto.js").DecryptedEnvelope["mouse"]>): void {
     if (disposed) return;
     const el = ensureCursor();
+    // The wallet may toggle mode mid-stream. Track the active mode
+    // here so move frames know whether to maintain the snap-target
+    // highlight (magic) or drop it (touch).
+    if (mouse.mode === "touch" || mouse.mode === "magic") {
+      if (mouse.mode !== activeMode) {
+        activeMode = mouse.mode;
+        if (activeMode === "touch") setSnapTarget(null);
+      }
+    }
     switch (mouse.event) {
       case "move": {
         pos = {
@@ -791,6 +831,14 @@ export function bindMouse(
         applyCursorPosition(el, pos);
         if (onMove) {
           try { onMove(pos); } catch { /* swallow */ }
+        }
+        // Magic-mode snap preview. Refreshed on every move frame so
+        // the highlight tracks the cursor. The DOM query + N rect
+        // measurements run at most once per browser repaint
+        // (`mouse-update` is already wallet-throttled to ~60 Hz),
+        // which is acceptable on every page we ship for.
+        if (activeMode === "magic") {
+          setSnapTarget(findNearestClickable(pos.x, pos.y));
         }
         break;
       }
@@ -802,7 +850,32 @@ export function bindMouse(
         const prev = el.style.background;
         el.style.background = "rgba(59, 130, 246, 1)";
         setTimeout(() => { if (cursor === el) el.style.background = prev; }, 140);
-        const target = document.elementFromPoint(pos.x, pos.y);
+        // Click-area enlargement: a virtual cursor is harder to land
+        // precisely than a touch finger or a mouse, especially for a
+        // gyro-driven wand. Search for the NEAREST interactive
+        // element within [SNAP_RADIUS_PX] of the cursor and target
+        // that, even if the cursor isn't strictly on top of it.
+        // Falls back to whatever's at the cursor coordinate when no
+        // candidate is within range (so clicks on free space, scroll
+        // areas, etc. still work normally).
+        //
+        // Magic mode already maintains `snapTarget` via the move-
+        // frame preview; touch mode skips the highlight but still
+        // gets snap-on-click. Re-query in touch mode so the click
+        // semantic stays identical across modes.
+        const snapped =
+          activeMode === "magic"
+            ? snapTarget
+            : findNearestClickable(pos.x, pos.y);
+        const direct = document.elementFromPoint(pos.x, pos.y);
+        const target = snapped ?? direct;
+        // When we snapped, dispatch at the SNAPPED element's centre
+        // so any positional logic inside the page (e.g. a custom
+        // dropdown computing position from `clientX`) sees a hit
+        // ON the element rather than in dead space next to it.
+        const clickPoint = snapped
+          ? rectCenter((snapped as Element).getBoundingClientRect())
+          : { x: pos.x, y: pos.y };
         let allowDefault: boolean = true;
         if (onClick) {
           try {
@@ -814,8 +887,8 @@ export function bindMouse(
           const init: MouseEventInit = {
             bubbles: true,
             cancelable: true,
-            clientX: pos.x,
-            clientY: pos.y,
+            clientX: clickPoint.x,
+            clientY: clickPoint.y,
             view: window,
           };
           target.dispatchEvent(new MouseEvent("mousedown", init));
@@ -823,6 +896,20 @@ export function bindMouse(
           target.dispatchEvent(new MouseEvent("click", init));
           if (mouse.event === "double-click") {
             target.dispatchEvent(new MouseEvent("dblclick", init));
+          }
+          // Inputs and other focusable elements don't always auto-
+          // focus from synthetic `mousedown`. Explicitly focus the
+          // snapped target so the page sees the same focus state it
+          // would after a real touch.
+          if (
+            snapped &&
+            typeof (target as HTMLElement).focus === "function"
+          ) {
+            try {
+              (target as HTMLElement).focus({ preventScroll: true });
+            } catch {
+              /* swallow — some host elements throw on focus */
+            }
           }
         }
         break;
@@ -840,6 +927,10 @@ export function bindMouse(
       cursor.remove();
       cursor = null;
     }
+    // Clear any lingering magic-mode highlight so the page doesn't
+    // keep a `data-prson-magic-snap` attribute on whichever input
+    // happened to be the last preview target.
+    setSnapTarget(null);
   }
 
   return {
@@ -872,6 +963,69 @@ export function bindMouse(
       detach();
     },
   };
+}
+
+// ─── Click-area enlargement (virtual-cursor snap) ──────────────────
+//
+// CSS selector covering every realistic click target on a page —
+// form controls + anchor-style affordances. The query runs once per
+// click (low frequency relative to move frames), so the cost is
+// acceptable even on a long page; we do NOT walk the DOM on every
+// move frame.
+const SNAP_SELECTOR =
+  'input:not([type="hidden"]):not([disabled]),' +
+  'textarea:not([disabled]),' +
+  'select:not([disabled]),' +
+  'button:not([disabled]),' +
+  'a[href],' +
+  '[role="button"],' +
+  '[role="link"],' +
+  '[role="checkbox"],' +
+  '[role="radio"],' +
+  'label[for],' +
+  '[tabindex]:not([tabindex="-1"])';
+
+/** Snap radius in CSS pixels. A click further than this from any
+ *  interactive element falls through to whatever's at the cursor
+ *  coordinate. Tuned so a comfortable wand flick lands in the
+ *  right input without over-reaching across the page. */
+const SNAP_RADIUS_PX = 60;
+
+function rectCenter(r: DOMRect): { x: number; y: number } {
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+/**
+ * Find the closest interactive element to the cursor whose bounding
+ * box lies within [SNAP_RADIUS_PX]. Distance is measured to the
+ * nearest edge of the element's rect (0 if inside), so wide elements
+ * "win" over narrow ones at the same centre distance. Returns null
+ * when nothing qualifies — the caller then falls back to
+ * `document.elementFromPoint`.
+ *
+ * If multiple inputs sit equally close (tie), the one earliest in
+ * the DOM wins — `querySelectorAll` iterates in document order, so
+ * the strictly-less-than comparison preserves it.
+ */
+function findNearestClickable(x: number, y: number): Element | null {
+  if (typeof document === "undefined") return null;
+  const candidates = document.querySelectorAll(SNAP_SELECTOR);
+  let best: Element | null = null;
+  let bestDist = Infinity;
+  for (const el of Array.from(candidates)) {
+    const rect = (el as Element).getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue; // hidden / collapsed
+    // Distance from (x,y) to rect: 0 if inside, else Euclidean from
+    // the nearest edge / corner.
+    const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+    const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = el;
+    }
+  }
+  return bestDist <= SNAP_RADIUS_PX ? best : null;
 }
 
 // `CSS.escape` polyfill — older Safari versions sometimes ship

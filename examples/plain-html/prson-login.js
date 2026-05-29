@@ -4196,6 +4196,8 @@ function bindMouse(session, opts) {
     y: typeof window !== "undefined" ? window.innerHeight / 2 : 0
   };
   let disposed = false;
+  let snapTarget = null;
+  let activeMode = mode;
   function ensureCursor() {
     if (cursor) return cursor;
     const el = document.createElement("div");
@@ -4223,9 +4225,27 @@ function bindMouse(session, opts) {
   function clamp(value, min, max) {
     return value < min ? min : value > max ? max : value;
   }
+  function setSnapTarget(next) {
+    if (next === snapTarget) return;
+    if (snapTarget) {
+      snapTarget.removeAttribute("data-prson-magic-snap");
+      snapTarget.classList.remove("prson-magic-snap");
+    }
+    snapTarget = next;
+    if (snapTarget) {
+      snapTarget.setAttribute("data-prson-magic-snap", "");
+      snapTarget.classList.add("prson-magic-snap");
+    }
+  }
   function applyFrame(mouse) {
     if (disposed) return;
     const el = ensureCursor();
+    if (mouse.mode === "touch" || mouse.mode === "magic") {
+      if (mouse.mode !== activeMode) {
+        activeMode = mouse.mode;
+        if (activeMode === "touch") setSnapTarget(null);
+      }
+    }
     switch (mouse.event) {
       case "move": {
         pos = {
@@ -4239,6 +4259,9 @@ function bindMouse(session, opts) {
           } catch {
           }
         }
+        if (activeMode === "magic") {
+          setSnapTarget(findNearestClickable(pos.x, pos.y));
+        }
         break;
       }
       case "click":
@@ -4248,7 +4271,10 @@ function bindMouse(session, opts) {
         setTimeout(() => {
           if (cursor === el) el.style.background = prev;
         }, 140);
-        const target = document.elementFromPoint(pos.x, pos.y);
+        const snapped = activeMode === "magic" ? snapTarget : findNearestClickable(pos.x, pos.y);
+        const direct = document.elementFromPoint(pos.x, pos.y);
+        const target = snapped ?? direct;
+        const clickPoint = snapped ? rectCenter(snapped.getBoundingClientRect()) : { x: pos.x, y: pos.y };
         let allowDefault = true;
         if (onClick) {
           try {
@@ -4261,8 +4287,8 @@ function bindMouse(session, opts) {
           const init = {
             bubbles: true,
             cancelable: true,
-            clientX: pos.x,
-            clientY: pos.y,
+            clientX: clickPoint.x,
+            clientY: clickPoint.y,
             view: window
           };
           target.dispatchEvent(new MouseEvent("mousedown", init));
@@ -4270,6 +4296,12 @@ function bindMouse(session, opts) {
           target.dispatchEvent(new MouseEvent("click", init));
           if (mouse.event === "double-click") {
             target.dispatchEvent(new MouseEvent("dblclick", init));
+          }
+          if (snapped && typeof target.focus === "function") {
+            try {
+              target.focus({ preventScroll: true });
+            } catch {
+            }
           }
         }
         break;
@@ -4285,6 +4317,7 @@ function bindMouse(session, opts) {
       cursor.remove();
       cursor = null;
     }
+    setSnapTarget(null);
   }
   return {
     async request(callerOpts) {
@@ -4308,6 +4341,29 @@ function bindMouse(session, opts) {
       detach();
     }
   };
+}
+var SNAP_SELECTOR = 'input:not([type="hidden"]):not([disabled]),textarea:not([disabled]),select:not([disabled]),button:not([disabled]),a[href],[role="button"],[role="link"],[role="checkbox"],[role="radio"],label[for],[tabindex]:not([tabindex="-1"])';
+var SNAP_RADIUS_PX = 60;
+function rectCenter(r) {
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+function findNearestClickable(x, y) {
+  if (typeof document === "undefined") return null;
+  const candidates = document.querySelectorAll(SNAP_SELECTOR);
+  let best = null;
+  let bestDist = Infinity;
+  for (const el of Array.from(candidates)) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+    const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = el;
+    }
+  }
+  return bestDist <= SNAP_RADIUS_PX ? best : null;
 }
 function cssEscape(s) {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
