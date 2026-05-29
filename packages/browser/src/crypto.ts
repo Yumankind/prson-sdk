@@ -297,10 +297,25 @@ function addPad(s: string): string {
  * stores it on the session at sign-in time and re-uses for every
  * outbound boxed message.
  */
+/** One-shot diagnostic: log the very first wallet pk we box to,
+ *  so the developer console shows side-by-side what the browser
+ *  thinks the wallet's session pk is vs. what the wallet's log
+ *  shows it published. Cleared on page reload. Remove once the
+ *  mismatch ticket is closed. */
+let _loggedFirstBoxRecipient = false;
+
 export function boxToWallet(
   walletSessionPkB64u: string,
   plaintext: string,
 ): string {
+  if (!_loggedFirstBoxRecipient) {
+    _loggedFirstBoxRecipient = true;
+    // eslint-disable-next-line no-console
+    console.info(
+      "[prson-login] boxToWallet first send — recipient walletSessionPk=",
+      walletSessionPkB64u,
+    );
+  }
   const recipientPk = b64uDecode(addPad(walletSessionPkB64u));
   if (recipientPk.length !== 32) {
     throw new Error("boxToWallet: bad walletSessionPk length");

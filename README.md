@@ -78,6 +78,7 @@ login-sdk/
 ├── README.md                # ← you are here
 ├── ARCHITECTURE.md          # full wire-format + protocol spec
 ├── SECURITY.md              # threat model + crypto rationale
+├── TRUST-CHAIN.md           # identity proof end-to-end + token design decisions
 ├── packages/
 │   ├── browser/             # @prson/login-sdk        (this is the SDK)
 │   │   ├── README.md
@@ -205,5 +206,6 @@ The browser SDK same.
 | Run a verifier in your backend | [`packages/verifier-node/README.md`](./packages/verifier-node/README.md) |
 | Understand the wire formats | [`ARCHITECTURE.md`](./ARCHITECTURE.md) |
 | Audit the crypto / threat model | [`SECURITY.md`](./SECURITY.md) |
+| Understand how identity is proven (and why the HMAC token doesn't gate identity) | [`TRUST-CHAIN.md`](./TRUST-CHAIN.md) |
 | See what's coming (events, on-demand signing) | [`ROADMAP.md`](./ROADMAP.md) |
 | See a working end-to-end example | [`examples/plain-html/`](./examples/plain-html/) |
