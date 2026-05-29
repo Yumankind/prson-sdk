@@ -627,6 +627,16 @@ export class PrsonLoginSession {
           pattern?: string;
           required?: boolean;
           options?: { value: string; label?: string }[];
+          /** Navigation-row visibility hints. Computed by
+           *  `enableRemoteNavigation`'s `computeNavMeta` from the
+           *  current tabbable pool and the focused element's
+           *  surrounding form. The wallet renders only the buttons
+           *  that match. See `bind.ts:computeNavMeta` + the wallet's
+           *  `_navigationRow`. */
+          hasPrev?: boolean;
+          hasNext?: boolean;
+          isLastInForm?: boolean;
+          isButton?: boolean;
         }
       | null,
   ): Promise<void> {

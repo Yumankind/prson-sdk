@@ -4361,7 +4361,8 @@ function resolveLabel(el) {
   }
   const closestLabel = el.closest("label");
   if (closestLabel && closestLabel.textContent) {
-    const raw = closestLabel.textContent.replace(el.value, "").trim();
+    const ownText = "value" in el && typeof el.value === "string" ? el.value : el.textContent ?? "";
+    const raw = closestLabel.textContent.replace(ownText, "").trim();
     if (raw) return raw;
   }
   if ("placeholder" in el && el.placeholder && el.placeholder.trim()) {
@@ -4460,6 +4461,14 @@ function enableRemoteNavigation(session, opts) {
     }
     return false;
   }
+  function isFocusableButton(el) {
+    if (el instanceof HTMLButtonElement) return !el.disabled;
+    if (el instanceof HTMLInputElement) {
+      const t = (el.type || "text").toLowerCase();
+      return (t === "submit" || t === "button" || t === "reset") && !el.disabled;
+    }
+    return el.getAttribute("role") === "button";
+  }
   function collectFields() {
     if (opts?.collectFields) return opts.collectFields();
     const out = [];
@@ -4470,8 +4479,35 @@ function enableRemoteNavigation(session, opts) {
     }
     return out;
   }
+  function computeNavMeta(el) {
+    const isButton = el instanceof HTMLButtonElement || el instanceof HTMLInputElement && (el.type === "submit" || el.type === "button" || el.type === "reset") || el.getAttribute("role") === "button";
+    if (isButton) {
+      return { hasPrev: false, hasNext: false, isLastInForm: false, isButton: true };
+    }
+    const fields = collectFields();
+    const idx = fields.indexOf(el);
+    const hasPrev = idx > 0;
+    const hasNext = idx >= 0 && idx < fields.length - 1;
+    let isLastInForm = false;
+    const form = el.closest?.("form");
+    if (form instanceof HTMLFormElement) {
+      const fieldsInForm = fields.filter((f) => f.closest("form") === form);
+      isLastInForm = fieldsInForm.length > 0 && fieldsInForm[fieldsInForm.length - 1] === el;
+    }
+    return { hasPrev, hasNext, isLastInForm, isButton: false };
+  }
   function focusPayloadFor(el) {
     const name = nameForElement(el, 0);
+    const meta = computeNavMeta(el);
+    if (el instanceof HTMLButtonElement || el instanceof HTMLInputElement && (el.type === "submit" || el.type === "button" || el.type === "reset")) {
+      return {
+        name,
+        label: resolveLabel(el),
+        inputType: "button",
+        value: el instanceof HTMLButtonElement ? (el.textContent ?? "").trim() : el.value,
+        ...meta
+      };
+    }
     if (el instanceof HTMLSelectElement) {
       return {
         name,
@@ -4479,7 +4515,8 @@ function enableRemoteNavigation(session, opts) {
         inputType: "select",
         value: el.value,
         options: readOptions(el),
-        required: el.required
+        required: el.required,
+        ...meta
       };
     }
     const inputType = resolveInputType(el);
@@ -4492,7 +4529,8 @@ function enableRemoteNavigation(session, opts) {
       required: el instanceof HTMLInputElement ? el.required : false,
       ...textConstraints(el),
       ...el instanceof HTMLInputElement && inputType === "number" ? numericConstraints(el) : {},
-      ...el instanceof HTMLInputElement && el.pattern ? { pattern: el.pattern } : {}
+      ...el instanceof HTMLInputElement && el.pattern ? { pattern: el.pattern } : {},
+      ...meta
     };
   }
   let pendingFrame = null;
@@ -4506,9 +4544,16 @@ function enableRemoteNavigation(session, opts) {
   }
   function onFocusIn(ev) {
     const t = ev.target;
-    if (!(t instanceof Element) || !isBindable(t)) return;
-    currentFocused = t;
-    void session._sendFocus(focusPayloadFor(t));
+    if (!(t instanceof Element)) return;
+    if (isBindable(t)) {
+      currentFocused = t;
+      void session._sendFocus(focusPayloadFor(t));
+      return;
+    }
+    if (isFocusableButton(t)) {
+      currentFocused = t;
+      void session._sendFocus(focusPayloadFor(t));
+    }
   }
   function onFocusOut(ev) {
     const t = ev.target;
@@ -4522,6 +4567,14 @@ function enableRemoteNavigation(session, opts) {
   }
   function applyNav(action) {
     if (action === "submit") {
+      const focused = currentFocused;
+      if (focused instanceof HTMLButtonElement || focused instanceof HTMLInputElement && (focused.type === "submit" || focused.type === "button" || focused.type === "reset") || focused?.getAttribute("role") === "button") {
+        try {
+          focused.click();
+        } catch {
+        }
+        return;
+      }
       const form = currentFocused?.closest("form") ?? root.querySelector("form");
       if (form instanceof HTMLFormElement) tryRequestSubmit(form);
       return;
@@ -4542,7 +4595,9 @@ function enableRemoteNavigation(session, opts) {
   }
   function applyValue(value) {
     if (!currentFocused) return;
-    writeValueIntoElement(currentFocused, value);
+    if (currentFocused instanceof HTMLInputElement || currentFocused instanceof HTMLTextAreaElement || currentFocused instanceof HTMLSelectElement) {
+      writeValueIntoElement(currentFocused, value);
+    }
   }
   const unsubscribe = session._setRemoteNavListener((envelope) => {
     if (envelope.msg === "nav") applyNav(envelope.action);
@@ -4748,10 +4803,14 @@ function bindMouse(session, opts) {
     async request(callerOpts) {
       if (disposed) return { ok: false, error: "session-closed" };
       ensureCursor();
+      const sessionEndMs = Math.max(
+        6e4,
+        session.expiresAt - Date.now() + 1e3
+      );
       const reply = await session.requestMouse(
         { kind: "mouse", mode, reason: callerOpts?.reason ?? opts?.reason },
         applyFrame,
-        callerOpts
+        { timeoutMs: sessionEndMs, ...callerOpts }
       );
       if (!disposed) {
         if (cursor) {

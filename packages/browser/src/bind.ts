@@ -303,7 +303,7 @@ function resolveInputType(
 }
 
 function resolveLabel(
-  el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+  el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement,
 ): string {
   // Priority: aria-label > <label for> > parent <label> text >
   // placeholder > name > tag-name.
@@ -322,7 +322,11 @@ function resolveLabel(
     // Strip the input's own text content from the label string
     // so a wrapping `<label>Email <input></label>` doesn't include
     // the input's value.
-    const raw = closestLabel.textContent.replace(el.value, "").trim();
+    const ownText =
+      "value" in el && typeof (el as { value?: unknown }).value === "string"
+        ? (el as { value: string }).value
+        : (el.textContent ?? "");
+    const raw = closestLabel.textContent.replace(ownText, "").trim();
     if (raw) return raw;
   }
   if (
@@ -375,7 +379,7 @@ function numericConstraints(
 }
 
 function nameForElement(
-  el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+  el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement,
   index: number,
 ): string {
   if (el.name) return el.name;
@@ -497,6 +501,7 @@ export function enableRemoteNavigation(
     | HTMLInputElement
     | HTMLTextAreaElement
     | HTMLSelectElement
+    | HTMLButtonElement
     | null = null;
   let disposed = false;
 
@@ -521,6 +526,21 @@ export function enableRemoteNavigation(
     return false;
   }
 
+  /** Buttons + button-type inputs. Tracked separately from
+   *  [isBindable] so prev/next navigation only walks the
+   *  input-like pool, but focus envelopes still fire for buttons
+   *  (so the wallet can show the Enter row). */
+  function isFocusableButton(
+    el: Element,
+  ): el is HTMLButtonElement | HTMLInputElement {
+    if (el instanceof HTMLButtonElement) return !el.disabled;
+    if (el instanceof HTMLInputElement) {
+      const t = (el.type || "text").toLowerCase();
+      return (t === "submit" || t === "button" || t === "reset") && !el.disabled;
+    }
+    return el.getAttribute("role") === "button";
+  }
+
   function collectFields(): Array<
     HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
   > {
@@ -536,10 +556,73 @@ export function enableRemoteNavigation(
     return out;
   }
 
+  /**
+   * Compute the prev / next / submit / enter visibility hints the
+   * wallet's banner drawer needs to render only the buttons that
+   * make sense for the page's current state.
+   *
+   * Rules (mirrored on the wallet — see `_navigationRow`):
+   *
+   *   * `hasPrev`     — there's at least one bindable input *before*
+   *                     this one in the tabbing pool.
+   *   * `hasNext`     — there's at least one bindable input *after*
+   *                     this one.
+   *   * `isLastInForm`— this element is the last bindable input
+   *                     inside its enclosing `<form>`. Mutually
+   *                     exclusive with `hasNext` when the form
+   *                     ends the bindable pool; only true for input-
+   *                     like elements, never for buttons.
+   *   * `isButton`    — the focused element is a click target
+   *                     (`<button>`, `<input type=submit|button>`,
+   *                     `role="button"`). The wallet shows an
+   *                     "Enter" button that dispatches `nav: "submit"`,
+   *                     and the helper here treats that action as a
+   *                     synthetic click rather than a form submit.
+   */
+  function computeNavMeta(
+    el: Element,
+  ): { hasPrev: boolean; hasNext: boolean; isLastInForm: boolean; isButton: boolean } {
+    const isButton =
+      el instanceof HTMLButtonElement ||
+      (el instanceof HTMLInputElement &&
+        (el.type === "submit" || el.type === "button" || el.type === "reset")) ||
+      el.getAttribute("role") === "button";
+    if (isButton) {
+      // A focused button has no concept of "prev/next input" — the
+      // wallet hides those rows entirely and shows just Enter.
+      return { hasPrev: false, hasNext: false, isLastInForm: false, isButton: true };
+    }
+    const fields = collectFields();
+    const idx = fields.indexOf(el as HTMLInputElement);
+    const hasPrev = idx > 0;
+    const hasNext = idx >= 0 && idx < fields.length - 1;
+    let isLastInForm = false;
+    const form = (el as HTMLElement).closest?.("form");
+    if (form instanceof HTMLFormElement) {
+      const fieldsInForm = fields.filter((f) => f.closest("form") === form);
+      isLastInForm =
+        fieldsInForm.length > 0 &&
+        fieldsInForm[fieldsInForm.length - 1] === el;
+    }
+    return { hasPrev, hasNext, isLastInForm, isButton: false };
+  }
+
   function focusPayloadFor(
-    el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+    el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement,
   ): Parameters<PrsonLoginSession["_sendFocus"]>[0] {
     const name = nameForElement(el, 0);
+    const meta = computeNavMeta(el);
+    if (el instanceof HTMLButtonElement || (el instanceof HTMLInputElement &&
+        (el.type === "submit" || el.type === "button" || el.type === "reset"))) {
+      // Button focus — the wallet renders just the Enter row.
+      return {
+        name,
+        label: resolveLabel(el),
+        inputType: "button",
+        value: el instanceof HTMLButtonElement ? (el.textContent ?? "").trim() : (el as HTMLInputElement).value,
+        ...meta,
+      };
+    }
     if (el instanceof HTMLSelectElement) {
       return {
         name,
@@ -548,6 +631,7 @@ export function enableRemoteNavigation(
         value: el.value,
         options: readOptions(el),
         required: el.required,
+        ...meta,
       };
     }
     const inputType = resolveInputType(el);
@@ -566,6 +650,7 @@ export function enableRemoteNavigation(
       ...(el instanceof HTMLInputElement && el.pattern
         ? { pattern: el.pattern }
         : {}),
+      ...meta,
     };
   }
 
@@ -585,9 +670,16 @@ export function enableRemoteNavigation(
 
   function onFocusIn(ev: Event) {
     const t = ev.target;
-    if (!(t instanceof Element) || !isBindable(t)) return;
-    currentFocused = t;
-    void session._sendFocus(focusPayloadFor(t));
+    if (!(t instanceof Element)) return;
+    if (isBindable(t)) {
+      currentFocused = t;
+      void session._sendFocus(focusPayloadFor(t));
+      return;
+    }
+    if (isFocusableButton(t)) {
+      currentFocused = t as HTMLButtonElement | HTMLInputElement;
+      void session._sendFocus(focusPayloadFor(t as HTMLButtonElement));
+    }
   }
 
   function onFocusOut(ev: Event) {
@@ -604,6 +696,35 @@ export function enableRemoteNavigation(
 
   function applyNav(action: "prev" | "next" | "submit") {
     if (action === "submit") {
+      // Two semantics on one wire action:
+      //
+      //   * focused element IS a button → click it. Wallet shows
+      //     this as "Enter" when [isButton: true] in the focus
+      //     envelope, and the user expects pressing it on the
+      //     phone to fire the button's click handler.
+      //   * else → submit the enclosing form. Wallet shows this as
+      //     "Submit" when [isLastInForm: true].
+      //
+      // We use one nav action for both so the wire grammar stays
+      // narrow; the contextual UX is decided on the wallet side
+      // (different label / icon) and the dispatch routes correctly
+      // by inspecting `currentFocused`.
+      const focused = currentFocused;
+      if (
+        focused instanceof HTMLButtonElement ||
+        (focused instanceof HTMLInputElement &&
+          (focused.type === "submit" ||
+            focused.type === "button" ||
+            focused.type === "reset")) ||
+        focused?.getAttribute("role") === "button"
+      ) {
+        try {
+          (focused as HTMLElement).click();
+        } catch {
+          /* swallow */
+        }
+        return;
+      }
       const form =
         currentFocused?.closest("form") ?? root.querySelector("form");
       if (form instanceof HTMLFormElement) tryRequestSubmit(form);
@@ -611,7 +732,7 @@ export function enableRemoteNavigation(
     }
     const fields = collectFields();
     if (fields.length === 0) return;
-    let idx = currentFocused ? fields.indexOf(currentFocused) : -1;
+    let idx = currentFocused ? fields.indexOf(currentFocused as never) : -1;
     if (idx === -1) idx = action === "prev" ? fields.length : -1;
     const target =
       action === "next"
@@ -626,7 +747,15 @@ export function enableRemoteNavigation(
 
   function applyValue(value: string) {
     if (!currentFocused) return;
-    writeValueIntoElement(currentFocused, value);
+    // Value pushes only make sense for input-like fields. If a
+    // button is focused (no editable value) just drop the push.
+    if (
+      currentFocused instanceof HTMLInputElement ||
+      currentFocused instanceof HTMLTextAreaElement ||
+      currentFocused instanceof HTMLSelectElement
+    ) {
+      writeValueIntoElement(currentFocused, value);
+    }
   }
 
   const unsubscribe = session._setRemoteNavListener((envelope) => {
@@ -1031,10 +1160,19 @@ export function bindMouse(
       // first `mouse-update` frame can never race ahead of us. The
       // session also drops the subscriber on the terminating
       // `response` so we don't need to manage that side ourselves.
+      // Mouse requests stay open as long as the user is driving the
+      // wallet's controller — that can easily be longer than the
+      // generic `request()` default of 60 s. Default to the session
+      // hard expiry so the request only times out when there's
+      // genuinely nothing to wait for, and let callers override.
+      const sessionEndMs = Math.max(
+        60_000,
+        session.expiresAt - Date.now() + 1_000,
+      );
       const reply = await session.requestMouse(
         { kind: "mouse", mode, reason: callerOpts?.reason ?? opts?.reason },
         applyFrame,
-        callerOpts,
+        { timeoutMs: sessionEndMs, ...callerOpts },
       );
       // Drawer closed (or timed out) — pull the cursor off the page
       // so it doesn't sit there orphaned. Host can call request()
