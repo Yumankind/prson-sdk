@@ -396,6 +396,17 @@
             log("event", e);
             if (e.type === "signed_out") showSignedOut();
           });
+          // Connection status — mirrors the wallet's banner dot.
+          // Logs every transition + the RTT that triggered it, so a
+          // partner integrator can see the channel go stable / unstable
+          // / offline in the same pane as the lifecycle events.
+          session.onConnectionStatus((status, rttMs) => {
+            log("connection", { status, rttMs });
+          });
+          log("connection (initial)", {
+            status: session.connectionStatus,
+            rttMs: session.lastRttMs,
+          });
           // Install the DOM-side glue: focus listeners + nav / value
           // / logout handlers. Cleans up on signed_out automatically.
           enableRemoteNavigation(session);

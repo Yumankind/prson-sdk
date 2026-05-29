@@ -2364,7 +2364,14 @@ function boxToWallet(walletSessionPkB64u, plaintext) {
   const ephemeral = (0, import_x25519.generateKeyPair)();
   const nonce = (0, import_random.randomBytes)(24);
   const pt = new TextEncoder().encode(plaintext);
-  const ct = (0, import_nacl.box)(ephemeral.secretKey, recipientPk, nonce, pt);
+  const ct = (0, import_nacl.box)(
+    /* theirPublicKey */
+    recipientPk,
+    /* mySecretKey   */
+    ephemeral.secretKey,
+    nonce,
+    pt
+  );
   return JSON.stringify({
     ephPk: stripPad((0, import_base64.encodeURLSafe)(ephemeral.publicKey)),
     nonce24: stripPad((0, import_base64.encodeURLSafe)(nonce)),
@@ -2698,6 +2705,29 @@ function newUuid() {
 }
 
 // src/session.ts
+var CONNECTION_UNSTABLE_THRESHOLD_MS = 1e3;
+var CONNECTION_OFFLINE_AFTER_MS = 5e3;
+var PING_INTERVAL_MS = 2e3;
+var ACK_RETRY_DELAY_MS = 2e3;
+var ACK_MAX_ATTEMPTS = 3;
+var SEEN_IDS_CAPACITY = 500;
+function _unrefTimer(t) {
+  if (t === null) return;
+  const maybe = t;
+  if (typeof maybe.unref === "function") maybe.unref();
+}
+function uuidv4() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  buf[6] = buf[6] & 15 | 64;
+  buf[8] = buf[8] & 63 | 128;
+  const h = [];
+  for (let i = 0; i < 16; i++) h.push(buf[i].toString(16).padStart(2, "0"));
+  return h.slice(0, 4).join("") + "-" + h.slice(4, 6).join("") + "-" + h.slice(6, 8).join("") + "-" + h.slice(8, 10).join("") + "-" + h.slice(10, 16).join("");
+}
 var PrsonLoginSession = class {
   constructor(opts) {
     this._expiryTimer = null;
@@ -2752,6 +2782,32 @@ var PrsonLoginSession = class {
     this._listeners = /* @__PURE__ */ new Map();
     /** "Fire on every event" subscribers — for logging / telemetry. */
     this._anyListeners = /* @__PURE__ */ new Set();
+    // ─── Transport-layer reliability state ───────────────────────────
+    //
+    // Mirrors the wallet's LoginSession protocol (see
+    // mobile-app/.../login_session_service.dart):
+    //
+    //   * `_seenIds` + `_seenIdsOrder` — LRU dedupe of inbound `id`s.
+    //   * `_pendingAcks`               — outbound ack-tracked sends.
+    //   * `_pingSendTimes`             — RTT correlation by ping id.
+    //   * `_pingTimer` + `_offlineTimer` — liveness loop.
+    //
+    // Browser-side critical sends are: `request`, `focus`, `ack`,
+    // `pong`. Of those only `request` already has its own
+    // RequestController/timeout contract; the rest are fire-and-forget
+    // today. To keep the surface small AND match the wallet, we add
+    // ack tracking on outbound `focus` only (high signal-to-noise for
+    // remote-nav UX). `request` keeps its existing semantics; `ack`
+    // and `pong` are never themselves ack-tracked (would loop).
+    this._seenIds = /* @__PURE__ */ new Set();
+    this._seenIdsOrder = [];
+    this._pendingAcks = /* @__PURE__ */ new Map();
+    this._pingSendTimes = /* @__PURE__ */ new Map();
+    this._pingTimer = null;
+    this._offlineTimer = null;
+    this._connectionStatus = "unknown";
+    this._lastRttMs = null;
+    this._connectionListeners = /* @__PURE__ */ new Set();
     this._cnf = opts.cnf;
     this._expiresAt = opts.credential.expiresAt;
     this._transport = opts.transport;
@@ -2764,6 +2820,8 @@ var PrsonLoginSession = class {
     this._avatar = opts.initialAvatar ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
+    this._pingTimer = setInterval(() => this._sendPing(), PING_INTERVAL_MS);
+    _unrefTimer(this._pingTimer);
     if (opts.initialSignedInResult) {
       const result = opts.initialSignedInResult;
       queueMicrotask(() => this._dispatch({ type: "signed_in", result }));
@@ -2796,6 +2854,25 @@ var PrsonLoginSession = class {
    *  trust model as [displayName]. */
   get avatar() {
     return this._avatar;
+  }
+  /** Coarse health of the wallet ↔ browser data channel as observed
+   *  via the periodic ping/pong loop. `unknown` until the first pong
+   *  lands; `offline` after 5 s of no pong; `unstable` when the most
+   *  recent RTT crossed 1 s; otherwise `stable`. */
+  get connectionStatus() {
+    return this._connectionStatus;
+  }
+  /** Most recently observed RTT in milliseconds, or null until the
+   *  first pong lands. */
+  get lastRttMs() {
+    return this._lastRttMs;
+  }
+  /** Subscribe to connection-status changes. Fires on every transition
+   *  with the new status + the RTT that triggered it (null on the
+   *  `offline` transition). Returns an unsubscribe handle. */
+  onConnectionStatus(cb) {
+    this._connectionListeners.add(cb);
+    return () => this._connectionListeners.delete(cb);
   }
   // ─── Subscription API ────────────────────────────────────────────
   /**
@@ -2904,20 +2981,11 @@ var PrsonLoginSession = class {
    */
   async _sendFocus(focus) {
     if (this._closed) return;
-    const recipientPk = this._walletSessionPk;
-    if (!recipientPk) return;
-    const payload = {
-      v: "prson_vp_v1",
+    if (!this._walletSessionPk) return;
+    await this._sendWithAck({
       msg: "focus",
-      issuedAt: Math.floor(Date.now() / 1e3),
-      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
       focus
-    };
-    try {
-      const boxed = boxToWallet(recipientPk, JSON.stringify(payload));
-      this._transport.send(boxed);
-    } catch {
-    }
+    });
   }
   /**
    * Install the remote-navigation listener. Replaces any prior
@@ -3052,6 +3120,7 @@ var PrsonLoginSession = class {
         this._armExpiryTimer();
       }
     }, chunk);
+    _unrefTimer(this._expiryTimer);
   }
   async _handleMessage(raw) {
     if (this._closed) return;
@@ -3061,7 +3130,178 @@ var PrsonLoginSession = class {
     } catch {
       return;
     }
+    if (typeof envelope.id === "string") {
+      if (this._seenIds.has(envelope.id)) {
+        void this._sendAckFor(envelope);
+        return;
+      }
+      this._markSeen(envelope.id);
+      void this._sendAckFor(envelope);
+    }
+    if (envelope.msg === "ack") {
+      this._handleAck(envelope.ackOf);
+      return;
+    }
+    if (envelope.msg === "ping") {
+      void this._sendPong(envelope);
+      return;
+    }
+    if (envelope.msg === "pong") {
+      this._handlePong(envelope);
+      return;
+    }
     await this._dispatchDecryptedForTest(envelope);
+  }
+  // ─── Transport-layer protocol helpers ─────────────────────────────
+  _markSeen(id) {
+    this._seenIds.add(id);
+    this._seenIdsOrder.push(id);
+    if (this._seenIdsOrder.length > SEEN_IDS_CAPACITY) {
+      const evict = this._seenIdsOrder.shift();
+      if (evict) this._seenIds.delete(evict);
+    }
+  }
+  /** Auto-ack any inbound envelope that carries an `id`, except
+   *  protocol primitives. `ping` is implicitly acked by `pong`;
+   *  `pong` and `ack` would loop. */
+  async _sendAckFor(envelope) {
+    if (typeof envelope.id !== "string") return;
+    if (envelope.msg === "ack" || envelope.msg === "ping" || envelope.msg === "pong") {
+      return;
+    }
+    if (!this._walletSessionPk) return;
+    const body = JSON.stringify({
+      v: "prson_vp_v1",
+      msg: "ack",
+      ackOf: envelope.id,
+      issuedAt: Math.floor(Date.now() / 1e3),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, "")
+    });
+    try {
+      this._transport.send(boxToWallet(this._walletSessionPk, body));
+    } catch {
+    }
+  }
+  _handleAck(ackOf) {
+    if (!ackOf) return;
+    const pending = this._pendingAcks.get(ackOf);
+    if (!pending) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    this._pendingAcks.delete(ackOf);
+  }
+  async _sendPing() {
+    if (this._closed) return;
+    if (!this._walletSessionPk) return;
+    const id = uuidv4();
+    const ts = Date.now();
+    this._pingSendTimes.set(id, ts);
+    const body = JSON.stringify({
+      v: "prson_vp_v1",
+      msg: "ping",
+      id,
+      ts,
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, "")
+    });
+    try {
+      this._transport.send(boxToWallet(this._walletSessionPk, body));
+    } catch {
+    }
+    this._armOfflineTimer();
+  }
+  async _sendPong(ping) {
+    if (!this._walletSessionPk) return;
+    if (typeof ping.id !== "string") return;
+    const body = JSON.stringify({
+      v: "prson_vp_v1",
+      msg: "pong",
+      ackOf: ping.id,
+      ts: ping.ts,
+      recvTs: Date.now(),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, "")
+    });
+    try {
+      this._transport.send(boxToWallet(this._walletSessionPk, body));
+    } catch {
+    }
+  }
+  _handlePong(envelope) {
+    if (typeof envelope.ackOf !== "string") return;
+    const sent = this._pingSendTimes.get(envelope.ackOf);
+    if (sent === void 0) return;
+    this._pingSendTimes.delete(envelope.ackOf);
+    const rtt = Date.now() - sent;
+    this._lastRttMs = rtt;
+    if (this._offlineTimer) {
+      clearTimeout(this._offlineTimer);
+      this._offlineTimer = null;
+    }
+    this._setConnectionStatus(
+      rtt > CONNECTION_UNSTABLE_THRESHOLD_MS ? "unstable" : "stable",
+      rtt
+    );
+  }
+  _armOfflineTimer() {
+    if (this._offlineTimer) clearTimeout(this._offlineTimer);
+    this._offlineTimer = setTimeout(() => {
+      if (this._closed) return;
+      this._setConnectionStatus("offline", null);
+    }, CONNECTION_OFFLINE_AFTER_MS);
+    _unrefTimer(this._offlineTimer);
+  }
+  _setConnectionStatus(s, rttMs) {
+    if (this._connectionStatus === s && this._lastRttMs === rttMs) return;
+    this._connectionStatus = s;
+    if (rttMs !== null) this._lastRttMs = rttMs;
+    for (const cb of this._connectionListeners) {
+      try {
+        cb(s, rttMs);
+      } catch {
+      }
+    }
+  }
+  /** Send a JSON envelope with ack tracking + retry. Stamps a fresh
+   *  `id` onto [body] and retransmits every [ACK_RETRY_DELAY_MS]
+   *  until the matching ack lands or [ACK_MAX_ATTEMPTS] is reached.
+   *  Resolves with `true` on ack, `false` on exhaustion. */
+  async _sendWithAck(body) {
+    if (this._closed) return false;
+    if (!this._walletSessionPk) return false;
+    const id = uuidv4();
+    body.id = id;
+    body.v = body.v ?? "prson_vp_v1";
+    body.issuedAt = body.issuedAt ?? Math.floor(Date.now() / 1e3);
+    body.domain = body.domain ?? this._verifierContext.expectedAudience.replace(/^https?:\/\//, "");
+    const encoded = JSON.stringify(body);
+    const pending = { encoded, attempts: 0, timer: null };
+    this._pendingAcks.set(id, pending);
+    return new Promise((resolve) => {
+      const attempt = () => {
+        if (this._closed) {
+          this._pendingAcks.delete(id);
+          resolve(false);
+          return;
+        }
+        pending.attempts += 1;
+        try {
+          this._transport.send(boxToWallet(this._walletSessionPk, encoded));
+        } catch {
+        }
+        pending.timer = setTimeout(() => {
+          if (!this._pendingAcks.has(id)) {
+            resolve(true);
+            return;
+          }
+          if (pending.attempts >= ACK_MAX_ATTEMPTS) {
+            this._pendingAcks.delete(id);
+            resolve(false);
+            return;
+          }
+          attempt();
+        }, ACK_RETRY_DELAY_MS);
+        _unrefTimer(pending.timer);
+      };
+      attempt();
+    });
   }
   /**
    * Pure dispatch entry-point — takes an already-decrypted envelope
@@ -3256,6 +3496,13 @@ var PrsonLoginSession = class {
     if (this._closed) return;
     this._closed = true;
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
+    if (this._pingTimer) clearInterval(this._pingTimer);
+    if (this._offlineTimer) clearTimeout(this._offlineTimer);
+    for (const p of this._pendingAcks.values()) {
+      if (p.timer) clearTimeout(p.timer);
+    }
+    this._pendingAcks.clear();
+    this._pingSendTimes.clear();
     try {
       this._transport.close();
     } catch {
@@ -3265,6 +3512,7 @@ var PrsonLoginSession = class {
     this._dispatch({ type: "signed_out", reason });
     this._listeners.clear();
     this._anyListeners.clear();
+    this._connectionListeners.clear();
   }
 };
 function extractKbNonce(presentation) {
@@ -4076,8 +4324,8 @@ var KNOWN_VCTS = [
   "https://app.prson.net/credentials/verified-identity/v1"
 ];
 var ANONYMOUS_WALLET_VCT2 = "https://app.prson.net/credentials/anonymous-wallet/v1";
-var DEFAULT_TTL_MINUTES = 10;
-var MAX_TTL_MINUTES = 15;
+var DEFAULT_TTL_MINUTES = 2;
+var MAX_TTL_MINUTES = 2;
 var SIGNALING_BASE = "https://signaling.prson.net";
 var LoginAbortedError = class extends Error {
   constructor(message = "sign-in aborted by a newer signIn() call") {
