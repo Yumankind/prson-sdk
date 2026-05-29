@@ -29,6 +29,13 @@
  */
 
 import type { PrsonLoginSession } from "./session.js";
+import {
+  closeAllOverlays,
+  findNearestClickableInOverlay,
+  isSelectOverlayActive,
+  openSelectOverlay,
+  setOverlaySnap,
+} from "./select_overlay.js";
 import type {
   InputFormField,
   InputOption,
@@ -865,7 +872,17 @@ export function bindMouse(
         // (`mouse-update` is already wallet-throttled to ~60 Hz),
         // which is acceptable on every page we ship for.
         if (activeMode === "magic") {
-          setSnapTarget(findNearestClickable(pos.x, pos.y));
+          if (isSelectOverlayActive()) {
+            // Page-side highlight stays cleared; the snap visual
+            // lives inside the overlay's own shadow root (the page
+            // can't reach it, and the page's selector can't
+            // accidentally override the option styling).
+            setSnapTarget(null);
+            setOverlaySnap(findNearestClickableInOverlay(pos.x, pos.y));
+          } else {
+            setOverlaySnap(null);
+            setSnapTarget(findNearestClickable(pos.x, pos.y));
+          }
         }
         break;
       }
@@ -877,6 +894,34 @@ export function bindMouse(
         const prev = el.style.background;
         el.style.background = "rgba(59, 130, 246, 1)";
         setTimeout(() => { if (cursor === el) el.style.background = prev; }, 140);
+        // Custom-overlay route. While a select overlay is open the
+        // page beneath is non-interactive — clicks land ONLY on
+        // overlay elements (close button, page-up / page-down,
+        // option buttons). The overlay's shadow-DOM listener
+        // handles the actual semantics (close vs. paginate vs.
+        // commit option); we just need to dispatch a click event
+        // on the right inner element.
+        if (isSelectOverlayActive()) {
+          const overlayTarget =
+            (snapTarget && (snapTarget as Element).closest?.(
+              "[data-prson-select-close],[data-prson-select-page],[data-prson-select-option]",
+            )) ??
+            findNearestClickableInOverlay(pos.x, pos.y);
+          if (overlayTarget) {
+            const init: MouseEventInit = {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              clientX: pos.x,
+              clientY: pos.y,
+              view: window,
+            };
+            overlayTarget.dispatchEvent(new MouseEvent("mousedown", init));
+            overlayTarget.dispatchEvent(new MouseEvent("mouseup", init));
+            overlayTarget.dispatchEvent(new MouseEvent("click", init));
+          }
+          break;
+        }
         // Click-area enlargement: a virtual cursor is harder to land
         // precisely than a touch finger or a mouse, especially for a
         // gyro-driven wand. Search for the NEAREST interactive
@@ -894,6 +939,16 @@ export function bindMouse(
           activeMode === "magic"
             ? snapTarget
             : findNearestClickable(pos.x, pos.y);
+        // Native <select>s open an OS-drawn list that the virtual
+        // cursor can't reach. Replace the click with a custom
+        // shadow-DOM overlay the cursor CAN drive.
+        if (snapped instanceof HTMLSelectElement) {
+          openSelectOverlay(snapped);
+          // Clear the page-side snap highlight on the select so the
+          // overlay's own snap visuals take over cleanly.
+          setSnapTarget(null);
+          break;
+        }
         const direct = document.elementFromPoint(pos.x, pos.y);
         const target = snapped ?? direct;
         // When we snapped, dispatch at the SNAPPED element's centre
@@ -958,6 +1013,10 @@ export function bindMouse(
     // keep a `data-prson-magic-snap` attribute on whichever input
     // happened to be the last preview target.
     setSnapTarget(null);
+    setOverlaySnap(null);
+    // Close any active select overlay so a disposing cursor doesn't
+    // leave the dropdown orphaned on the page.
+    closeAllOverlays();
     // Tear down the ambient subscription so the session stops
     // holding a ref to our (now-disposed) handler.
     offAmbient();

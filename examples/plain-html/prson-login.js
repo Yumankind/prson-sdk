@@ -3861,6 +3861,326 @@ function renderLoginQr(url, mount, theme) {
   };
 }
 
+// src/select_overlay.ts
+var activeOverlay = null;
+function isSelectOverlayActive() {
+  return activeOverlay !== null;
+}
+function closeAllOverlays() {
+  activeOverlay?.close();
+}
+function openSelectOverlay(select) {
+  if (activeOverlay) activeOverlay.close();
+  const host = document.createElement("div");
+  host.setAttribute("data-prson-select-overlay", "");
+  host.style.position = "fixed";
+  host.style.inset = "0";
+  host.style.zIndex = "2147483646";
+  document.body.appendChild(host);
+  const shadow = host.attachShadow({ mode: "open" });
+  const style = document.createElement("style");
+  style.textContent = OVERLAY_CSS;
+  shadow.appendChild(style);
+  const title = pickTitle(select);
+  const backdrop = document.createElement("div");
+  backdrop.className = "backdrop";
+  backdrop.setAttribute("data-prson-select-backdrop", "");
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  const header = document.createElement("div");
+  header.className = "header";
+  const titleEl = document.createElement("div");
+  titleEl.className = "title";
+  titleEl.textContent = title;
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "close";
+  closeBtn.setAttribute("type", "button");
+  closeBtn.setAttribute("data-prson-select-close", "");
+  closeBtn.setAttribute("aria-label", "Close");
+  closeBtn.textContent = "\u2715";
+  header.appendChild(titleEl);
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+  const optionsWrap = document.createElement("div");
+  optionsWrap.className = "options-wrap";
+  const pageUp = document.createElement("button");
+  pageUp.className = "page-btn";
+  pageUp.setAttribute("type", "button");
+  pageUp.setAttribute("data-prson-select-page", "up");
+  pageUp.innerHTML = '<span class="chev">\u25B2</span> Previous';
+  const list = document.createElement("div");
+  list.className = "options-list";
+  const pageDown = document.createElement("button");
+  pageDown.className = "page-btn";
+  pageDown.setAttribute("type", "button");
+  pageDown.setAttribute("data-prson-select-page", "down");
+  pageDown.innerHTML = 'Next <span class="chev">\u25BC</span>';
+  optionsWrap.appendChild(pageUp);
+  optionsWrap.appendChild(list);
+  optionsWrap.appendChild(pageDown);
+  panel.appendChild(optionsWrap);
+  backdrop.appendChild(panel);
+  shadow.appendChild(backdrop);
+  const options = Array.from(select.options);
+  const PAGE_SIZE = 6;
+  const numPages = Math.max(1, Math.ceil(options.length / PAGE_SIZE));
+  let currentPage = pageOfValue(select.value, options, PAGE_SIZE);
+  function renderPage() {
+    list.replaceChildren();
+    const start = currentPage * PAGE_SIZE;
+    const end = Math.min(start + PAGE_SIZE, options.length);
+    for (let i = start; i < end; i++) {
+      const opt = options[i];
+      const btn = document.createElement("button");
+      btn.className = "option";
+      btn.setAttribute("type", "button");
+      btn.setAttribute("data-prson-select-option", String(i));
+      btn.textContent = opt.label || opt.value || `Option ${i + 1}`;
+      if (opt.value === select.value) {
+        btn.setAttribute("data-selected", "");
+      }
+      list.appendChild(btn);
+    }
+    if (currentPage <= 0) {
+      pageUp.setAttribute("disabled", "");
+    } else {
+      pageUp.removeAttribute("disabled");
+    }
+    if (currentPage >= numPages - 1) {
+      pageDown.setAttribute("disabled", "");
+    } else {
+      pageDown.removeAttribute("disabled");
+    }
+  }
+  renderPage();
+  const handle = {
+    host,
+    shadow,
+    close: () => {
+      host.remove();
+      if (activeOverlay === handle) activeOverlay = null;
+    }
+  };
+  shadow.addEventListener("click", (e) => {
+    const path = e.composedPath();
+    for (const node of path) {
+      if (!(node instanceof Element)) continue;
+      if (node.getAttribute?.("data-prson-select-close") !== null) {
+        handle.close();
+        return;
+      }
+      const page = node.getAttribute?.("data-prson-select-page");
+      if (page === "up") {
+        if (currentPage > 0) {
+          currentPage -= 1;
+          renderPage();
+        }
+        return;
+      }
+      if (page === "down") {
+        if (currentPage < numPages - 1) {
+          currentPage += 1;
+          renderPage();
+        }
+        return;
+      }
+      const optAttr = node.getAttribute?.("data-prson-select-option");
+      if (optAttr !== null && optAttr !== void 0) {
+        const idx = Number.parseInt(optAttr, 10);
+        const chosen = options[idx];
+        if (chosen) {
+          select.value = chosen.value;
+          select.dispatchEvent(new Event("input", { bubbles: true }));
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        handle.close();
+        return;
+      }
+      if (node.getAttribute?.("data-prson-select-backdrop") !== null) {
+        handle.close();
+        return;
+      }
+    }
+  });
+  activeOverlay = handle;
+  return handle;
+}
+function findNearestClickableInOverlay(x, y) {
+  if (!activeOverlay) return null;
+  const candidates = activeOverlay.shadow.querySelectorAll(
+    "[data-prson-select-close],[data-prson-select-page]:not([disabled]),[data-prson-select-option]"
+  );
+  let best = null;
+  let bestDist = Infinity;
+  for (const el of Array.from(candidates)) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+    const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = el;
+    }
+  }
+  return best;
+}
+function setOverlaySnap(target) {
+  if (!activeOverlay) return;
+  activeOverlay.shadow.querySelectorAll("[data-prson-magic-snap]").forEach((el) => el.removeAttribute("data-prson-magic-snap"));
+  if (target) target.setAttribute("data-prson-magic-snap", "");
+}
+function pickTitle(select) {
+  if (select.id) {
+    const lbl = document.querySelector(
+      `label[for="${cssEscapeLocal(select.id)}"]`
+    );
+    if (lbl?.textContent) return lbl.textContent.trim();
+  }
+  const wrap = select.closest("label");
+  if (wrap && wrap.textContent) {
+    const txt = wrap.textContent.replace(select.textContent ?? "", "").trim();
+    if (txt) return txt;
+  }
+  const aria = select.getAttribute("aria-label");
+  if (aria) return aria;
+  const name = select.getAttribute("name");
+  if (name) return name;
+  return "Select an option";
+}
+function pageOfValue(current, options, pageSize) {
+  const idx = options.findIndex((o) => o.value === current);
+  if (idx < 0) return 0;
+  return Math.floor(idx / pageSize);
+}
+function cssEscapeLocal(s) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(s);
+  }
+  return s.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+}
+var OVERLAY_CSS = `
+  :host {
+    all: initial;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    color: #0f172a;
+  }
+  * { box-sizing: border-box; }
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.55);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .panel {
+    width: min(440px, 100%);
+    max-height: 88vh;
+    background: #ffffff;
+    border-radius: 20px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 24px 56px rgba(15, 23, 42, 0.32);
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 18px 20px;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .title {
+    flex: 1;
+    font-size: 18px;
+    font-weight: 700;
+    color: #0f172a;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .close {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: 1px solid #e2e8f0;
+    background: #f1f5f9;
+    color: #475569;
+    font-size: 18px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .close:hover { background: #e2e8f0; }
+  .options-wrap {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .page-btn {
+    width: 100%;
+    padding: 18px 20px;
+    border: none;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 1px solid #e2e8f0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  .page-btn .chev { font-size: 13px; opacity: 0.8; }
+  .page-btn:hover { background: #f1f5f9; color: #1e293b; }
+  .page-btn[disabled] {
+    opacity: 0.35;
+    cursor: default;
+    background: #f8fafc;
+    color: #475569;
+  }
+  .options-list {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .option {
+    appearance: none;
+    width: 100%;
+    padding: 18px 20px;
+    border: none;
+    background: #ffffff;
+    color: #0f172a;
+    font-size: 16px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+    border-bottom: 1px solid #f1f5f9;
+    min-height: 60px;
+  }
+  .option:hover { background: #eff6ff; color: #1d4ed8; }
+  .option[data-selected] {
+    background: #dbeafe;
+    color: #1d4ed8;
+    font-weight: 700;
+  }
+  /* Snap-preview highlight, shared attribute name with the cursor.
+     Lives inside the shadow root so the page's selector (if any)
+     can't override it. */
+  [data-prson-magic-snap] {
+    outline: 3px solid #3b82f6;
+    outline-offset: -3px;
+    background: #eff6ff;
+  }
+  .option[data-prson-magic-snap] { color: #1d4ed8; }
+`;
+
 // src/bind.ts
 function bindInput(session, element) {
   return {
@@ -4332,7 +4652,13 @@ function bindMouse(session, opts) {
           }
         }
         if (activeMode === "magic") {
-          setSnapTarget(findNearestClickable(pos.x, pos.y));
+          if (isSelectOverlayActive()) {
+            setSnapTarget(null);
+            setOverlaySnap(findNearestClickableInOverlay(pos.x, pos.y));
+          } else {
+            setOverlaySnap(null);
+            setSnapTarget(findNearestClickable(pos.x, pos.y));
+          }
         }
         break;
       }
@@ -4343,7 +4669,31 @@ function bindMouse(session, opts) {
         setTimeout(() => {
           if (cursor === el) el.style.background = prev;
         }, 140);
+        if (isSelectOverlayActive()) {
+          const overlayTarget = (snapTarget && snapTarget.closest?.(
+            "[data-prson-select-close],[data-prson-select-page],[data-prson-select-option]"
+          )) ?? findNearestClickableInOverlay(pos.x, pos.y);
+          if (overlayTarget) {
+            const init = {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              clientX: pos.x,
+              clientY: pos.y,
+              view: window
+            };
+            overlayTarget.dispatchEvent(new MouseEvent("mousedown", init));
+            overlayTarget.dispatchEvent(new MouseEvent("mouseup", init));
+            overlayTarget.dispatchEvent(new MouseEvent("click", init));
+          }
+          break;
+        }
         const snapped = activeMode === "magic" ? snapTarget : findNearestClickable(pos.x, pos.y);
+        if (snapped instanceof HTMLSelectElement) {
+          openSelectOverlay(snapped);
+          setSnapTarget(null);
+          break;
+        }
         const direct = document.elementFromPoint(pos.x, pos.y);
         const target = snapped ?? direct;
         const clickPoint = snapped ? rectCenter(snapped.getBoundingClientRect()) : { x: pos.x, y: pos.y };
@@ -4390,6 +4740,8 @@ function bindMouse(session, opts) {
       cursor = null;
     }
     setSnapTarget(null);
+    setOverlaySnap(null);
+    closeAllOverlays();
     offAmbient();
   }
   return {
