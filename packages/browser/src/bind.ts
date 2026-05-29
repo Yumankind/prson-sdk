@@ -36,6 +36,10 @@ import {
   openSelectOverlay,
   setOverlaySnap,
 } from "./select_overlay.js";
+import {
+  closePointPhoneOverlay,
+  openPointPhoneOverlay,
+} from "./point_phone_overlay.js";
 import type {
   InputFormField,
   InputOption,
@@ -912,6 +916,31 @@ export function bindMouse(
   // the wallet can start streaming the moment the user taps
   // Touchpad / Magic on the banner drawer — even if the host hasn't
   // called `.request()` at all.
+  // Window focus → `control-status` for the wallet. When the page
+  // tab loses focus the wallet drops into a "Remote control paused"
+  // state so the user can see, on the phone, that motion isn't
+  // landing anywhere. Listeners are torn down in `detach()`.
+  function onWindowBlur(): void {
+    if (disposed) return;
+    void session._sendControlStatus(true);
+  }
+  function onWindowFocus(): void {
+    if (disposed) return;
+    void session._sendControlStatus(false);
+    // Real OS focus also implies the user is back at the keyboard
+    // → drop the "point your phone" hint if it was still up.
+    closePointPhoneOverlay();
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("blur", onWindowBlur);
+    window.addEventListener("focus", onWindowFocus);
+    // Initial state — fire once so a session created while the tab
+    // is hidden lands on the wallet correctly.
+    if (typeof document !== "undefined" && document.hasFocus && !document.hasFocus()) {
+      void session._sendControlStatus(true);
+    }
+  }
+
   const offAmbient = session._setAmbientMouseHandler((mouseBody) => {
     if (disposed) return;
     // Treat wallet "begin" / "end" frames as no-ops on the cursor —
@@ -932,6 +961,27 @@ export function bindMouse(
 
   function ensureCursor(): HTMLDivElement {
     if (cursor) return cursor;
+    // Dedupe across multiple `bindMouse` calls. If another instance
+    // already created a cursor (e.g. the long-lived ambient bind
+    // from sign-in + a per-request bind from a host button click),
+    // adopt the existing element instead of stacking a second one.
+    // We still own its position state from this controller — the
+    // last `bindMouse` to call `ensureCursor` becomes the visible
+    // owner. (Prior owners just stop applying frames.)
+    const existing = document.querySelector<HTMLDivElement>(
+      '[data-prson-virtual-cursor]',
+    );
+    if (existing) {
+      cursor = existing;
+      // Update size/colour to match our opts so a second mount can
+      // restyle the cursor without flicker.
+      existing.style.width = `${size}px`;
+      existing.style.height = `${size}px`;
+      existing.style.background = color;
+      existing.style.display = "block";
+      applyCursorPosition(existing, pos);
+      return existing;
+    }
     const el = document.createElement("div");
     el.setAttribute("data-prson-virtual-cursor", "");
     el.style.position = "fixed";
@@ -944,7 +994,7 @@ export function bindMouse(
     el.style.pointerEvents = "none";
     el.style.zIndex = "2147483647";
     el.style.transform = "translate(-50%, -50%)";
-    el.style.transition = "background 120ms ease";
+    el.style.transition = "background 120ms ease, opacity 120ms ease";
     applyCursorPosition(el, pos);
     document.body.appendChild(el);
     cursor = el;
@@ -1130,6 +1180,39 @@ export function bindMouse(
         window.scrollBy({ left: mouse.dx ?? 0, top: mouse.dy ?? 0 });
         break;
       }
+      case "hide": {
+        // Wallet's pose detector says the phone is no longer
+        // pointing at the screen. Pull the cursor off the page so
+        // the user gets immediate feedback, and surface a soft
+        // blue-glow + "point your phone" pill so they know how to
+        // resume. The overlay auto-dismisses after 15 s or on real
+        // OS mouse movement (whichever first).
+        if (cursor) {
+          cursor.style.opacity = "0";
+          cursor.style.pointerEvents = "none";
+        }
+        setSnapTarget(null);
+        setOverlaySnap(null);
+        openPointPhoneOverlay();
+        break;
+      }
+      case "show": {
+        // Wand pose restored — bring the cursor back and clear the
+        // "point your phone" hint regardless of which trigger
+        // (timeout / mousemove / show) wins the race.
+        const el = ensureCursor();
+        el.style.opacity = "1";
+        closePointPhoneOverlay();
+        break;
+      }
+      case "begin":
+      case "end": {
+        // Wallet-side stream lifecycle markers (pre-grant flow).
+        // Nothing for the cursor renderer to do — `_setAmbientMouseHandler`
+        // already calls `ensureCursor()` on these so a real `move`
+        // frame doesn't race the lazy initialiser.
+        break;
+      }
     }
   }
 
@@ -1146,6 +1229,13 @@ export function bindMouse(
     // Close any active select overlay so a disposing cursor doesn't
     // leave the dropdown orphaned on the page.
     closeAllOverlays();
+    closePointPhoneOverlay();
+    // Drop window-focus listeners so a torn-down controller doesn't
+    // keep pushing control-status envelopes onto a closed channel.
+    if (typeof window !== "undefined") {
+      window.removeEventListener("blur", onWindowBlur);
+      window.removeEventListener("focus", onWindowFocus);
+    }
     // Tear down the ambient subscription so the session stops
     // holding a ref to our (now-disposed) handler.
     offAmbient();

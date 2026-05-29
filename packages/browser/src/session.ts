@@ -654,6 +654,32 @@ export class PrsonLoginSession {
   }
 
   /**
+   * Browser→wallet pause-state notification. The wallet's mouse
+   * controller dims its surface + shows "Remote control paused"
+   * while the page is in the background. Fire-and-forget over
+   * NaCl-box to the wallet's session pk; loss is acceptable
+   * (we re-fire on every focus / blur).
+   *
+   * @internal
+   */
+  async _sendControlStatus(paused: boolean): Promise<void> {
+    if (this._closed) return;
+    if (!this._walletSessionPk) return;
+    const payload = JSON.stringify({
+      v: "prson_vp_v1",
+      msg: "control-status",
+      issuedAt: Math.floor(Date.now() / 1000),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+      paused,
+    });
+    try {
+      this._transport.send(boxToWallet(this._walletSessionPk, payload));
+    } catch {
+      /* swallow — channel down */
+    }
+  }
+
+  /**
    * Install the ambient `mouse-update` handler. Mirrors
    * [`_setRemoteNavListener`] — only one ambient subscriber at a
    * time (last call wins). Used by [`bindMouse`] when the

@@ -3019,6 +3019,30 @@ var PrsonLoginSession = class {
     });
   }
   /**
+   * Browser→wallet pause-state notification. The wallet's mouse
+   * controller dims its surface + shows "Remote control paused"
+   * while the page is in the background. Fire-and-forget over
+   * NaCl-box to the wallet's session pk; loss is acceptable
+   * (we re-fire on every focus / blur).
+   *
+   * @internal
+   */
+  async _sendControlStatus(paused) {
+    if (this._closed) return;
+    if (!this._walletSessionPk) return;
+    const payload = JSON.stringify({
+      v: "prson_vp_v1",
+      msg: "control-status",
+      issuedAt: Math.floor(Date.now() / 1e3),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+      paused
+    });
+    try {
+      this._transport.send(boxToWallet(this._walletSessionPk, payload));
+    } catch {
+    }
+  }
+  /**
    * Install the ambient `mouse-update` handler. Mirrors
    * [`_setRemoteNavListener`] — only one ambient subscriber at a
    * time (last call wins). Used by [`bindMouse`] when the
@@ -4186,6 +4210,118 @@ var OVERLAY_CSS = `
   .option[data-prson-magic-snap] { color: #1d4ed8; }
 `;
 
+// src/point_phone_overlay.ts
+var active = null;
+function closePointPhoneOverlay() {
+  active?.close();
+}
+function openPointPhoneOverlay() {
+  if (active) return active;
+  const host = document.createElement("div");
+  host.setAttribute("data-prson-point-phone-overlay", "");
+  host.style.position = "fixed";
+  host.style.inset = "0";
+  host.style.zIndex = "2147483645";
+  host.style.pointerEvents = "none";
+  document.body.appendChild(host);
+  const shadow = host.attachShadow({ mode: "open" });
+  const style = document.createElement("style");
+  style.textContent = OVERLAY_CSS2;
+  shadow.appendChild(style);
+  const glow = document.createElement("div");
+  glow.className = "glow";
+  shadow.appendChild(glow);
+  const pill = document.createElement("div");
+  pill.className = "pill";
+  pill.innerHTML = `
+    <span class="dot"></span>
+    <span class="text">Point your phone at the screen to use Magic wand</span>
+  `;
+  shadow.appendChild(pill);
+  let closed = false;
+  let timer = null;
+  function close() {
+    if (closed) return;
+    closed = true;
+    if (timer) clearTimeout(timer);
+    window.removeEventListener("mousemove", onRealMouseMove);
+    host.style.transition = "opacity 180ms ease";
+    host.style.opacity = "0";
+    setTimeout(() => host.remove(), 200);
+    if (active && active.host === host) active = null;
+  }
+  function onRealMouseMove(_e) {
+    close();
+  }
+  window.addEventListener("mousemove", onRealMouseMove);
+  timer = setTimeout(close, 15e3);
+  const handle = { host, close };
+  active = handle;
+  return handle;
+}
+var OVERLAY_CSS2 = `
+  :host { all: initial; }
+  * { box-sizing: border-box; }
+  /* Inner-glow viewport border. Two stacked inset shadows: the
+     wide soft halo + a thin defined edge. */
+  .glow {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    box-shadow:
+      inset 0 0 0 2px rgba(59, 130, 246, 0.75),
+      inset 0 0 28px 6px rgba(59, 130, 246, 0.35),
+      inset 0 0 80px 24px rgba(59, 130, 246, 0.18);
+    animation: prson-glow-pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes prson-glow-pulse {
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 1; }
+  }
+  .pill {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 18px 28px;
+    border-radius: 999px;
+    background: #0f172a;
+    color: #ffffff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.1px;
+    box-shadow:
+      0 18px 40px rgba(15, 23, 42, 0.45),
+      0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+    /* Pulse-fade in so the pill doesn't pop harshly. */
+    animation: prson-pill-fade-in 240ms ease-out both;
+  }
+  @keyframes prson-pill-fade-in {
+    from { opacity: 0; transform: translate(-50%, calc(-50% + 6px)); }
+    to   { opacity: 1; transform: translate(-50%, -50%); }
+  }
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: rgba(59, 130, 246, 1);
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.25);
+    animation: prson-dot-pulse 1.4s ease-in-out infinite;
+    flex: none;
+  }
+  @keyframes prson-dot-pulse {
+    0%, 100% { transform: scale(1);   opacity: 1;    }
+    50%      { transform: scale(1.3); opacity: 0.65; }
+  }
+  .text {
+    line-height: 1.25;
+  }
+`;
+
 // src/bind.ts
 function bindInput(session, element) {
   return {
@@ -4642,6 +4778,22 @@ function bindMouse(session, opts) {
   let disposed = false;
   let snapTarget = null;
   let activeMode = mode;
+  function onWindowBlur() {
+    if (disposed) return;
+    void session._sendControlStatus(true);
+  }
+  function onWindowFocus() {
+    if (disposed) return;
+    void session._sendControlStatus(false);
+    closePointPhoneOverlay();
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("blur", onWindowBlur);
+    window.addEventListener("focus", onWindowFocus);
+    if (typeof document !== "undefined" && document.hasFocus && !document.hasFocus()) {
+      void session._sendControlStatus(true);
+    }
+  }
   const offAmbient = session._setAmbientMouseHandler((mouseBody) => {
     if (disposed) return;
     if (mouseBody.event !== "move" && mouseBody.event !== "click" && mouseBody.event !== "double-click" && mouseBody.event !== "scroll") {
@@ -4652,6 +4804,18 @@ function bindMouse(session, opts) {
   });
   function ensureCursor() {
     if (cursor) return cursor;
+    const existing = document.querySelector(
+      "[data-prson-virtual-cursor]"
+    );
+    if (existing) {
+      cursor = existing;
+      existing.style.width = `${size}px`;
+      existing.style.height = `${size}px`;
+      existing.style.background = color;
+      existing.style.display = "block";
+      applyCursorPosition(existing, pos);
+      return existing;
+    }
     const el = document.createElement("div");
     el.setAttribute("data-prson-virtual-cursor", "");
     el.style.position = "fixed";
@@ -4664,7 +4828,7 @@ function bindMouse(session, opts) {
     el.style.pointerEvents = "none";
     el.style.zIndex = "2147483647";
     el.style.transform = "translate(-50%, -50%)";
-    el.style.transition = "background 120ms ease";
+    el.style.transition = "background 120ms ease, opacity 120ms ease";
     applyCursorPosition(el, pos);
     document.body.appendChild(el);
     cursor = el;
@@ -4792,6 +4956,26 @@ function bindMouse(session, opts) {
         window.scrollBy({ left: mouse.dx ?? 0, top: mouse.dy ?? 0 });
         break;
       }
+      case "hide": {
+        if (cursor) {
+          cursor.style.opacity = "0";
+          cursor.style.pointerEvents = "none";
+        }
+        setSnapTarget(null);
+        setOverlaySnap(null);
+        openPointPhoneOverlay();
+        break;
+      }
+      case "show": {
+        const el2 = ensureCursor();
+        el2.style.opacity = "1";
+        closePointPhoneOverlay();
+        break;
+      }
+      case "begin":
+      case "end": {
+        break;
+      }
     }
   }
   function detach() {
@@ -4802,6 +4986,11 @@ function bindMouse(session, opts) {
     setSnapTarget(null);
     setOverlaySnap(null);
     closeAllOverlays();
+    closePointPhoneOverlay();
+    if (typeof window !== "undefined") {
+      window.removeEventListener("blur", onWindowBlur);
+      window.removeEventListener("focus", onWindowFocus);
+    }
     offAmbient();
   }
   return {

@@ -80,6 +80,13 @@ export type DecryptedEnvelope = {
     | "nav"
     | "value"
     | "logout"
+    /**
+     * Browser→wallet pause-state notification. Fired on
+     * `window.blur` / `window.focus` so the wallet's mouse
+     * controller can show "Remote control paused" while the page
+     * is in the background. Body: `paused: boolean`.
+     */
+    | "control-status"
     /** Transport-layer reliability primitive: the peer's confirmation
      *  that the envelope with id [ackOf] was received. The session
      *  layer auto-emits these for inbound messages carrying an `id`
@@ -200,13 +207,47 @@ export type DecryptedEnvelope = {
    * for downward scroll, matching `WheelEvent.deltaY`.
    */
   mouse?: {
-    event: "move" | "click" | "double-click" | "scroll";
+    /**
+     * Pointer-stream events.
+     *
+     *   * `move` / `click` / `double-click` / `scroll` — pointer
+     *     events that move the on-page cursor or fire synthetic
+     *     mouse events.
+     *   * `begin` / `end` — wallet-side stream lifecycle markers
+     *     for the pre-grant flow (`SignInOptions.mouseControl`).
+     *     Subscribers ignore them as no-op pointer events.
+     *   * `hide` / `show` — visibility toggles. The wallet emits
+     *     `hide` when the user lifts the phone into a non-pointing
+     *     pose (gravity-based pose detector) and re-emits `show`
+     *     when wand pose returns. The browser pulls the cursor
+     *     off the page on `hide` AND surfaces a "point your phone
+     *     at the screen" hint with a soft blue glow on the
+     *     viewport edge.
+     */
+    event:
+      | "move"
+      | "click"
+      | "double-click"
+      | "scroll"
+      | "begin"
+      | "end"
+      | "show"
+      | "hide";
     dx?: number;
     dy?: number;
     /** Active mode at the time of the event (the wallet drawer can
      *  toggle mid-session). */
     mode?: "touch" | "magic";
   };
+
+  /**
+   * `control-status` body. Browser-emitted; the wallet listens via
+   * `LoginSession.inbound` and dims its controller surface while
+   * `paused: true`. Fired on `window.blur` / `window.focus` so the
+   * user can see, on the phone, that the page is no longer
+   * accepting their cursor input.
+   */
+  paused?: boolean;
 
   /**
    * `nav` body — wallet's remote-navigation command. Sent when the
