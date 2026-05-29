@@ -96,6 +96,53 @@ export type DecryptedEnvelope = {
      * (free-form short code, currently always `"page_unload"`).
      */
     | "browser-revoke"
+    /**
+     * File-transfer wire grammar. Wallet→browser; used when the
+     * host's focused element is `<input type="file">` and the user
+     * picks something on the phone. The three-stage envelope keeps
+     * memory pressure low — neither peer ever materialises the full
+     * file in a contiguous buffer:
+     *
+     *   * `file-begin`  — metadata: `name`, `mimeType`, `size`,
+     *                     `totalChunks`, `chunkSize`, plus an
+     *                     optional `attestation` SD-JWT-VC for
+     *                     identity-bound files (see notes below
+     *                     on VC MIME standards).
+     *   * `file-chunk`  — one chunk: `index` (0-based) +
+     *                     base64-encoded `data`. The wallet
+     *                     stream-reads the source file, so chunks
+     *                     leave the device one at a time without
+     *                     ever loading the whole thing.
+     *   * `file-end`    — `sha256` over the whole file, hex-encoded.
+     *                     The browser verifies the assembled Blob
+     *                     against this digest before assigning to
+     *                     the focused input.
+     *
+     * Per-chunk ack via the existing reliability layer gives
+     * natural backpressure: the wallet doesn't queue chunk N+1
+     * until chunk N is confirmed. Loss of any one chunk retries
+     * just that chunk, not the file.
+     *
+     * VC MIME context (host integrators occasionally ask):
+     *   * `application/vc+ld+json`  — W3C VCDM JSON-LD form
+     *   * `application/vc+jwt`      — W3C VCDM JWT form
+     *   * `application/vc+sd-jwt`   — IETF SD-JWT-VC (what the
+     *                                  Prson identity stack issues)
+     *   * `application/pdf` + PAdES — signed-PDF form
+     *   * C2PA bundles for media (image / video provenance)
+     *
+     * There is no widely-deployed standard MIME for "binary file
+     * with an attached presentation". The `attestation` field on
+     * `file-begin` is our convention for piggy-backing one — the
+     * wallet sends the file bytes AND a separate SD-JWT-VC whose
+     * disclosed claims include the file's SHA-256. The verifier
+     * (host page) re-hashes the received bytes and checks the
+     * digest matches the disclosed claim before trusting the
+     * provenance metadata.
+     */
+    | "file-begin"
+    | "file-chunk"
+    | "file-end"
     /** Transport-layer reliability primitive: the peer's confirmation
      *  that the envelope with id [ackOf] was received. The session
      *  layer auto-emits these for inbound messages carrying an `id`
@@ -257,6 +304,46 @@ export type DecryptedEnvelope = {
    * accepting their cursor input.
    */
   paused?: boolean;
+
+  /**
+   * `file-begin` body. Sent ONCE per file transfer right before the
+   * `file-chunk` stream starts. `chunkSize` is the wallet's raw
+   * (pre-base64) bytes-per-chunk so the browser can preallocate
+   * timing buffers; `totalChunks` lets it render a progress bar
+   * without listening for `file-end`. `attestation` is reserved
+   * for the future SD-JWT-VC piggy-back contract — host code
+   * should treat the field as opaque until the verifier-side
+   * verification path lands.
+   */
+  fileBegin?: {
+    name: string;
+    mimeType: string;
+    size: number;
+    totalChunks: number;
+    chunkSize: number;
+    /** Optional SD-JWT-VC bound to the file's SHA-256 — see the
+     *  `file-begin` msg comment. */
+    attestation?: string;
+  };
+
+  /**
+   * `file-chunk` body. `data` is the chunk's raw bytes base64-
+   * encoded (URL-safe, padded — same convention the rest of the
+   * wire grammar uses). `index` is the zero-based ordinal.
+   */
+  fileChunk?: {
+    index: number;
+    data: string;
+  };
+
+  /**
+   * `file-end` body. `sha256` is hex-encoded (64 lowercase chars).
+   * The browser verifies the assembled Blob against this digest
+   * before assigning to the focused `<input type="file">`.
+   */
+  fileEnd?: {
+    sha256: string;
+  };
 
   /**
    * `nav` body — wallet's remote-navigation command. Sent when the

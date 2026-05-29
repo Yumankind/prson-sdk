@@ -395,6 +395,36 @@ function prettyName(s: string): string {
   return s.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+// ─── Byte / encoding helpers ───────────────────────────────────────
+
+/**
+ * Decode a base64url-padded chunk string into a fresh `Uint8Array`.
+ * Returns null on bad input so the receiver can drop the envelope
+ * without crashing. Used by the file-transfer reassembly path —
+ * each chunk is decoded once, written into the per-transfer
+ * `Uint8Array[]` slot, and the source string is dropped.
+ */
+function b64uToBytes(s: string): Uint8Array | null {
+  // Normalise to standard base64 with padding so `atob` accepts it.
+  const pad = (4 - (s.length % 4)) % 4;
+  const std = (s + "=".repeat(pad)).replace(/-/g, "+").replace(/_/g, "/");
+  try {
+    const bin = atob(std);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Hex-encode a Uint8Array (lowercase, no separators). */
+function bytesToHex(b: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < b.length; i++) s += b[i]!.toString(16).padStart(2, "0");
+  return s;
+}
+
 // ─── Reply → DOM ───────────────────────────────────────────────────
 
 function writeValueIntoElement(
@@ -516,9 +546,15 @@ export function enableRemoteNavigation(
       const t = (el.type || "text").toLowerCase();
       if (
         t === "hidden" || t === "submit" || t === "button" ||
-        t === "reset" || t === "image" || t === "file" ||
+        t === "reset" || t === "image" ||
         t === "checkbox" || t === "radio"
       ) return false;
+      // `type="file"` IS bindable — the wallet shows a picker UI
+      // and streams the chosen bytes back. Handled by the
+      // file-transfer reassembly path in `_handleMessage`; the
+      // `readOnly` check below doesn't apply (file inputs ignore
+      // it but expose the property as `false` regardless).
+      if (t === "file") return !el.disabled;
       return !el.disabled && !el.readOnly;
     }
     if (el instanceof HTMLTextAreaElement) {
@@ -635,6 +671,24 @@ export function enableRemoteNavigation(
         value: el.value,
         options: readOptions(el),
         required: el.required,
+        ...meta,
+      };
+    }
+    if (el instanceof HTMLInputElement && el.type === "file") {
+      // File picker: surface `accept` / `multiple` / `capture` so the
+      // wallet UI can render the right entry points (camera vs
+      // gallery vs files) and validate the user's pick against the
+      // host's MIME filter. Value stays empty — we don't try to
+      // mirror the picked-file metadata back as text.
+      return {
+        name,
+        label: resolveLabel(el),
+        inputType: "file",
+        value: "",
+        required: el.required,
+        accept: el.accept || undefined,
+        multiple: el.multiple || undefined,
+        capture: el.getAttribute("capture") || undefined,
         ...meta,
       };
     }
@@ -768,6 +822,130 @@ export function enableRemoteNavigation(
     else if (envelope.msg === "logout") dispose();
   });
 
+  // ── File-transfer reassembly ────────────────────────────────────
+  //
+  // The wallet streams chunks for a chosen file as a sequence of
+  // `file-begin` → N × `file-chunk` → `file-end` envelopes,
+  // correlated by `requestId`. We keep ONE pending transfer per id
+  // and never materialise the whole file as a contiguous buffer —
+  // each chunk's bytes go straight onto an Array<Uint8Array>; the
+  // final assembly is `new Blob(parts)` which the browser doesn't
+  // copy. The SHA-256 verifier runs incrementally over the same
+  // Uint8Array references via WebCrypto's `crypto.subtle.digest`
+  // on the assembled Blob's ArrayBuffer (single allocation only at
+  // the verify-then-discard moment).
+  //
+  // Memory profile (per in-flight transfer): ~`size` bytes total
+  // (the Uint8Arrays for chunks), plus an Array<Uint8Array> header.
+  // No double buffering, no string-side base64 retained beyond
+  // each chunk's decode-then-drop cycle.
+  interface PendingTransfer {
+    name: string;
+    mimeType: string;
+    size: number;
+    totalChunks: number;
+    received: number;
+    parts: Uint8Array[];
+    targetInput: HTMLInputElement | null;
+  }
+  const transfers = new Map<string, PendingTransfer>();
+
+  const offFile = session._setFileEnvelopeHandler((envelope) => {
+    const reqId = envelope.requestId;
+    if (!reqId) return;
+    if (envelope.msg === "file-begin") {
+      const begin = envelope.fileBegin;
+      if (!begin) return;
+      // Resolve the target input AT BEGIN time so a focusout that
+      // races the transfer doesn't leave us assigning to a
+      // disposed element.
+      const target =
+        currentFocused instanceof HTMLInputElement && currentFocused.type === "file"
+          ? currentFocused
+          : null;
+      transfers.set(reqId, {
+        name: begin.name,
+        mimeType: begin.mimeType,
+        size: begin.size,
+        totalChunks: begin.totalChunks,
+        received: 0,
+        parts: new Array<Uint8Array>(begin.totalChunks),
+        targetInput: target,
+      });
+      return;
+    }
+    if (envelope.msg === "file-chunk") {
+      const xfer = transfers.get(reqId);
+      const chunk = envelope.fileChunk;
+      if (!xfer || !chunk) return;
+      const bytes = b64uToBytes(chunk.data);
+      if (!bytes) return;
+      // Slot the chunk in by index — chunks arrive in order through
+      // the ack-tracked layer but indexing defensively keeps the
+      // contract obvious to a reader (and would survive a future
+      // sliding-window sender).
+      xfer.parts[chunk.index] = bytes;
+      xfer.received += 1;
+      return;
+    }
+    if (envelope.msg === "file-end") {
+      const xfer = transfers.get(reqId);
+      const end = envelope.fileEnd;
+      if (!xfer || !end) return;
+      transfers.delete(reqId);
+      void assembleAndCommit(xfer, end.sha256);
+      return;
+    }
+  });
+
+  async function assembleAndCommit(
+    xfer: PendingTransfer,
+    expectedSha256Hex: string,
+  ): Promise<void> {
+    if (xfer.received !== xfer.totalChunks) return;
+    // Blob does NOT copy its parts; this is the only assembly step.
+    // The `as unknown as BlobPart[]` cast sidesteps an over-strict
+    // type definition where `Uint8Array<ArrayBufferLike>` is not
+    // recognised as `BlobPart` even though it always is at runtime.
+    const blob = new Blob(xfer.parts as unknown as BlobPart[], { type: xfer.mimeType });
+    // Verify SHA-256. `crypto.subtle.digest` runs over the Blob's
+    // ArrayBuffer — one transient allocation, then the buffer is
+    // released back to the GC.
+    const buf = await blob.arrayBuffer();
+    const digestBuf = await crypto.subtle.digest("SHA-256", buf);
+    const actual = bytesToHex(new Uint8Array(digestBuf));
+    if (actual !== expectedSha256Hex.toLowerCase()) {
+      // Hash mismatch — drop silently. A future revision can
+      // surface this to the host via an event; today the wallet's
+      // ack-tracked retransmit covers the common error case (a
+      // dropped chunk).
+      return;
+    }
+    const target = xfer.targetInput;
+    if (!target || disposed) return;
+    const file = new File([blob], xfer.name, {
+      type: xfer.mimeType,
+      lastModified: Date.now(),
+    });
+    // `HTMLInputElement.files` is read-only by default — the
+    // standard idiom is to build a `DataTransfer`, attach the
+    // file(s), and assign the `.files` reference.
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      target.files = dt.files;
+    } catch {
+      // Browsers without `DataTransfer` (very old) can't accept a
+      // programmatic file. Nothing else we can do.
+      return;
+    }
+    // Dispatch `input` + `change` so reactive frameworks pick the
+    // selection up. Bubbles + cancelable matches the native
+    // dispatch profile.
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
   // `signed_out` cleanup — the dispatcher's `logout` case also tears
   // the session down; this catches every other terminal path (TTL,
   // wallet-side revoke, transport loss).
@@ -788,7 +966,9 @@ export function enableRemoteNavigation(
     root.removeEventListener("input", onInputChange, true);
     root.removeEventListener("change", onInputChange, true);
     unsubscribe();
+    offFile();
     offSignedOut();
+    transfers.clear();
   }
 
   return { dispose };

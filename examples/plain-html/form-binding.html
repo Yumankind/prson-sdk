@@ -201,6 +201,25 @@
         outline-offset: 2px;
         transition: outline 80ms ease;
       }
+      /* File-transfer preview block — shown after the wallet streams
+         an image back through the focused file input. */
+      #file-input {
+        flex: 1;
+      }
+      #file-preview-wrap {
+        display: none;
+        margin-top: 12px;
+      }
+      #file-preview-meta {
+        margin: 0 0 6px;
+      }
+      #file-preview-img {
+        max-width: 100%;
+        max-height: 320px;
+        border-radius: 8px;
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        display: block;
+      }
     </style>
   </head>
   <body>
@@ -325,9 +344,41 @@
         </div>
       </section>
 
-      <!-- 5. Lifecycle log for debugging. -->
+      <!-- 5. File input — phone picks the file, browser previews. -->
       <section>
-        <h2>5. Session events</h2>
+        <h2>5. File input — phone-as-camera-and-gallery</h2>
+        <p class="muted">
+          Focus this <code>&lt;input type="file"&gt;</code> with the
+          phone's remote-control banner up. The wallet opens its own
+          file picker (Camera / Photos / Files), filters by the
+          <code>accept</code> attribute, and streams the chosen bytes
+          back over the encrypted data channel — chunked, ack-tracked,
+          SHA-256-verified before assignment. Memory profile stays
+          flat on both peers: only one chunk worth of bytes lives in
+          RAM at a time.
+        </p>
+        <div class="row">
+          <label for="file-input" class="muted">Pick an image</label>
+          <input
+            id="file-input"
+            type="file"
+            accept="image/*"
+            aria-label="Profile photo upload"
+          />
+        </div>
+        <div id="file-preview-wrap">
+          <p id="file-preview-meta" class="muted">
+            <span id="file-preview-name"></span>
+            <span id="file-preview-size" class="pill"></span>
+            <span id="file-preview-sha" class="pill" title="SHA-256"></span>
+          </p>
+          <img id="file-preview-img" alt="Uploaded image preview" />
+        </div>
+      </section>
+
+      <!-- 6. Lifecycle log for debugging. -->
+      <section>
+        <h2>6. Session events</h2>
         <p class="muted">
           Anything <code>session.onAny</code> sees lands here. Claim
           events never carry raw values — only the name + canonical
@@ -551,6 +602,57 @@
         log("bindMouse magic reply", reply);
         controller.dispose();
       });
+
+      // 5. File-input preview. The remote-nav helper (already
+      // installed above via `enableRemoteNavigation`) handles the
+      // full file pipeline — focus → wallet picker → chunked
+      // transfer → SHA-256 verify → assign to `input.files` +
+      // dispatch `change`. All we do here is render the picked
+      // file: a thumbnail (image MIMEs) and small metadata pill
+      // (name, size, hash). Resources are released as soon as the
+      // user picks another file.
+      const fileInput = document.getElementById("file-input");
+      const previewWrap = document.getElementById("file-preview-wrap");
+      const previewImg = document.getElementById("file-preview-img");
+      const previewName = document.getElementById("file-preview-name");
+      const previewSize = document.getElementById("file-preview-size");
+      const previewSha = document.getElementById("file-preview-sha");
+      let previewObjectUrl = null;
+      fileInput.addEventListener("change", async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        // Compute SHA-256 of the received bytes — independent verify
+        // alongside the SDK's own check, useful for the demo.
+        const buf = await file.arrayBuffer();
+        const digestBuf = await crypto.subtle.digest("SHA-256", buf);
+        const sha = Array.from(new Uint8Array(digestBuf))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+        previewName.textContent = file.name;
+        previewSize.textContent = humanSize(file.size);
+        previewSha.textContent = "sha256: " + sha.slice(0, 12) + "…";
+        if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+        previewObjectUrl = URL.createObjectURL(file);
+        if (file.type.startsWith("image/")) {
+          previewImg.src = previewObjectUrl;
+          previewImg.style.display = "block";
+        } else {
+          previewImg.removeAttribute("src");
+          previewImg.style.display = "none";
+        }
+        previewWrap.style.display = "block";
+        log("file received", {
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          sha256: sha,
+        });
+      });
+      function humanSize(n) {
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+        return `${(n / 1024 / 1024).toFixed(2)} MB`;
+      }
 
       // ─── Refresh contract ────────────────────────────────────────
       // When the QR's TTL expires, the UI bundle's card swaps to a

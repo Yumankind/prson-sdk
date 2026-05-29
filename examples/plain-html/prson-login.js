@@ -2776,6 +2776,15 @@ var PrsonLoginSession = class {
      */
     this._ambientMouseHandler = null;
     /**
+     * File-transfer envelope handler. [`enableRemoteNavigation`]
+     * installs one of these to receive `file-begin` / `file-chunk` /
+     * `file-end` envelopes and reassemble the bytes into a `File`
+     * the focused `<input type="file">` accepts. The session layer
+     * just dispatches — assembly logic lives in `bind.ts` so the
+     * DOM dependency stays out of the protocol layer.
+     */
+    this._fileEnvelopeHandler = null;
+    /**
      * Remote-navigation listener — installed by
      * [`enableRemoteNavigation`]. Receives every inbound `nav`,
      * `value`, and `logout` envelope. Only one listener at a time
@@ -3103,6 +3112,23 @@ var PrsonLoginSession = class {
     this._ambientMouseHandler = cb;
     return () => {
       if (this._ambientMouseHandler === cb) this._ambientMouseHandler = null;
+    };
+  }
+  /**
+   * Install the file-envelope handler. Mirrors
+   * [`_setAmbientMouseHandler`] — only one handler at a time;
+   * [`enableRemoteNavigation`] owns it during its lifetime and
+   * tears it down on disposal so the next mount can install a
+   * fresh one. The handler receives `file-begin` / `file-chunk` /
+   * `file-end` envelopes in arrival order; assembly + DOM
+   * dispatch lives in [`bind.ts`].
+   *
+   * @internal
+   */
+  _setFileEnvelopeHandler(cb) {
+    this._fileEnvelopeHandler = cb;
+    return () => {
+      if (this._fileEnvelopeHandler === cb) this._fileEnvelopeHandler = null;
     };
   }
   /**
@@ -3493,6 +3519,16 @@ var PrsonLoginSession = class {
         if (this._remoteNavListener && typeof envelope.value === "string") {
           try {
             this._remoteNavListener({ msg: "value", value: envelope.value });
+          } catch {
+          }
+        }
+        return;
+      case "file-begin":
+      case "file-chunk":
+      case "file-end":
+        if (this._fileEnvelopeHandler) {
+          try {
+            this._fileEnvelopeHandler(envelope);
           } catch {
           }
         }
@@ -4603,6 +4639,23 @@ function nameForElement(el, index) {
 function prettyName(s) {
   return s.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
 }
+function b64uToBytes(s) {
+  const pad = (4 - s.length % 4) % 4;
+  const std = (s + "=".repeat(pad)).replace(/-/g, "+").replace(/_/g, "/");
+  try {
+    const bin = atob(std);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+function bytesToHex(b) {
+  let s = "";
+  for (let i = 0; i < b.length; i++) s += b[i].toString(16).padStart(2, "0");
+  return s;
+}
 function writeValueIntoElement(el, value) {
   if (value === void 0 || value === null) return;
   const str = String(value);
@@ -4643,7 +4696,8 @@ function enableRemoteNavigation(session, opts) {
   function isBindable(el) {
     if (el instanceof HTMLInputElement) {
       const t = (el.type || "text").toLowerCase();
-      if (t === "hidden" || t === "submit" || t === "button" || t === "reset" || t === "image" || t === "file" || t === "checkbox" || t === "radio") return false;
+      if (t === "hidden" || t === "submit" || t === "button" || t === "reset" || t === "image" || t === "checkbox" || t === "radio") return false;
+      if (t === "file") return !el.disabled;
       return !el.disabled && !el.readOnly;
     }
     if (el instanceof HTMLTextAreaElement) {
@@ -4709,6 +4763,19 @@ function enableRemoteNavigation(session, opts) {
         value: el.value,
         options: readOptions(el),
         required: el.required,
+        ...meta
+      };
+    }
+    if (el instanceof HTMLInputElement && el.type === "file") {
+      return {
+        name,
+        label: resolveLabel(el),
+        inputType: "file",
+        value: "",
+        required: el.required,
+        accept: el.accept || void 0,
+        multiple: el.multiple || void 0,
+        capture: el.getAttribute("capture") || void 0,
         ...meta
       };
     }
@@ -4797,6 +4864,69 @@ function enableRemoteNavigation(session, opts) {
     else if (envelope.msg === "value") applyValue(envelope.value);
     else if (envelope.msg === "logout") dispose();
   });
+  const transfers = /* @__PURE__ */ new Map();
+  const offFile = session._setFileEnvelopeHandler((envelope) => {
+    const reqId = envelope.requestId;
+    if (!reqId) return;
+    if (envelope.msg === "file-begin") {
+      const begin = envelope.fileBegin;
+      if (!begin) return;
+      const target = currentFocused instanceof HTMLInputElement && currentFocused.type === "file" ? currentFocused : null;
+      transfers.set(reqId, {
+        name: begin.name,
+        mimeType: begin.mimeType,
+        size: begin.size,
+        totalChunks: begin.totalChunks,
+        received: 0,
+        parts: new Array(begin.totalChunks),
+        targetInput: target
+      });
+      return;
+    }
+    if (envelope.msg === "file-chunk") {
+      const xfer = transfers.get(reqId);
+      const chunk = envelope.fileChunk;
+      if (!xfer || !chunk) return;
+      const bytes = b64uToBytes(chunk.data);
+      if (!bytes) return;
+      xfer.parts[chunk.index] = bytes;
+      xfer.received += 1;
+      return;
+    }
+    if (envelope.msg === "file-end") {
+      const xfer = transfers.get(reqId);
+      const end = envelope.fileEnd;
+      if (!xfer || !end) return;
+      transfers.delete(reqId);
+      void assembleAndCommit(xfer, end.sha256);
+      return;
+    }
+  });
+  async function assembleAndCommit(xfer, expectedSha256Hex) {
+    if (xfer.received !== xfer.totalChunks) return;
+    const blob = new Blob(xfer.parts, { type: xfer.mimeType });
+    const buf = await blob.arrayBuffer();
+    const digestBuf = await crypto.subtle.digest("SHA-256", buf);
+    const actual = bytesToHex(new Uint8Array(digestBuf));
+    if (actual !== expectedSha256Hex.toLowerCase()) {
+      return;
+    }
+    const target = xfer.targetInput;
+    if (!target || disposed) return;
+    const file = new File([blob], xfer.name, {
+      type: xfer.mimeType,
+      lastModified: Date.now()
+    });
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      target.files = dt.files;
+    } catch {
+      return;
+    }
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+  }
   const offSignedOut = session.on("signed_out", () => dispose());
   root.addEventListener("focusin", onFocusIn, true);
   root.addEventListener("focusout", onFocusOut, true);
@@ -4812,7 +4942,9 @@ function enableRemoteNavigation(session, opts) {
     root.removeEventListener("input", onInputChange, true);
     root.removeEventListener("change", onInputChange, true);
     unsubscribe();
+    offFile();
     offSignedOut();
+    transfers.clear();
   }
   return { dispose };
 }

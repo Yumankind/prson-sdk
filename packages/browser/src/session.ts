@@ -264,6 +264,16 @@ export class PrsonLoginSession {
   private _ambientMouseHandler: ((mouse: NonNullable<DecryptedEnvelope["mouse"]>) => void) | null = null;
 
   /**
+   * File-transfer envelope handler. [`enableRemoteNavigation`]
+   * installs one of these to receive `file-begin` / `file-chunk` /
+   * `file-end` envelopes and reassemble the bytes into a `File`
+   * the focused `<input type="file">` accepts. The session layer
+   * just dispatches — assembly logic lives in `bind.ts` so the
+   * DOM dependency stays out of the protocol layer.
+   */
+  private _fileEnvelopeHandler: ((envelope: DecryptedEnvelope) => void) | null = null;
+
+  /**
    * Remote-navigation listener — installed by
    * [`enableRemoteNavigation`]. Receives every inbound `nav`,
    * `value`, and `logout` envelope. Only one listener at a time
@@ -645,6 +655,18 @@ export class PrsonLoginSession {
           hasNext?: boolean;
           isLastInForm?: boolean;
           isButton?: boolean;
+          /** File-input attributes. Present only when the focused
+           *  element is `<input type="file">`; drives the wallet's
+           *  picker UI (camera vs gallery vs files filtered by
+           *  MIME). `accept` is the raw `accept` attribute string
+           *  (e.g. `"image/*,application/pdf"`); the wallet
+           *  normalises it. `multiple` enables multi-select on the
+           *  picker. `capture` (`"user"` / `"environment"`) hints
+           *  which camera the host expects when the user opens the
+           *  camera mode. */
+          accept?: string;
+          multiple?: boolean;
+          capture?: string;
         }
       | null,
   ): Promise<void> {
@@ -744,6 +766,26 @@ export class PrsonLoginSession {
     this._ambientMouseHandler = cb;
     return () => {
       if (this._ambientMouseHandler === cb) this._ambientMouseHandler = null;
+    };
+  }
+
+  /**
+   * Install the file-envelope handler. Mirrors
+   * [`_setAmbientMouseHandler`] — only one handler at a time;
+   * [`enableRemoteNavigation`] owns it during its lifetime and
+   * tears it down on disposal so the next mount can install a
+   * fresh one. The handler receives `file-begin` / `file-chunk` /
+   * `file-end` envelopes in arrival order; assembly + DOM
+   * dispatch lives in [`bind.ts`].
+   *
+   * @internal
+   */
+  _setFileEnvelopeHandler(
+    cb: ((envelope: DecryptedEnvelope) => void) | null,
+  ): Unsubscribe {
+    this._fileEnvelopeHandler = cb;
+    return () => {
+      if (this._fileEnvelopeHandler === cb) this._fileEnvelopeHandler = null;
     };
   }
 
@@ -1271,6 +1313,24 @@ export class PrsonLoginSession {
             this._remoteNavListener({ msg: "value", value: envelope.value });
           } catch {
             /* swallow */
+          }
+        }
+        return;
+      case "file-begin":
+      case "file-chunk":
+      case "file-end":
+        // File-transfer envelopes flow through the remote-nav
+        // helper's file receiver — bytes are reassembled into a
+        // `File` object that the focused `<input type="file">`
+        // accepts. Without the helper mounted these envelopes are
+        // silently dropped (the host page never asked for remote
+        // file input).
+        if (this._fileEnvelopeHandler) {
+          try {
+            this._fileEnvelopeHandler(envelope);
+          } catch {
+            /* swallow — one buggy receiver shouldn't kill the
+             * channel for everyone */
           }
         }
         return;
