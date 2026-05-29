@@ -111,6 +111,30 @@ function _unrefTimer(
   if (typeof maybe.unref === "function") maybe.unref();
 }
 
+/**
+ * Map a transport-layer close reason string onto the SDK's typed
+ * [ExpiryReason]. The transport emits a small vocabulary:
+ *
+ *   * `"ttl_reached"`        — Worker DO alarm fired at session TTL
+ *   * `"wallet_signed_out"`  — wallet sent a `peer-gone` signaling
+ *                              message (revoked) before the wire
+ *                              died
+ *   * `"network_loss"`       — anything else (signaling WS dropped
+ *                              for a transport reason, data channel
+ *                              closed on its own, etc.)
+ *
+ * Anything we don't recognise degrades to `network_loss` —
+ * preserving the host's invariant that a `signed_out` event always
+ * carries a known reason.
+ */
+function _mapTransportCloseReason(reason: string): ExpiryReason {
+  if (reason === "ttl_reached") return "ttl_reached";
+  if (reason === "wallet_signed_out") return "wallet_signed_out";
+  if (reason === "user_revoked") return "user_revoked";
+  if (reason === "credential_revoked") return "credential_revoked";
+  return "network_loss";
+}
+
 function uuidv4(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -378,6 +402,21 @@ export class PrsonLoginSession {
     this._avatar = opts.initialAvatar ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
+    // Transport teardown fan-out → `signed_out`. The credential's
+    // exp timer (`_armExpiryTimer`) covers credential-side TTL, but
+    // the Worker's session DO has a separate, MUCH shorter TTL —
+    // when its alarm fires, both signaling WSes close with code
+    // 4000 / reason `ttl_reached`, the data channel goes silent,
+    // and without this hook the host would keep showing "signed
+    // in" forever. The transport collapses every termination
+    // (signaling close, peer-gone, DC close) onto one notification;
+    // we map the reason string to the SDK's `ExpiryReason` union
+    // and tear down.
+    this._transport.onClose((reason) => {
+      if (this._closed) return;
+      const mapped = _mapTransportCloseReason(reason);
+      this._teardown(mapped);
+    });
     // Start the wallet→browser liveness loop. The wallet runs the
     // same loop on its side; either peer's ping triggers a pong on
     // the other. Both sides independently track their own RTT view.

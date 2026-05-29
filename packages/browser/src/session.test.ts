@@ -36,8 +36,10 @@ import type { EphemeralKeys } from "./crypto.js";
 function makeTransport(): Transport {
   return {
     onMessage: () => {},
+    onClose: () => {},
     send: () => {},
     awaitFirstMessage: async () => "" as never,
+    awaitNextMessage: async () => "" as never,
     close: () => {},
   } as unknown as Transport;
 }

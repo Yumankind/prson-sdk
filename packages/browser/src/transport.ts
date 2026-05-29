@@ -81,6 +81,10 @@ export async function establishTransport(opts: {
       }
     } else if (m.msg === "peer-gone") {
       // Wallet vanished — close the data channel so the host knows.
+      // Fire the explicit teardown FIRST with a wallet-side reason
+      // so the SDK maps it to `wallet_signed_out` (the dc close
+      // alone would degrade to the generic `network_loss`).
+      fireClose("wallet_signed_out");
       try { dc.close(); } catch { /* */ }
     }
   });
@@ -148,6 +152,17 @@ export async function establishTransport(opts: {
     },
     onMessage(cb) {
       allListeners.push(cb);
+    },
+    onClose(cb) {
+      // Late subscribers still get the notification: if the close
+      // already fired, dispatch on the next microtask so the
+      // subscriber's await chain sees a single deterministic
+      // ordering (analogous to `signed_in` being microtask-deferred).
+      if (closeFired) {
+        queueMicrotask(() => cb("network_loss"));
+      } else {
+        closeListeners.push(cb);
+      }
     },
     send(raw: string) {
       if (dc.readyState === "open") dc.send(raw);
