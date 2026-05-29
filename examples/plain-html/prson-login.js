@@ -4969,6 +4969,13 @@ function bindMouse(session, opts) {
       case "show": {
         const el2 = ensureCursor();
         el2.style.opacity = "1";
+        if (typeof window !== "undefined") {
+          pos = {
+            x: window.innerWidth / 2,
+            y: window.innerHeight / 2
+          };
+          applyCursorPosition(el2, pos);
+        }
         closePointPhoneOverlay();
         break;
       }

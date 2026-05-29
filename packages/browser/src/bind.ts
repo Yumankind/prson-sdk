@@ -1200,8 +1200,23 @@ export function bindMouse(
         // Wand pose restored — bring the cursor back and clear the
         // "point your phone" hint regardless of which trigger
         // (timeout / mousemove / show) wins the race.
+        //
+        // **Re-centre the cursor.** After a pause the user has lost
+        // mental track of where the cursor was; pinning it at the
+        // viewport centre gives them a known starting point and
+        // matches the "wand on / wand off" mental model (each
+        // session begins at the middle). Position resets via
+        // `applyCursorPosition` so subsequent move frames integrate
+        // from the centre.
         const el = ensureCursor();
         el.style.opacity = "1";
+        if (typeof window !== "undefined") {
+          pos = {
+            x: window.innerWidth / 2,
+            y: window.innerHeight / 2,
+          };
+          applyCursorPosition(el, pos);
+        }
         closePointPhoneOverlay();
         break;
       }
