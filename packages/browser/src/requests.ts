@@ -286,6 +286,17 @@ export class RequestController {
    */
   enqueue(timeoutMs: number): { requestId: string; promise: Promise<LoginResponse> } {
     const requestId = newUuid();
+    // `setTimeout` accepts up to int32-max milliseconds (~24.8 days)
+    // before silently overflowing and firing on the next tick. Any
+    // caller passing a credential-exp-derived budget (90-day VC
+    // credentials yield ~7.8 billion ms) would otherwise see an
+    // immediate `error: "timeout"`. Clamp defensively here so the
+    // contract holds regardless of caller hygiene.
+    const MAX_SAFE_TIMEOUT = 2_147_483_000;
+    const safeTimeoutMs = Math.min(
+      Math.max(0, timeoutMs),
+      MAX_SAFE_TIMEOUT,
+    );
     const promise = new Promise<LoginResponse>((resolve) => {
       if (this._closed) {
         resolve({ ok: false, error: "session-closed" });
@@ -299,7 +310,7 @@ export class RequestController {
           if (!p) return;
           this._pending.delete(requestId);
           resolve({ ok: false, error: "timeout" });
-        }, timeoutMs),
+        }, safeTimeoutMs),
       };
       this._pending.set(requestId, entry);
     });

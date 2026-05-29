@@ -1162,12 +1162,18 @@ export function bindMouse(
       // `response` so we don't need to manage that side ourselves.
       // Mouse requests stay open as long as the user is driving the
       // wallet's controller — that can easily be longer than the
-      // generic `request()` default of 60 s. Default to the session
-      // hard expiry so the request only times out when there's
-      // genuinely nothing to wait for, and let callers override.
+      // generic `request()` default of 60 s. Pick the smaller of
+      // (a) the session's hard expiry and (b) the `setTimeout`
+      // int32 ceiling (~24.8 days). The credential's exp can sit
+      // weeks out, but `setTimeout(fn, > 2^31-1)` overflows and
+      // fires on the next tick — exactly the bug that caused
+      // `bindMouse` to resolve with `error: "timeout"` the moment
+      // it was awaited.
+      const MAX_SAFE_TIMEOUT = 2_147_483_000;
+      const credentialBudget = session.expiresAt - Date.now() + 1_000;
       const sessionEndMs = Math.max(
         60_000,
-        session.expiresAt - Date.now() + 1_000,
+        Math.min(credentialBudget, MAX_SAFE_TIMEOUT),
       );
       const reply = await session.requestMouse(
         { kind: "mouse", mode, reason: callerOpts?.reason ?? opts?.reason },

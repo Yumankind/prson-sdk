@@ -2644,6 +2644,11 @@ var RequestController = class {
    */
   enqueue(timeoutMs) {
     const requestId = newUuid();
+    const MAX_SAFE_TIMEOUT = 2147483e3;
+    const safeTimeoutMs = Math.min(
+      Math.max(0, timeoutMs),
+      MAX_SAFE_TIMEOUT
+    );
     const promise = new Promise((resolve) => {
       if (this._closed) {
         resolve({ ok: false, error: "session-closed" });
@@ -2657,7 +2662,7 @@ var RequestController = class {
           if (!p) return;
           this._pending.delete(requestId);
           resolve({ ok: false, error: "timeout" });
-        }, timeoutMs)
+        }, safeTimeoutMs)
       };
       this._pending.set(requestId, entry);
     });
@@ -4803,9 +4808,11 @@ function bindMouse(session, opts) {
     async request(callerOpts) {
       if (disposed) return { ok: false, error: "session-closed" };
       ensureCursor();
+      const MAX_SAFE_TIMEOUT = 2147483e3;
+      const credentialBudget = session.expiresAt - Date.now() + 1e3;
       const sessionEndMs = Math.max(
         6e4,
-        session.expiresAt - Date.now() + 1e3
+        Math.min(credentialBudget, MAX_SAFE_TIMEOUT)
       );
       const reply = await session.requestMouse(
         { kind: "mouse", mode, reason: callerOpts?.reason ?? opts?.reason },
