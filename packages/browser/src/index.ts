@@ -136,8 +136,11 @@ export const KNOWN_VCTS = [
  *  KB-JWT fields; no notary signature. */
 export const ANONYMOUS_WALLET_VCT =
   "https://app.prson.net/credentials/anonymous-wallet/v1";
-export const DEFAULT_TTL_MINUTES = 10;
-export const MAX_TTL_MINUTES = 15;
+// Testing pass: 2-minute sessions surface expiry / renewal bugs
+// quickly. Production target is 10 / 15. Keep these in sync with
+// `SESSION_TTL_SECONDS` in `cloudflare-workers/signaling-worker/src/index.ts`.
+export const DEFAULT_TTL_MINUTES = 2;
+export const MAX_TTL_MINUTES = 2;
 /** Cloudflare Worker single-API-surface base URL. Override in dev with
  *  `PrsonLogin.signIn({ ... signalingBase: "https://localhost:8787" })`
  *  via your own wrapper if you've stood up a local Worker. */
