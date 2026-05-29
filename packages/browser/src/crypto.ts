@@ -87,6 +87,15 @@ export type DecryptedEnvelope = {
      * is in the background. Body: `paused: boolean`.
      */
     | "control-status"
+    /**
+     * Browser→wallet "I'm going away" signal. Fired synchronously
+     * from `window.pagehide` (refresh, tab close, navigation)
+     * before the transport collapses, so the wallet can close the
+     * session immediately instead of waiting for the slower
+     * `peer-gone` / WS-close pathway. Body: `reason: string`
+     * (free-form short code, currently always `"page_unload"`).
+     */
+    | "browser-revoke"
     /** Transport-layer reliability primitive: the peer's confirmation
      *  that the envelope with id [ackOf] was received. The session
      *  layer auto-emits these for inbound messages carrying an `id`

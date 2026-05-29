@@ -2834,6 +2834,13 @@ var PrsonLoginSession = class {
     this._connectionStatus = "unknown";
     this._lastRttMs = null;
     this._connectionListeners = /* @__PURE__ */ new Set();
+    /**
+     * `pagehide` handler reference. Held so we can deregister at
+     * teardown without anchoring `this` to the global listener
+     * forever — important because the SDK can outlive multiple
+     * sign-in / sign-out cycles in a single tab.
+     */
+    this._onPageHide = null;
     this._cnf = opts.cnf;
     this._expiresAt = opts.credential.expiresAt;
     this._transport = opts.transport;
@@ -2845,6 +2852,7 @@ var PrsonLoginSession = class {
     this._displayName = opts.initialDisplayName ?? null;
     this._avatar = opts.initialAvatar ?? null;
     this._armExpiryTimer();
+    this._installUnloadGuard();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
     this._transport.onClose((reason) => {
       if (this._closed) return;
@@ -3017,6 +3025,46 @@ var PrsonLoginSession = class {
       msg: "focus",
       focus
     });
+  }
+  /**
+   * Install a `pagehide` listener that fires a synchronous
+   * `browser-revoke` envelope at the wallet right before the tab
+   * closes / refreshes / navigates away. Without this the wallet
+   * has to wait for the slower transport-collapse pathway
+   * (`peer-gone` over the signaling WS + ICE failure on the data
+   * channel) to learn the browser is gone — long enough for the
+   * connection-status dot to oscillate and any in-flight ack
+   * promises to time out.
+   *
+   * `pagehide` is preferred over `beforeunload` because:
+   *   * it fires for bfcache evictions (back/forward navigation
+   *     on iOS Safari), tab closes, AND refreshes
+   *   * `beforeunload` is increasingly restricted by browsers
+   *     for non-blocking-prompt use
+   *
+   * The envelope itself rides through the same NaCl box as every
+   * other browser→wallet message. We can't await the ack — the
+   * page is being torn down — so this is a true fire-and-forget;
+   * the wallet's [LoginSession.inbound] handler treats receipt
+   * as the trigger to close.
+   */
+  _installUnloadGuard() {
+    if (typeof window === "undefined") return;
+    this._onPageHide = (_e) => {
+      if (this._closed || !this._walletSessionPk) return;
+      const body = JSON.stringify({
+        v: "prson_vp_v1",
+        msg: "browser-revoke",
+        issuedAt: Math.floor(Date.now() / 1e3),
+        domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+        reason: "page_unload"
+      });
+      try {
+        this._transport.send(boxToWallet(this._walletSessionPk, body));
+      } catch {
+      }
+    };
+    window.addEventListener("pagehide", this._onPageHide);
   }
   /**
    * Browser→wallet pause-state notification. The wallet's mouse
@@ -3569,6 +3617,10 @@ var PrsonLoginSession = class {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     if (this._pingTimer) clearInterval(this._pingTimer);
     if (this._offlineTimer) clearTimeout(this._offlineTimer);
+    if (this._onPageHide && typeof window !== "undefined") {
+      window.removeEventListener("pagehide", this._onPageHide);
+      this._onPageHide = null;
+    }
     for (const p of this._pendingAcks.values()) {
       if (p.timer) clearTimeout(p.timer);
     }
