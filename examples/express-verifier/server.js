@@ -16,10 +16,29 @@
 //      different identity.
 
 import express from "express";
-import { verifyPresentation } from "@prson/login-verifier";
+import {
+  verifyPresentation,
+  verifySignedFragment,
+  verifyFragmentCredential,
+} from "@prson/login-verifier";
 
 const app = express();
 app.use(express.json({ limit: "32kb" }));
+
+// Permissive CORS for the demo — the plain-html example serves on a
+// different localhost port, so the browser blocks POST without it. In
+// production you'd lock this down to your actual host origin instead
+// of `*`.
+app.use((req, res, next) => {
+  res.setHeader("access-control-allow-origin", "*");
+  res.setHeader("access-control-allow-headers", "content-type");
+  res.setHeader("access-control-allow-methods", "POST, OPTIONS");
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 
 app.post("/verify", async (req, res) => {
   const { presentation, audience, nonce } = req.body ?? {};
@@ -64,8 +83,60 @@ app.post("/verify", async (req, res) => {
   });
 });
 
+// POST /verify-fragment { fragment } — verifies a single Prson predicate
+// (signed property fragment). Accepts both the legacy native shape AND
+// the JWT-based formats (vc+jwt / vc+sd-jwt) — the body's wire form
+// tells us which verifier to call. Returns the verified predicate, or
+// a typed failure reason.
+//
+// Sample bodies:
+//
+//   Native (object):
+//     { "fragment": { "fragmentId": "age_gte_18", "value": true,
+//                     "propertyHash": "...", "identityId": "...",
+//                     "signedAt": "...", "expiresAt": "...",
+//                     "signature": "<base64>", "kid": "2026-05" } }
+//
+//   JWT-based (compact string):
+//     { "fragment": "eyJ0eXAiOiJ2Yytqd3QiLCJhbGc..." }
+//     { "fragment": "eyJ0eXAiOiJzZC1qd3QiLCJhbGc...~<disclosure>~" }
+//
+// In a real deployment you'd also bind the fragment to the request
+// being made (e.g. confirm propertyHash matches the user-on-record, log
+// the predicate decision for audit, enforce per-fragment business
+// rules). This route is the verification primitive only.
+app.post("/verify-fragment", async (req, res) => {
+  const { fragment } = req.body ?? {};
+  if (fragment == null) {
+    res.status(400).json({ ok: false, reason: "malformed", detail: "fragment required" });
+    return;
+  }
+  const result =
+    typeof fragment === "string"
+      ? await verifyFragmentCredential(fragment)
+      : await verifySignedFragment(fragment);
+  if (!result.ok) {
+    res.status(400).json({ ok: false, reason: result.reason, detail: result.detail ?? null });
+    return;
+  }
+  res.status(200).json({
+    ok: true,
+    format: result.format,
+    fragmentId: result.fragmentId,
+    value: result.value,
+    propertyHash: result.propertyHash,
+    propertyType: result.propertyType,
+    identityId: result.identityId,
+    signedAt: result.signedAt,
+    expiresAt: result.expiresAt,
+    description: result.description,
+    kid: result.kid,
+  });
+});
+
 const PORT = Number(process.env.PORT ?? 8080);
 app.listen(PORT, () => {
   console.log(`Express verifier listening on http://localhost:${PORT}`);
-  console.log(`POST /verify { presentation, audience, nonce }`);
+  console.log(`POST /verify          { presentation, audience, nonce }`);
+  console.log(`POST /verify-fragment { fragment }   // object or compact JWT string`);
 });

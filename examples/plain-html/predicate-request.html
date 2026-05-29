@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in with Prson — predicate (VC) request demo</title>
+    <style>
+      /*
+       * Demo: after sign-in, ask the wallet to mint a SIGNED PREDICATE
+       * (a property "fragment"). Pick the wire format the verifier
+       * speaks — native (RSA-flat), vc+jwt, or vc+sd-jwt — and hand
+       * the resulting credential to a backend that calls
+       * `verifySignedFragment` / `verifyFragmentCredential` from
+       * `@prson/login-verifier`.
+       *
+       * Wire: `session.request({ kind: "fragment-check", fragmentName,
+       *                          format, reason })`.
+       *
+       * Companion server route: `POST /verify-fragment` in the
+       * `express-verifier` example (../express-verifier/server.js).
+       *
+       * Run:
+       *   1. cd login-sdk/examples/express-verifier && npm install && npm start
+       *   2. cd login-sdk/examples/plain-html && npx serve .
+       *   3. Open this page in a browser, scan the QR with the Prson
+       *      mobile wallet, then click "Request predicate" with the
+       *      verifier base URL filled in (default http://localhost:8080).
+       */
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+        --bg: #fafafa;
+        --fg: #111;
+        --muted: #6b7280;
+        --card: #ffffff;
+        --border: rgba(0, 0, 0, 0.08);
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.05);
+        --accent: #111;
+        --accent-on: #ffffff;
+        --ok: #047857;
+        --warn: #b45309;
+        --err: #b91c1c;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b0b0c;
+          --fg: #f5f5f7;
+          --muted: #9ca3af;
+          --card: #18181b;
+          --border: rgba(255, 255, 255, 0.08);
+          --shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+          --accent: #f5f5f7;
+          --accent-on: #0b0b0c;
+          --ok: #34d399;
+          --warn: #fbbf24;
+          --err: #f87171;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        min-height: 100vh;
+        padding: 48px 20px;
+        display: flex;
+        justify-content: center;
+      }
+      main {
+        width: 100%;
+        max-width: 760px;
+      }
+      h1 { font-weight: 600; margin: 0 0 8px 0; }
+      h2 { font-weight: 600; margin: 28px 0 8px 0; font-size: 18px; }
+      p { color: var(--muted); margin: 0 0 16px 0; line-height: 1.5; }
+      code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: var(--border); padding: 1px 5px; border-radius: 4px; }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: var(--shadow);
+        margin-bottom: 16px;
+      }
+      label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+      input[type="text"], select {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        font-size: 14px;
+        font-family: inherit;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+      .row > div { flex: 1 1 200px; min-width: 0; }
+      button {
+        background: var(--accent);
+        color: var(--accent-on);
+        border: none;
+        border-radius: 10px;
+        padding: 10px 18px;
+        font-size: 14px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      pre {
+        margin: 0;
+        padding: 12px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        font-size: 11px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-height: 280px;
+        overflow: auto;
+      }
+      .status { font-size: 13px; margin-top: 8px; }
+      .status.ok { color: var(--ok); }
+      .status.warn { color: var(--warn); }
+      .status.err { color: var(--err); }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Predicate request demo</h1>
+      <p>
+        Sign in with the Prson wallet, then request a signed predicate
+        (e.g. <code>age_gte_18</code>) in whichever wire format your
+        verifier speaks. The credential is verified by the companion
+        Express server in <code>../express-verifier</code>.
+      </p>
+
+      <section class="card">
+        <h2>1. Sign in</h2>
+        <p>
+          Click below; the SDK pops a modal QR. Scan it in the Prson
+          wallet to complete the handshake.
+        </p>
+        <button id="signin">Sign in with Prson</button>
+        <div id="signin-status" class="status"></div>
+      </section>
+
+      <section id="request-card" class="card hidden">
+        <h2>2. Request a predicate</h2>
+        <p>
+          The wallet pops a drawer asking the user to approve disclosing
+          this predicate. The signed result comes back over the same
+          encrypted data channel that carried sign-in.
+        </p>
+        <div class="row">
+          <div>
+            <label for="fragment-name">Fragment id</label>
+            <input id="fragment-name" type="text" value="age_gte_18" />
+          </div>
+          <div>
+            <label for="format">Output format</label>
+            <select id="format">
+              <option value="native">native (RSA-flat, default)</option>
+              <option value="vc+jwt">vc+jwt (W3C VC Data Model 2.0)</option>
+              <option value="vc+sd-jwt" selected>vc+sd-jwt (IETF SD-JWT-VC)</option>
+            </select>
+          </div>
+          <div>
+            <label for="verifier-url">Verifier base URL</label>
+            <input id="verifier-url" type="text" value="http://localhost:8080" />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="reason">Reason shown to user</label>
+            <input
+              id="reason"
+              type="text"
+              value="Confirming you're over 18 before unlocking adult content."
+            />
+          </div>
+        </div>
+        <button id="request">Request predicate</button>
+        <div id="request-status" class="status"></div>
+      </section>
+
+      <section id="result-card" class="card hidden">
+        <h2>3. Wallet reply</h2>
+        <p>
+          Raw payload returned by <code>session.request()</code> —
+          shape depends on the format you picked.
+        </p>
+        <pre id="wallet-reply"></pre>
+
+        <h2>4. Verifier-side check</h2>
+        <p>
+          Posted to <code>/verify-fragment</code> on the configured
+          verifier URL. Green means the RSA signature against the
+          notary's JWK, the expiry, and (for JWT shapes) the
+          <code>vct</code> all matched.
+        </p>
+        <div id="verify-status" class="status"></div>
+        <pre id="verify-reply" class="hidden"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Event log</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="./prson-login-ui.js"></script>
+
+    <script type="module">
+      import { PrsonLogin } from "./prson-login.js";
+
+      const $log = document.getElementById("log");
+      const $signinBtn = document.getElementById("signin");
+      const $signinStatus = document.getElementById("signin-status");
+      const $requestCard = document.getElementById("request-card");
+      const $requestBtn = document.getElementById("request");
+      const $requestStatus = document.getElementById("request-status");
+      const $resultCard = document.getElementById("result-card");
+      const $walletReply = document.getElementById("wallet-reply");
+      const $verifyStatus = document.getElementById("verify-status");
+      const $verifyReply = document.getElementById("verify-reply");
+
+      let session = null;
+
+      function log(line, payload) {
+        const stamp = new Date().toISOString().slice(11, 19);
+        const body = payload === undefined ? "" : " " + JSON.stringify(payload, null, 2);
+        $log.textContent = `[${stamp}] ${line}${body}\n` + $log.textContent;
+      }
+
+      function setStatus(el, level, msg) {
+        el.className = `status ${level}`;
+        el.textContent = msg;
+      }
+
+      $signinBtn.addEventListener("click", async () => {
+        $signinBtn.disabled = true;
+        setStatus($signinStatus, "warn", "Waiting for QR scan…");
+        try {
+          const result = await PrsonLogin.signIn({ ttlMinutes: 5 });
+          session = result.session;
+          log("signed_in", { displayName: result.claims?.display_name });
+          setStatus(
+            $signinStatus,
+            "ok",
+            "Signed in. " + (result.claims?.display_name ?? ""),
+          );
+          $requestCard.classList.remove("hidden");
+          session.onAny((e) => {
+            log("event", e);
+            if (e.type === "signed_out") {
+              setStatus($signinStatus, "warn", "Signed out.");
+              $requestCard.classList.add("hidden");
+              $resultCard.classList.add("hidden");
+              $signinBtn.disabled = false;
+              session = null;
+            }
+          });
+        } catch (err) {
+          log("signIn failed", String(err));
+          setStatus($signinStatus, "err", "Sign-in failed: " + err);
+          $signinBtn.disabled = false;
+        }
+      });
+
+      $requestBtn.addEventListener("click", async () => {
+        if (!session) return;
+        $requestBtn.disabled = true;
+        $resultCard.classList.add("hidden");
+        $verifyReply.classList.add("hidden");
+        const fragmentName = document.getElementById("fragment-name").value.trim();
+        const format = document.getElementById("format").value;
+        const reason = document.getElementById("reason").value.trim();
+        const verifierUrl = document.getElementById("verifier-url").value.trim();
+        if (!fragmentName) {
+          setStatus($requestStatus, "err", "Pick a fragment id");
+          $requestBtn.disabled = false;
+          return;
+        }
+        setStatus($requestStatus, "warn", "Waiting for wallet approval…");
+        try {
+          // The actual ask. Wallet pops a drawer with the reason +
+          // fragmentName; user taps Approve, the wallet mints via
+          // `signPropertyFragment` with the matching format and replies
+          // here. `kind: "fragment-check"` is the existing browser-SDK
+          // request channel — `format` is the new field (back-compat:
+          // omitting it gets the legacy native shape).
+          const reply = await session.request({
+            kind: "fragment-check",
+            fragmentName,
+            format,
+            reason,
+          });
+          log("wallet reply", reply);
+          if (!reply.ok) {
+            setStatus($requestStatus, "err", "Wallet declined: " + reply.error);
+            $requestBtn.disabled = false;
+            return;
+          }
+          setStatus($requestStatus, "ok", "Predicate received — verifying…");
+          $resultCard.classList.remove("hidden");
+          $walletReply.textContent = JSON.stringify(reply.result, null, 2);
+
+          // The wallet's reply shape:
+          //   native     → { fragmentName, fragment: { fragmentId, value,
+          //                  propertyHash, ..., signature, kid } }
+          //   vc+jwt     → { fragmentName, format, credential: "<jws>",
+          //                  fragmentId, ..., expiresAt }
+          //   vc+sd-jwt  → { fragmentName, format, credential: "<jws>~<disclosure>~",
+          //                  fragmentId, ..., expiresAt }
+          //
+          // The verifier-node POST accepts both shapes — pass the object
+          // verbatim for native, or the compact string for the JWT
+          // shapes. The example below normalises so a host can wire one
+          // POST that works for all three.
+          const r = reply.result;
+          const fragmentForVerifier =
+            r?.fragment ?? // native shape (wallet wraps in `.fragment`)
+            r?.credential ?? // jwt shapes
+            r; // permissive fallback
+
+          const verifyRes = await fetch(`${verifierUrl}/verify-fragment`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ fragment: fragmentForVerifier }),
+          });
+          const verifyBody = await verifyRes.json();
+          $verifyReply.textContent = JSON.stringify(verifyBody, null, 2);
+          $verifyReply.classList.remove("hidden");
+          if (verifyBody.ok) {
+            setStatus(
+              $verifyStatus,
+              "ok",
+              `Verified — ${verifyBody.fragmentId} = ${verifyBody.value} (kid ${verifyBody.kid})`,
+            );
+          } else {
+            setStatus(
+              $verifyStatus,
+              "err",
+              `Rejected — reason: ${verifyBody.reason} ${verifyBody.detail ?? ""}`,
+            );
+          }
+        } catch (err) {
+          log("request failed", String(err));
+          setStatus($requestStatus, "err", "Request failed: " + err);
+        } finally {
+          $requestBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

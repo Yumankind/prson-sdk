@@ -8,7 +8,7 @@
  *
  * Pure-function. No state beyond an in-memory JWKS cache (1-hour TTL).
  */
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, createVerify } from "node:crypto";
 import { importJWK, jwtVerify } from "jose";
 
 // ── Public API ────────────────────────────────────────────────────────
@@ -235,6 +235,271 @@ export async function verifyPresentation(
       expiresAt: typeof payload.exp === "number" ? payload.exp * 1000 : 0,
     },
     disclosedClaimNames: disclosed.map((d) => d.name),
+  };
+}
+
+// ── Predicate (fragment) verification ────────────────────────────────
+//
+// Predicates are signed boolean assertions about a verified Prson
+// property — "age >= 18", "balance >= 5000 EUR", "doc not expired".
+// They are minted on-demand by `signPropertyFragment` in three shapes,
+// and the helpers below verify each. The shapes are deliberately tiny
+// next to a full login presentation (no KB-JWT, no nonce, no audience)
+// because a fragment is a transferable factual claim, not a sign-in
+// proof — its anti-replay is the short TTL + the propertyHash binding.
+
+const DEFAULT_PREDICATE_VCT = "https://app.prson.net/credentials/predicate/v1";
+
+export type SignedFragmentNative = {
+  fragmentId: string;
+  value: boolean | number | string;
+  description?: string;
+  propertyHash: string;
+  propertyType: string;
+  identityId: string;
+  signedAt: string;
+  expiresAt: string;
+  signature: string;
+  kid?: string;
+};
+
+export type FragmentVerifyOptions = Pick<
+  VerifyOptions,
+  "jwksUri" | "fetch" | "jwksCacheTtlMs" | "trustedIssuer"
+> & {
+  acceptedPredicateVcts?: readonly string[];
+  /** Override the current time, for deterministic tests. */
+  now?: Date;
+};
+
+export type FragmentVerifyFailureReason =
+  | "malformed"
+  | "issuer_key_resolve_failed"
+  | "issuer_sig_invalid"
+  | "expired"
+  | "vct_not_accepted"
+  | "unsupported_format";
+
+export type FragmentVerifyResult =
+  | { ok: false; reason: FragmentVerifyFailureReason; detail?: string }
+  | {
+      ok: true;
+      format: "native" | "vc+jwt" | "vc+sd-jwt";
+      fragmentId: string;
+      value: boolean | number | string;
+      propertyHash: string;
+      propertyType: string;
+      identityId: string;
+      signedAt: string;
+      expiresAt: string;
+      description?: string;
+      kid: string;
+    };
+
+/**
+ * Verify a Prson-native signed fragment. The signature is RSA-SHA256
+ * over the colon-delimited canonical string
+ * `${propertyHash}:${fragmentId}:${value}:${identityId}:${signedAt}:${expiresAt}`
+ * — identical bytes to what the server signed in
+ * `functions/utils/predicateFormatters.js#formatNative`.
+ */
+export async function verifySignedFragment(
+  fragment: SignedFragmentNative,
+  opts: FragmentVerifyOptions = {},
+): Promise<FragmentVerifyResult> {
+  if (
+    !fragment ||
+    typeof fragment.signature !== "string" ||
+    typeof fragment.propertyHash !== "string" ||
+    typeof fragment.fragmentId !== "string" ||
+    typeof fragment.identityId !== "string" ||
+    typeof fragment.signedAt !== "string" ||
+    typeof fragment.expiresAt !== "string" ||
+    typeof fragment.kid !== "string"
+  ) {
+    return { ok: false, reason: "malformed", detail: "missing required fields" };
+  }
+  const now = (opts.now ?? new Date()).getTime();
+  if (new Date(fragment.expiresAt).getTime() <= now) {
+    return { ok: false, reason: "expired" };
+  }
+  const jwk = await resolveIssuerJwk(fragment.kid, opts);
+  if (!jwk) return { ok: false, reason: "issuer_key_resolve_failed", detail: fragment.kid };
+  let pem: ReturnType<typeof createPublicKey>;
+  try {
+    pem = createPublicKey({ key: jwk as import("node:crypto").JsonWebKey, format: "jwk" });
+  } catch (e) {
+    return { ok: false, reason: "issuer_key_resolve_failed", detail: (e as Error).message };
+  }
+  const dataToSign = `${fragment.propertyHash}:${fragment.fragmentId}:${fragment.value}:${fragment.identityId}:${fragment.signedAt}:${fragment.expiresAt}`;
+  const verifier = createVerify("RSA-SHA256");
+  verifier.update(dataToSign);
+  verifier.end();
+  let sigBytes: Buffer;
+  try {
+    sigBytes = Buffer.from(fragment.signature, "base64");
+  } catch (e) {
+    return { ok: false, reason: "malformed", detail: `signature b64: ${(e as Error).message}` };
+  }
+  if (!verifier.verify(pem, sigBytes)) {
+    return { ok: false, reason: "issuer_sig_invalid" };
+  }
+  return {
+    ok: true,
+    format: "native",
+    fragmentId: fragment.fragmentId,
+    value: fragment.value,
+    propertyHash: fragment.propertyHash,
+    propertyType: fragment.propertyType,
+    identityId: fragment.identityId,
+    signedAt: fragment.signedAt,
+    expiresAt: fragment.expiresAt,
+    description: fragment.description,
+    kid: fragment.kid,
+  };
+}
+
+/**
+ * Verify a JWT-shaped signed fragment. Detects the variant from the
+ * JWS `typ` header:
+ *
+ *   * `vc+jwt`  — plain W3C VC Data Model 2.0 JWS. The predicate sits
+ *                 in `credentialSubject`.
+ *   * `sd-jwt`  — IETF SD-JWT-VC. The disclosure (joined by `~`) is
+ *                 hashed and matched against `_sd[0]`.
+ *
+ * Anything else fails with `unsupported_format`.
+ */
+export async function verifyFragmentCredential(
+  credential: string,
+  opts: FragmentVerifyOptions = {},
+): Promise<FragmentVerifyResult> {
+  if (typeof credential !== "string" || credential.length === 0) {
+    return { ok: false, reason: "malformed", detail: "empty" };
+  }
+  const accepted = opts.acceptedPredicateVcts ?? [DEFAULT_PREDICATE_VCT];
+  // SD-JWT-VC compact form ends with `~`; split it off before treating
+  // the head as a JWS.
+  const tildeIdx = credential.indexOf("~");
+  const jws = tildeIdx < 0 ? credential : credential.slice(0, tildeIdx);
+  const discTokens =
+    tildeIdx < 0
+      ? []
+      : credential
+          .slice(tildeIdx + 1)
+          .split("~")
+          .filter((s) => s.length > 0);
+
+  const [hB64, pB64, sigB64] = jws.split(".");
+  if (!hB64 || !pB64 || !sigB64) {
+    return { ok: false, reason: "malformed", detail: "jws shape" };
+  }
+  let header: { alg?: string; kid?: string; typ?: string };
+  let payload: Record<string, unknown>;
+  try {
+    header = JSON.parse(b64uToString(hB64));
+    payload = JSON.parse(b64uToString(pB64));
+  } catch (e) {
+    return { ok: false, reason: "malformed", detail: `json: ${(e as Error).message}` };
+  }
+
+  let format: "vc+jwt" | "vc+sd-jwt";
+  if (header.typ === "vc+jwt") {
+    format = "vc+jwt";
+  } else if (header.typ === "sd-jwt") {
+    format = "vc+sd-jwt";
+  } else {
+    return { ok: false, reason: "unsupported_format", detail: String(header.typ) };
+  }
+  if (typeof payload.vct !== "string" || !accepted.includes(payload.vct)) {
+    return { ok: false, reason: "vct_not_accepted", detail: String(payload.vct) };
+  }
+
+  const trustedIssuer = opts.trustedIssuer ?? DEFAULT_TRUSTED_ISSUER;
+  if (payload.iss !== trustedIssuer) {
+    return { ok: false, reason: "issuer_key_resolve_failed", detail: `iss=${String(payload.iss)}` };
+  }
+  const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  if (typeof payload.exp === "number" && payload.exp < nowSec) {
+    return { ok: false, reason: "expired" };
+  }
+  if (!header.kid) return { ok: false, reason: "issuer_key_resolve_failed", detail: "no kid" };
+  const issuerJwk = await resolveIssuerJwk(header.kid, opts);
+  if (!issuerJwk) return { ok: false, reason: "issuer_key_resolve_failed", detail: "unknown kid" };
+  try {
+    await jwtVerify(jws, await importJWK(issuerJwk as Parameters<typeof importJWK>[0], "RS256"), {
+      algorithms: ["RS256"],
+      issuer: trustedIssuer,
+      currentDate: new Date(nowSec * 1000),
+    });
+  } catch (e) {
+    return { ok: false, reason: "issuer_sig_invalid", detail: (e as Error).message };
+  }
+
+  // Pull the predicate value out of whichever slot the format uses.
+  let fragmentId: string;
+  let value: boolean | number | string;
+  if (format === "vc+jwt") {
+    const subj = payload.credentialSubject as Record<string, unknown> | undefined;
+    if (!subj || typeof subj.fragmentId !== "string") {
+      return { ok: false, reason: "malformed", detail: "credentialSubject" };
+    }
+    fragmentId = subj.fragmentId;
+    value = subj.value as boolean | number | string;
+    const propertyHash = String(subj.propertyHash ?? "");
+    const propertyType = String(subj.propertyType ?? "");
+    const identityId = String(subj.id ?? payload.sub ?? "");
+    return {
+      ok: true,
+      format,
+      fragmentId,
+      value,
+      propertyHash,
+      propertyType,
+      identityId,
+      signedAt: typeof payload.iat === "number" ? new Date(payload.iat * 1000).toISOString() : "",
+      expiresAt: typeof payload.exp === "number" ? new Date(payload.exp * 1000).toISOString() : "",
+      description: typeof subj.description === "string" ? subj.description : undefined,
+      kid: header.kid,
+    };
+  }
+
+  // SD-JWT-VC: rehash the disclosure(s), match against `_sd`, and pull
+  // [salt, name, value] out of the matched disclosure for the result.
+  const sdSet = collectSdDigests(payload);
+  if (discTokens.length === 0) {
+    return { ok: false, reason: "malformed", detail: "no disclosure" };
+  }
+  let matched: { name: string; val: unknown } | null = null;
+  for (const t of discTokens) {
+    const digest = sha256B64u(t);
+    if (!sdSet.has(digest)) {
+      return { ok: false, reason: "malformed", detail: `unmatched disclosure ${digest}` };
+    }
+    try {
+      const arr = JSON.parse(b64uToString(t)) as unknown[];
+      if (Array.isArray(arr) && arr.length === 3 && typeof arr[1] === "string") {
+        matched = { name: arr[1], val: arr[2] };
+      }
+    } catch {
+      return { ok: false, reason: "malformed", detail: "disclosure json" };
+    }
+  }
+  if (!matched) {
+    return { ok: false, reason: "malformed", detail: "no parseable disclosure" };
+  }
+  return {
+    ok: true,
+    format,
+    fragmentId: matched.name,
+    value: matched.val as boolean | number | string,
+    propertyHash: String(payload.propertyHash ?? ""),
+    propertyType: String(payload.propertyType ?? ""),
+    identityId: String(payload.sub ?? ""),
+    signedAt: typeof payload.iat === "number" ? new Date(payload.iat * 1000).toISOString() : "",
+    expiresAt: typeof payload.exp === "number" ? new Date(payload.exp * 1000).toISOString() : "",
+    description: typeof payload.description === "string" ? payload.description : undefined,
+    kid: header.kid,
   };
 }
 

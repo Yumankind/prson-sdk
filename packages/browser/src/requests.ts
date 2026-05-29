@@ -34,6 +34,14 @@ import type { DecryptedEnvelope } from "./crypto.js";
 // ─── Public request shapes ────────────────────────────────────────
 
 /**
+ * Output wire format for a signed predicate (fragment). See
+ * `functions/utils/predicateFormatters.js` for the formatter registry
+ * the server uses; the verifier-node package decodes the matching
+ * shape with `verifySignedFragment` / `verifyFragmentCredential`.
+ */
+export type PredicateFormat = "native" | "vc+jwt" | "vc+sd-jwt";
+
+/**
  * Free-form text/numeric input typed on the phone — the "kiosk
  * companion" use case. Mirrors a subset of the HTML input element
  * so the wallet UI can pick a sensible keyboard / validator.
@@ -116,10 +124,22 @@ export type LoginRequest =
    * Predicate check against a fragment the wallet has signed.
    * Returns the matching signed fragment so the verifier can
    * re-verify the signature server-side.
+   *
+   * `format` selects the wire shape the wallet asks the notary to
+   * mint:
+   *   * `native`     — Prson-flat shape (RSA-SHA256 over the canonical
+   *                    bytes). Smallest, default for back-compat.
+   *   * `vc+jwt`     — W3C VC Data Model 2.0 JWS.
+   *   * `vc+sd-jwt`  — IETF SD-JWT-VC with one disclosure.
+   * The choice flows server-side via the
+   * `signPropertyFragment` Cloud Function's `format` parameter and is
+   * verified browser-side by `@prson/login-verifier`'s
+   * `verifySignedFragment` (native) / `verifyFragmentCredential` (jwt).
    */
   | {
       kind: "fragment-check";
       fragmentName: string;
+      format?: PredicateFormat;
       reason?: string;
     }
 

@@ -117,3 +117,60 @@ If the host is using anonymous-wallet credentials
 includes the anonymous VCT
 (`https://app.prson.net/credentials/anonymous-wallet/v1`) so the
 verifier accepts the self-signed form.
+
+## `POST /verify-fragment` — predicate verification
+
+A predicate (signed property "fragment") is a single bound claim about
+the user — "age >= 18", "balance >= 5000 EUR", "doc not expired". The
+mobile app mints one on-demand via the Cloud Function
+`signPropertyFragment` and hands it back to the host page through the
+same WebRTC channel as a login presentation. Three wire formats are
+supported by the same Cloud Function — pick whichever your stack
+already speaks:
+
+- **`native`** — Prson's own shape. Flat JSON, single RSA-SHA256
+  signature. Smallest on the wire.
+- **`vc+jwt`** — W3C VC Data Model 2.0 JWS. Standard JOSE, verifies
+  with any library that knows RS256 + a JWKS.
+- **`vc+sd-jwt`** — IETF SD-JWT-VC. Same JWS, but the predicate value
+  ships as a selectively-disclosed disclosure suffix (`~<b64u>~`).
+
+`POST /verify-fragment` accepts all three:
+
+```bash
+# native (object)
+curl -sS http://localhost:8080/verify-fragment \
+  -H 'content-type: application/json' \
+  -d '{"fragment":{"fragmentId":"age_gte_18","value":true,"propertyHash":"...","propertyType":"birthdate","identityId":"...","signedAt":"...","expiresAt":"...","signature":"<base64>","kid":"2026-05"}}'
+
+# vc+jwt or vc+sd-jwt (compact string)
+curl -sS http://localhost:8080/verify-fragment \
+  -H 'content-type: application/json' \
+  -d '{"fragment":"eyJ0eXAiOiJ2Yytqd3QiLCJhbGciOiJSUzI1NiI..."}'
+```
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "format": "vc+sd-jwt",
+  "fragmentId": "age_gte_18",
+  "value": true,
+  "propertyHash": "<sha256 hex>",
+  "propertyType": "birthdate",
+  "identityId": "<prson identity id>",
+  "signedAt": "2026-05-29T10:00:00.000Z",
+  "expiresAt": "2026-05-29T11:00:00.000Z",
+  "kid": "2026-05"
+}
+```
+
+The verifier checks: the RSA signature against the notary's published
+JWK, the `expiresAt` clock, and (for JWT shapes) the `vct` is in the
+accepted predicate-VCT list. It does not check `aud`/`nonce` —
+predicates are transferable facts about a property, not bound to a
+specific request. Anti-replay comes from the short TTL plus the
+`propertyHash` binding (a stolen predicate can't be re-presented for a
+different property or identity).
+

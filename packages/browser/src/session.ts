@@ -845,6 +845,11 @@ export class PrsonLoginSession {
         break;
       case "fragment-check":
         envelope.fragmentName = req.fragmentName;
+        // `format` selects the wire shape the wallet asks the notary
+        // for (native / vc+jwt / vc+sd-jwt). Omitted means native, so
+        // we only put it on the envelope when the host opted in — the
+        // wallet treats an absent field as legacy behaviour.
+        if (req.format) envelope.format = req.format;
         if (req.reason) envelope.reason = req.reason;
         break;
       case "document-presence":

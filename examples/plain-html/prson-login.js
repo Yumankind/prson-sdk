@@ -3166,6 +3166,7 @@ var PrsonLoginSession = class {
         break;
       case "fragment-check":
         envelope.fragmentName = req.fragmentName;
+        if (req.format) envelope.format = req.format;
         if (req.reason) envelope.reason = req.reason;
         break;
       case "document-presence":
@@ -5502,4 +5503,4 @@ export {
   bindMouse,
   enableRemoteNavigation
 };
-//# sourceMappingURL=prson-login.js.map
+//# sourceMappingURL=index.js.map
