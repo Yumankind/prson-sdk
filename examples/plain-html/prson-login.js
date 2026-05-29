@@ -4390,6 +4390,7 @@ function bindMouse(session, opts) {
       cursor = null;
     }
     setSnapTarget(null);
+    offAmbient();
   }
   return {
     async request(callerOpts) {

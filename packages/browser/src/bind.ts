@@ -958,6 +958,9 @@ export function bindMouse(
     // keep a `data-prson-magic-snap` attribute on whichever input
     // happened to be the last preview target.
     setSnapTarget(null);
+    // Tear down the ambient subscription so the session stops
+    // holding a ref to our (now-disposed) handler.
+    offAmbient();
   }
 
   return {

@@ -394,6 +394,14 @@
             // Logout buttons; the host page's focused input is
             // mirrored to the phone for edit-from-phone flows.
             remoteNavigation: true,
+            // Pre-grant mouse control — the wallet's banner drawer
+            // enables the Touchpad / Magic wand buttons from the
+            // moment the session lands. The host doesn't need to
+            // issue a `kind: "mouse"` request; tapping either button
+            // on the wallet streams `mouse-update` envelopes to the
+            // ambient subscriber installed by the long-lived
+            // `bindMouse` controller below.
+            mouseControl: true,
           });
           session = result.session;
           log("signed_in", {
@@ -421,6 +429,18 @@
           // Install the DOM-side glue: focus listeners + nav / value
           // / logout handlers. Cleans up on signed_out automatically.
           enableRemoteNavigation(session);
+          // Pre-grant mouse cursor. Mount a long-lived `bindMouse`
+          // controller so its ambient `mouse-update` handler is
+          // installed on the session BEFORE the wallet can start a
+          // stream. We DON'T call `.request()` — pre-grant means the
+          // wallet (not the host) initiates streaming when the user
+          // taps Touchpad / Magic wand on the banner drawer. The
+          // controller's cursor element is created lazily on the
+          // first envelope (or first `request()` call), so a host
+          // that never uses mouse control pays nothing for this
+          // mount. Disposed automatically on `signed_out` below.
+          const ambientMouse = bindMouse(session);
+          session.on("signed_out", () => ambientMouse.dispose());
           showSignedIn(result);
         } catch (err) {
           log("signIn failed", String(err));
