@@ -2716,6 +2716,13 @@ function _unrefTimer(t) {
   const maybe = t;
   if (typeof maybe.unref === "function") maybe.unref();
 }
+function _mapTransportCloseReason(reason) {
+  if (reason === "ttl_reached") return "ttl_reached";
+  if (reason === "wallet_signed_out") return "wallet_signed_out";
+  if (reason === "user_revoked") return "user_revoked";
+  if (reason === "credential_revoked") return "credential_revoked";
+  return "network_loss";
+}
 function uuidv4() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -2749,6 +2756,20 @@ var PrsonLoginSession = class {
      * values get a stream of decoded `mouse` bodies.
      */
     this._mouseSubscribers = /* @__PURE__ */ new Map();
+    /**
+     * Ambient mouse-update handler. Used when the wallet starts a
+     * mouse stream WITHOUT a prior `kind: "mouse"` request — i.e.
+     * the pre-grant flow enabled by [SignInOptions.mouseControl].
+     * [`bindMouse`] registers itself here; any inbound
+     * `mouse-update` frame whose `requestId` doesn't match a
+     * specific subscriber falls through to this handler so the
+     * cursor moves regardless of who initiated the stream.
+     *
+     * Null when no [`bindMouse`] is mounted; only one ambient
+     * handler is active at a time (last call wins, mirroring the
+     * remote-nav listener semantics).
+     */
+    this._ambientMouseHandler = null;
     /**
      * Remote-navigation listener — installed by
      * [`enableRemoteNavigation`]. Receives every inbound `nav`,
@@ -2820,6 +2841,11 @@ var PrsonLoginSession = class {
     this._avatar = opts.initialAvatar ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
+    this._transport.onClose((reason) => {
+      if (this._closed) return;
+      const mapped = _mapTransportCloseReason(reason);
+      this._teardown(mapped);
+    });
     this._pingTimer = setInterval(() => this._sendPing(), PING_INTERVAL_MS);
     _unrefTimer(this._pingTimer);
     if (opts.initialSignedInResult) {
@@ -2986,6 +3012,21 @@ var PrsonLoginSession = class {
       msg: "focus",
       focus
     });
+  }
+  /**
+   * Install the ambient `mouse-update` handler. Mirrors
+   * [`_setRemoteNavListener`] — only one ambient subscriber at a
+   * time (last call wins). Used by [`bindMouse`] when the
+   * session was pre-granted mouse control at sign-in
+   * ([SignInOptions.mouseControl]).
+   *
+   * @internal
+   */
+  _setAmbientMouseHandler(cb) {
+    this._ambientMouseHandler = cb;
+    return () => {
+      if (this._ambientMouseHandler === cb) this._ambientMouseHandler = null;
+    };
   }
   /**
    * Install the remote-navigation listener. Replaces any prior
@@ -3342,11 +3383,12 @@ var PrsonLoginSession = class {
         if (envelope.requestId) this._mouseSubscribers.delete(envelope.requestId);
         return;
       case "mouse-update":
-        if (envelope.requestId && envelope.mouse) {
-          const sub = this._mouseSubscribers.get(envelope.requestId);
-          if (sub) {
+        if (envelope.mouse) {
+          const perRequest = envelope.requestId ? this._mouseSubscribers.get(envelope.requestId) : void 0;
+          const target = perRequest ?? this._ambientMouseHandler;
+          if (target) {
             try {
-              sub(envelope.mouse);
+              target(envelope.mouse);
             } catch {
             }
           }
@@ -3682,6 +3724,7 @@ async function establishTransport(opts) {
       } catch {
       }
     } else if (m.msg === "peer-gone") {
+      fireClose("wallet_signed_out");
       try {
         dc.close();
       } catch {
@@ -3708,6 +3751,20 @@ async function establishTransport(opts) {
   });
   const oneShotWaiters = [];
   const allListeners = [];
+  const closeListeners = [];
+  let closeFired = false;
+  function fireClose(reason) {
+    if (closeFired) return;
+    closeFired = true;
+    for (const cb of closeListeners) {
+      try {
+        cb(reason);
+      } catch {
+      }
+    }
+  }
+  opts.signaling.onClose((reason) => fireClose(reason));
+  dc.addEventListener("close", () => fireClose("network_loss"));
   dc.addEventListener("message", (evt) => {
     const raw = typeof evt.data === "string" ? evt.data : new TextDecoder().decode(evt.data);
     while (oneShotWaiters.length > 0) {
@@ -3725,6 +3782,13 @@ async function establishTransport(opts) {
     },
     onMessage(cb) {
       allListeners.push(cb);
+    },
+    onClose(cb) {
+      if (closeFired) {
+        queueMicrotask(() => cb("network_loss"));
+      } else {
+        closeListeners.push(cb);
+      }
     },
     send(raw) {
       if (dc.readyState === "open") dc.send(raw);
@@ -4198,6 +4262,14 @@ function bindMouse(session, opts) {
   let disposed = false;
   let snapTarget = null;
   let activeMode = mode;
+  const offAmbient = session._setAmbientMouseHandler((mouseBody) => {
+    if (disposed) return;
+    if (mouseBody.event !== "move" && mouseBody.event !== "click" && mouseBody.event !== "double-click" && mouseBody.event !== "scroll") {
+      ensureCursor();
+      return;
+    }
+    applyFrame(mouseBody);
+  });
   function ensureCursor() {
     if (cursor) return cursor;
     const el = document.createElement("div");
@@ -4451,6 +4523,11 @@ var PrsonLogin = class {
         // Submit / Logout / Mouse on a persistent banner. See
         // SignInOptions.remoteNavigation + bind.ts:enableRemoteNavigation.
         remoteNavigation: opts.remoteNavigation === true,
+        // Pre-grant mouse control — wallet enables the Touchpad /
+        // Magic wand buttons on the banner drawer from session start.
+        // See SignInOptions.mouseControl + bindMouse's ambient
+        // subscriber path.
+        mouseControl: opts.mouseControl === true,
         ttlMaxMinutes
       };
       const draft = await createDraft(request);
