@@ -176,6 +176,21 @@ export class PrsonLoginSession {
    */
   private _preferredLanguage: string | null = null;
 
+  /**
+   * Public-profile display name (cosmetic — host should treat as
+   * untrusted). Seeded from the wallet's initial `presentation`
+   * envelope and updated via `display-update` envelopes; mirrored
+   * by the `display_name_changed` event.
+   */
+  private _displayName: string | null = null;
+
+  /**
+   * Public-profile avatar pointer (cosmetic). Same trust model as
+   * `_displayName`. Updated via `display-update` envelopes; mirrored
+   * by `avatar_changed`.
+   */
+  private _avatar: { url: string; hash: string } | null = null;
+
   /** Per-type listener map. */
   private _listeners: Map<LoginEventType, Set<(e: LoginEvent) => void>> =
     new Map();
@@ -220,6 +235,17 @@ export class PrsonLoginSession {
      * `signIn()` resolves.
      */
     initialPreferredLanguage?: string;
+    /**
+     * Initial `displayName` from the wallet's first envelope.
+     * Cosmetic public-profile data; see [displayName] getter for
+     * the trust model. Seeded here so the host sees the name
+     * immediately after `signIn()` resolves rather than waiting for
+     * the first `display-update`.
+     */
+    initialDisplayName?: string | null;
+    /** Initial `avatar` from the wallet's first envelope (same
+     *  rationale as [initialDisplayName]). */
+    initialAvatar?: { url: string; hash: string } | null;
   }) {
     this._cnf = opts.cnf;
     this._expiresAt = opts.credential.expiresAt;
@@ -229,6 +255,8 @@ export class PrsonLoginSession {
     this._claimsSnapshot = { ...(opts.initialClaims ?? {}) };
     this._walletSessionPk = opts.walletSessionPk ?? null;
     this._preferredLanguage = opts.initialPreferredLanguage ?? null;
+    this._displayName = opts.initialDisplayName ?? null;
+    this._avatar = opts.initialAvatar ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
 
@@ -259,6 +287,20 @@ export class PrsonLoginSession {
    *  wallet hasn't published one yet. */
   get preferredLanguage(): string | null {
     return this._preferredLanguage;
+  }
+
+  /** Public-profile display name from the wallet's identity record,
+   *  or null if the wallet hasn't published one yet (anonymous
+   *  identity, etc.). Cosmetic — do not gate privileged actions on
+   *  this value. */
+  get displayName(): string | null {
+    return this._displayName;
+  }
+
+  /** Public-profile avatar pointer, or null. Same cosmetic-only
+   *  trust model as [displayName]. */
+  get avatar(): { url: string; hash: string } | null {
+    return this._avatar;
   }
 
   // ─── Subscription API ────────────────────────────────────────────
@@ -562,51 +604,57 @@ export class PrsonLoginSession {
   private _armExpiryTimer() {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     const delta = this._expiresAt - Date.now();
-    // eslint-disable-next-line no-console
-    console.info(
-      `[@prson/login-sdk] arming expiry timer: ` +
-        `expiresAt=${this._expiresAt} (${new Date(this._expiresAt).toISOString()}) ` +
-        `now=${Date.now()} (${new Date().toISOString()}) ` +
-        `delta_ms=${delta}`,
-    );
+    // 60-second skew/sanity budget on BOTH sides:
+    //
+    //   * If `expiresAt === 0`: the credential's JWS had no numeric
+    //     `exp`. Skip the timer.
+    //   * If `delta` is in `[-60_000, +60_000]`: the credential
+    //     "expires" within a one-minute window of "now". Almost
+    //     always one of: clock skew between server and browser,
+    //     network latency between issuance and verify, or a
+    //     server-side TTL bug that issued an essentially-zero-TTL
+    //     credential. Tearing down on this signal causes a visible
+    //     "signed_in immediately followed by signed_out" UX bug;
+    //     skip the timer and let the wallet (or host) close.
+    //   * Otherwise: legitimate future expiry — arm the timer.
+    //   * Otherwise (genuinely past, >60s ago): real expiry,
+    //     teardown immediately.
+    const skewBudgetMs = 60_000;
+    if (this._expiresAt <= 0 || Math.abs(delta) < skewBudgetMs) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[@prson/login-sdk] credential expiresAt ${
+          this._expiresAt <= 0
+            ? "missing/zero"
+            : delta < 0
+              ? `${(-delta / 1000).toFixed(1)}s in the past`
+              : `only ${(delta / 1000).toFixed(1)}s in the future`
+        } — leaving session open without a TTL timer.` +
+          " Host should set its own deadline.",
+      );
+      return;
+    }
     if (delta <= 0) {
-      // `delta <= 0` means the credential is "expired" against the
-      // browser clock. Three sub-cases — only the LAST should
-      // actually tear the session down:
-      //
-      //   A. `expiresAt === 0` — the credential's JWS had no
-      //      numeric `exp` and `verify.ts` defaulted to zero.
-      //      Tearing down would fire the moment the user signs in,
-      //      which is visibly wrong (wallet still thinks the
-      //      session is valid). Skip the timer.
-      //
-      //   B. `expiresAt > 0` and within a 60 s window of "now" —
-      //      almost certainly browser ↔ wallet/server clock skew or
-      //      network latency between issuance and verify. Tearing
-      //      down on this signal causes the "signed_in then
-      //      signed_out a second later" UX bug. Skip the timer.
-      //
-      //   C. `expiresAt > 0` and meaningfully in the past — a real
-      //      expired credential. Teardown.
-      //
-      // For A and B we leave the session open until the wallet (or
-      // the host) closes it. The host can still read
-      // `session.expiresAt` to make its own decision.
-      const skewBudgetMs = 60_000;
-      if (this._expiresAt <= 0 || -delta < skewBudgetMs) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[@prson/login-sdk] credential expiresAt ${
-            this._expiresAt <= 0 ? "missing/zero" : `${(-delta / 1000).toFixed(1)}s in the past`
-          } — leaving session open without a TTL timer.` +
-            " Host should set its own deadline.",
-        );
-        return;
-      }
       this._teardown("ttl_reached");
       return;
     }
-    this._expiryTimer = setTimeout(() => this._teardown("ttl_reached"), delta);
+    // `setTimeout` clamps delays > 2^31-1 ms (~24.8 days) to a 32-bit
+    // int and effectively fires immediately. A verified-human VC has
+    // a 90-day TTL — delta is ~7.8 billion ms — so a naive
+    // `setTimeout(..., delta)` would trip the teardown on the very
+    // next tick. Re-arm in chunks ≤ MAX_TIMEOUT and re-evaluate.
+    const MAX_TIMEOUT = 2_147_483_000; // a hair under int32 max
+    const chunk = delta > MAX_TIMEOUT ? MAX_TIMEOUT : delta;
+    this._expiryTimer = setTimeout(() => {
+      if (this._closed) return;
+      // Re-check against the current clock — if we still haven't
+      // reached `_expiresAt`, re-arm. Otherwise teardown.
+      if (Date.now() >= this._expiresAt) {
+        this._teardown("ttl_reached");
+      } else {
+        this._armExpiryTimer();
+      }
+    }, chunk);
   }
 
   private async _handleMessage(raw: string) {
@@ -742,10 +790,6 @@ export class PrsonLoginSession {
 
   private async _handleRenewal(envelope: DecryptedEnvelope) {
     if (!envelope.presentation) return;
-    // eslint-disable-next-line no-console
-    console.info(
-      `[@prson/login-sdk] _handleRenewal triggered with envelope.msg=${envelope.msg}`,
-    );
     // Renewal: re-verify against a fresh KB nonce. The wallet
     // generates its own monotonically-increasing nonce per renewal
     // and writes it into the KB-JWT; we accept any nonce within the
@@ -851,12 +895,17 @@ export class PrsonLoginSession {
    */
   private _handleDisplayUpdate(envelope: DecryptedEnvelope) {
     if (envelope.displayName !== undefined) {
+      // Mirror onto the session getter so a host that reads
+      // `session.displayName` lazily after the update event sees
+      // the new value.
+      this._displayName = envelope.displayName;
       this._dispatch({
         type: "display_name_changed",
         displayName: envelope.displayName,
       });
     }
     if (envelope.avatar !== undefined) {
+      this._avatar = envelope.avatar;
       this._dispatch({ type: "avatar_changed", avatar: envelope.avatar });
     }
   }

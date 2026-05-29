@@ -417,19 +417,35 @@
       function showSignedIn(result) {
         const claims = result.claims || {};
         const displayName =
-          claims.display_name || claims.displayName || "(no display name)";
+          result.session.displayName ||
+          claims.display_name ||
+          claims.displayName ||
+          "(no display name)";
         const expiresMs = result.credential?.expiresAt;
-        const expiresIn = expiresMs
-          ? Math.max(0, Math.round((expiresMs - Date.now()) / 60000))
-          : null;
         $signedInSummary.textContent =
           displayName +
           " · " +
           (result.credential?.vct?.split("/").pop() || "credential") +
-          (expiresIn !== null ? " · expires in " + expiresIn + " min" : "");
+          (expiresMs ? " · expires in " + formatDuration(expiresMs - Date.now()) : "");
         $signinBtn.hidden = true;
         $signedInState.hidden = false;
         enableDemoButtons();
+      }
+
+      // Human-friendly duration formatter. Picks the largest unit
+      // that gives a number ≥ 1; falls back to "now" for negative
+      // values (expired). Avoids the "expires in 129600 min" look
+      // for 90-day-TTL verified-human credentials.
+      function formatDuration(ms) {
+        if (ms <= 0) return "now";
+        const s = Math.floor(ms / 1000);
+        const m = Math.floor(s / 60);
+        const h = Math.floor(m / 60);
+        const d = Math.floor(h / 24);
+        if (d >= 1) return d + " day" + (d === 1 ? "" : "s");
+        if (h >= 1) return h + " hr" + (h === 1 ? "" : "s");
+        if (m >= 1) return m + " min";
+        return s + " sec";
       }
 
       function showSignedOut() {

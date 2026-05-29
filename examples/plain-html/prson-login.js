@@ -2735,6 +2735,19 @@ var PrsonLoginSession = class {
      * to localise its own UI without an extra round-trip.
      */
     this._preferredLanguage = null;
+    /**
+     * Public-profile display name (cosmetic — host should treat as
+     * untrusted). Seeded from the wallet's initial `presentation`
+     * envelope and updated via `display-update` envelopes; mirrored
+     * by the `display_name_changed` event.
+     */
+    this._displayName = null;
+    /**
+     * Public-profile avatar pointer (cosmetic). Same trust model as
+     * `_displayName`. Updated via `display-update` envelopes; mirrored
+     * by `avatar_changed`.
+     */
+    this._avatar = null;
     /** Per-type listener map. */
     this._listeners = /* @__PURE__ */ new Map();
     /** "Fire on every event" subscribers — for logging / telemetry. */
@@ -2747,6 +2760,8 @@ var PrsonLoginSession = class {
     this._claimsSnapshot = { ...opts.initialClaims ?? {} };
     this._walletSessionPk = opts.walletSessionPk ?? null;
     this._preferredLanguage = opts.initialPreferredLanguage ?? null;
+    this._displayName = opts.initialDisplayName ?? null;
+    this._avatar = opts.initialAvatar ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
     if (opts.initialSignedInResult) {
@@ -2769,6 +2784,18 @@ var PrsonLoginSession = class {
    *  wallet hasn't published one yet. */
   get preferredLanguage() {
     return this._preferredLanguage;
+  }
+  /** Public-profile display name from the wallet's identity record,
+   *  or null if the wallet hasn't published one yet (anonymous
+   *  identity, etc.). Cosmetic — do not gate privileged actions on
+   *  this value. */
+  get displayName() {
+    return this._displayName;
+  }
+  /** Public-profile avatar pointer, or null. Same cosmetic-only
+   *  trust model as [displayName]. */
+  get avatar() {
+    return this._avatar;
   }
   // ─── Subscription API ────────────────────────────────────────────
   /**
@@ -3004,21 +3031,27 @@ var PrsonLoginSession = class {
   _armExpiryTimer() {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     const delta = this._expiresAt - Date.now();
-    console.info(
-      `[@prson/login-sdk] arming expiry timer: expiresAt=${this._expiresAt} (${new Date(this._expiresAt).toISOString()}) now=${Date.now()} (${(/* @__PURE__ */ new Date()).toISOString()}) delta_ms=${delta}`
-    );
+    const skewBudgetMs = 6e4;
+    if (this._expiresAt <= 0 || Math.abs(delta) < skewBudgetMs) {
+      console.warn(
+        `[@prson/login-sdk] credential expiresAt ${this._expiresAt <= 0 ? "missing/zero" : delta < 0 ? `${(-delta / 1e3).toFixed(1)}s in the past` : `only ${(delta / 1e3).toFixed(1)}s in the future`} \u2014 leaving session open without a TTL timer. Host should set its own deadline.`
+      );
+      return;
+    }
     if (delta <= 0) {
-      const skewBudgetMs = 6e4;
-      if (this._expiresAt <= 0 || -delta < skewBudgetMs) {
-        console.warn(
-          `[@prson/login-sdk] credential expiresAt ${this._expiresAt <= 0 ? "missing/zero" : `${(-delta / 1e3).toFixed(1)}s in the past`} \u2014 leaving session open without a TTL timer. Host should set its own deadline.`
-        );
-        return;
-      }
       this._teardown("ttl_reached");
       return;
     }
-    this._expiryTimer = setTimeout(() => this._teardown("ttl_reached"), delta);
+    const MAX_TIMEOUT = 2147483e3;
+    const chunk = delta > MAX_TIMEOUT ? MAX_TIMEOUT : delta;
+    this._expiryTimer = setTimeout(() => {
+      if (this._closed) return;
+      if (Date.now() >= this._expiresAt) {
+        this._teardown("ttl_reached");
+      } else {
+        this._armExpiryTimer();
+      }
+    }, chunk);
   }
   async _handleMessage(raw) {
     if (this._closed) return;
@@ -3111,9 +3144,6 @@ var PrsonLoginSession = class {
   }
   async _handleRenewal(envelope) {
     if (!envelope.presentation) return;
-    console.info(
-      `[@prson/login-sdk] _handleRenewal triggered with envelope.msg=${envelope.msg}`
-    );
     const verifierOpts = {
       ...this._verifierContext,
       expectedNonce: extractKbNonce(envelope.presentation) ?? this._verifierContext.expectedNonceFactory()
@@ -3200,12 +3230,14 @@ var PrsonLoginSession = class {
    */
   _handleDisplayUpdate(envelope) {
     if (envelope.displayName !== void 0) {
+      this._displayName = envelope.displayName;
       this._dispatch({
         type: "display_name_changed",
         displayName: envelope.displayName
       });
     }
     if (envelope.avatar !== void 0) {
+      this._avatar = envelope.avatar;
       this._dispatch({ type: "avatar_changed", avatar: envelope.avatar });
     }
   }
@@ -4225,7 +4257,14 @@ var PrsonLogin = class {
         // `preferredLanguage: null` (host can't localise on first
         // paint) until a subsequent envelope arrives.
         walletSessionPk: envelope.walletSessionPk,
-        initialPreferredLanguage: envelope.preferredLanguage
+        initialPreferredLanguage: envelope.preferredLanguage,
+        // Public-profile fields the wallet may stamp onto the first
+        // envelope. They aren't part of the verified-human VC (which
+        // carries verification facts only), so without seeding here
+        // the host's `session.displayName` would stay null until a
+        // later `display-update` envelope.
+        initialDisplayName: envelope.displayName,
+        initialAvatar: envelope.avatar
       });
       result.session = session;
       return result;

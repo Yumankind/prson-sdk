@@ -107,6 +107,12 @@ export type DecryptedEnvelope = {
    * mid-session. The host site can read it via
    * `session.preferredLanguage` to localise its UI without an
    * extra round-trip.
+   *
+   * Same convention applies to the `displayName` + `avatar` fields
+   * below: they originated as the `display-update` envelope body,
+   * but the wallet stamps them onto the initial `presentation`
+   * envelope too so the host has them on first paint without a
+   * separate round-trip.
    */
   preferredLanguage?: string;
 

@@ -467,6 +467,13 @@ export class PrsonLogin {
       // paint) until a subsequent envelope arrives.
       walletSessionPk: envelope.walletSessionPk,
       initialPreferredLanguage: envelope.preferredLanguage,
+      // Public-profile fields the wallet may stamp onto the first
+      // envelope. They aren't part of the verified-human VC (which
+      // carries verification facts only), so without seeding here
+      // the host's `session.displayName` would stay null until a
+      // later `display-update` envelope.
+      initialDisplayName: envelope.displayName,
+      initialAvatar: envelope.avatar,
     });
     result.session = session;
 
