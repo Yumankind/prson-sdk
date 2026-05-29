@@ -39,6 +39,22 @@ export type DraftResult = {
    * it through the QR (`t=` param).
    */
   serverTs: number;
+  /**
+   * Cloudflare TURN credentials for the BROWSER side of the data
+   * channel. The wallet gets its own set from `/session/claim`. With
+   * a relay candidate on both peers, ICE succeeds across every NAT
+   * variant — including localhost + Chrome's mDNS-obfuscated host
+   * candidates that iOS WebRTC can't resolve. Wire grammar matches
+   * `RTCIceServer`: `{ urls, username, credential }`. Older Workers
+   * that pre-date this field omit it; the SDK falls back to STUN
+   * only in that case.
+   */
+  turn?: {
+    urls: string | string[];
+    username: string;
+    credential: string;
+    expiresAt?: number;
+  };
 };
 
 /**

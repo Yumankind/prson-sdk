@@ -3004,6 +3004,9 @@ var PrsonLoginSession = class {
   _armExpiryTimer() {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     const delta = this._expiresAt - Date.now();
+    console.info(
+      `[@prson/login-sdk] arming expiry timer: expiresAt=${this._expiresAt} (${new Date(this._expiresAt).toISOString()}) now=${Date.now()} (${(/* @__PURE__ */ new Date()).toISOString()}) delta_ms=${delta}`
+    );
     if (delta <= 0) {
       const skewBudgetMs = 6e4;
       if (this._expiresAt <= 0 || -delta < skewBudgetMs) {
@@ -3108,6 +3111,9 @@ var PrsonLoginSession = class {
   }
   async _handleRenewal(envelope) {
     if (!envelope.presentation) return;
+    console.info(
+      `[@prson/login-sdk] _handleRenewal triggered with envelope.msg=${envelope.msg}`
+    );
     const verifierOpts = {
       ...this._verifierContext,
       expectedNonce: extractKbNonce(envelope.presentation) ?? this._verifierContext.expectedNonceFactory()
@@ -3369,14 +3375,20 @@ async function connectSignaling(opts) {
 
 // src/transport.ts
 async function establishTransport(opts) {
-  const pc = new RTCPeerConnection({
-    iceServers: [
-      // Cloudflare STUN (free, no auth) — lets the browser gather host
-      // + server-reflexive candidates so the wallet has somewhere to
-      // connect even when both sides start from behind NAT.
-      { urls: "stun:stun.cloudflare.com:3478" }
-    ]
-  });
+  const iceServers = [
+    // Cloudflare STUN (free, no auth) — lets the browser gather host
+    // + server-reflexive candidates so the wallet has somewhere to
+    // connect even when both sides start from behind NAT.
+    { urls: "stun:stun.cloudflare.com:3478" }
+  ];
+  if (opts.turn) {
+    iceServers.push({
+      urls: opts.turn.urls,
+      username: opts.turn.username,
+      credential: opts.turn.credential
+    });
+  }
+  const pc = new RTCPeerConnection({ iceServers });
   const dc = pc.createDataChannel("prson-login", { ordered: true });
   pc.addEventListener("icecandidate", (e) => {
     if (e.candidate) opts.signaling.send({ msg: "candidate", candidate: e.candidate.toJSON() });
@@ -4144,7 +4156,13 @@ var PrsonLogin = class {
       const transport = await establishTransport({
         stunOnly: true,
         signaling,
-        role: "browser"
+        role: "browser",
+        // When the Worker minted TURN creds at draft time, hand them
+        // to the peer connection so the browser also has a relay
+        // candidate. Older Workers may omit `turn` from the draft
+        // response; falling back to STUN-only matches the prior
+        // behaviour.
+        turn: draft.turn
       });
       me.pushTeardown(() => transport.close());
       checkAborted();

@@ -19,21 +19,37 @@ export interface Transport {
 }
 
 export async function establishTransport(opts: {
-  /** Browser only uses STUN; the wallet allocates the TURN relay (the
-   *  browser reaches its relayed candidates as a remote address, no
-   *  client-side TURN credentials needed). See ../../SECURITY.md §6. */
+  /** Browser uses STUN by default; when [turn] is supplied the
+   *  Worker also minted a TURN allocation for the browser so ICE can
+   *  succeed across symmetric NATs and Chrome's mDNS-obfuscated host
+   *  candidates that iOS WebRTC can't resolve. See ../../SECURITY.md §6. */
   stunOnly: true;
   signaling: SignalingConnection;
   role: "browser";
+  /** Optional TURN creds from `/session/draft`. When present, the
+   *  browser gathers a relay candidate of its own — necessary on
+   *  localhost + Chrome where host candidates are .local mDNS names
+   *  iOS WebRTC can't resolve, and on any symmetric NAT. */
+  turn?: {
+    urls: string | string[];
+    username: string;
+    credential: string;
+  };
 }): Promise<Transport> {
-  const pc = new RTCPeerConnection({
-    iceServers: [
-      // Cloudflare STUN (free, no auth) — lets the browser gather host
-      // + server-reflexive candidates so the wallet has somewhere to
-      // connect even when both sides start from behind NAT.
-      { urls: "stun:stun.cloudflare.com:3478" },
-    ],
-  });
+  const iceServers: RTCIceServer[] = [
+    // Cloudflare STUN (free, no auth) — lets the browser gather host
+    // + server-reflexive candidates so the wallet has somewhere to
+    // connect even when both sides start from behind NAT.
+    { urls: "stun:stun.cloudflare.com:3478" },
+  ];
+  if (opts.turn) {
+    iceServers.push({
+      urls: opts.turn.urls,
+      username: opts.turn.username,
+      credential: opts.turn.credential,
+    });
+  }
+  const pc = new RTCPeerConnection({ iceServers });
 
   // Browser is the initiator → opens the data channel before the
   // offer. Negotiated=false so the wallet sees `ondatachannel`.

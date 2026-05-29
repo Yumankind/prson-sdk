@@ -562,6 +562,13 @@ export class PrsonLoginSession {
   private _armExpiryTimer() {
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
     const delta = this._expiresAt - Date.now();
+    // eslint-disable-next-line no-console
+    console.info(
+      `[@prson/login-sdk] arming expiry timer: ` +
+        `expiresAt=${this._expiresAt} (${new Date(this._expiresAt).toISOString()}) ` +
+        `now=${Date.now()} (${new Date().toISOString()}) ` +
+        `delta_ms=${delta}`,
+    );
     if (delta <= 0) {
       // `delta <= 0` means the credential is "expired" against the
       // browser clock. Three sub-cases — only the LAST should
@@ -735,6 +742,10 @@ export class PrsonLoginSession {
 
   private async _handleRenewal(envelope: DecryptedEnvelope) {
     if (!envelope.presentation) return;
+    // eslint-disable-next-line no-console
+    console.info(
+      `[@prson/login-sdk] _handleRenewal triggered with envelope.msg=${envelope.msg}`,
+    );
     // Renewal: re-verify against a fresh KB nonce. The wallet
     // generates its own monotonically-increasing nonce per renewal
     // and writes it into the KB-JWT; we accept any nonce within the

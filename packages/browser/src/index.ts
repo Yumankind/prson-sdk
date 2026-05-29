@@ -358,6 +358,12 @@ export class PrsonLogin {
       stunOnly: true,
       signaling,
       role: "browser",
+      // When the Worker minted TURN creds at draft time, hand them
+      // to the peer connection so the browser also has a relay
+      // candidate. Older Workers may omit `turn` from the draft
+      // response; falling back to STUN-only matches the prior
+      // behaviour.
+      turn: draft.turn,
     });
     // From here on, `transport` owns the signaling channel — its
     // close() will close the WS too. Replace the prior signaling
