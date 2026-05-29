@@ -79,10 +79,46 @@ export type DecryptedEnvelope = {
     | "mouse-update"
     | "nav"
     | "value"
-    | "logout";
+    | "logout"
+    /** Transport-layer reliability primitive: the peer's confirmation
+     *  that the envelope with id [ackOf] was received. The session
+     *  layer auto-emits these for inbound messages carrying an `id`
+     *  (other than ping / pong / ack themselves) and resolves
+     *  pending-ack promises on the sender side. See session.ts. */
+    | "ack"
+    /** Liveness probe. Sender keeps a fresh `id` per ping and times
+     *  the matching pong to derive RTT. The receiver echoes as
+     *  `pong` with `ackOf` set to the ping's `id`. */
+    | "ping"
+    /** Liveness echo. `ackOf` references the ping's id; `recvTs`
+     *  is the peer's wall-clock receipt time. Recipient computes
+     *  RTT = now − sendTs cached against [ackOf]. */
+    | "pong";
   issuedAt: number;
   ttlMinutes?: number;
   domain?: string;
+
+  /** Transport-layer envelope id (UUID v4). Present on every wire
+   *  message that is ack-tracked or dedupe-tracked; absent on
+   *  mouse-update (high-frequency broadcast where loss is OK) and
+   *  on the protocol primitives `ack` / `pong` (which carry
+   *  [ackOf] instead). The receiver dedupes by this id; the sender
+   *  retransmits until the matching [ack] arrives. */
+  id?: string;
+
+  /** Reference to the originating envelope's [id]. Set on `ack`,
+   *  `pong`, and `response` envelopes. */
+  ackOf?: string;
+
+  /** Ping send-time wall-clock (epoch ms). The pong copies this
+   *  verbatim so the sender doesn't need to maintain a separate
+   *  ts cache for an RTT calculation. */
+  ts?: number;
+
+  /** Pong-only: the responder's wall-clock receipt time (epoch ms).
+   *  Useful for one-way delay estimates if the host wants finer
+   *  diagnostics than RTT alone. */
+  recvTs?: number;
 
   /** Present for `presentation`, `renewal`, and `claim-update`. */
   presentation?: string;

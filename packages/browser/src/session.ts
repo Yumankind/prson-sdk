@@ -61,6 +61,79 @@ export type CredentialRevokedReason =
   | "user_revoked"
   | "key_compromised";
 
+/**
+ * Coarse health of the wallet ↔ browser data channel as observed via
+ * the periodic ping/pong loop. Drives the connection-status dot the
+ * wallet renders on its remote-nav banner; partner sites can mirror
+ * the same signal by reading [PrsonLoginSession.connectionStatus] /
+ * subscribing via [PrsonLoginSession.onConnectionStatus].
+ *
+ *   * `unknown`  — before the first pong has landed.
+ *   * `stable`   — last RTT under [CONNECTION_UNSTABLE_THRESHOLD_MS].
+ *   * `unstable` — last RTT crossed the threshold.
+ *   * `offline`  — no pong for [CONNECTION_OFFLINE_AFTER_MS]; the
+ *                  channel is either dead or paused.
+ */
+export type ConnectionStatus = "unknown" | "stable" | "unstable" | "offline";
+
+/** RTT above this (ms) flips connectionStatus to `unstable`. */
+const CONNECTION_UNSTABLE_THRESHOLD_MS = 1000;
+/** No pong observed for this long (ms) flips status to `offline`. */
+const CONNECTION_OFFLINE_AFTER_MS = 5000;
+/** Cadence of the local ping loop (ms). */
+const PING_INTERVAL_MS = 2000;
+/** Delay before retransmitting an ack-required envelope (ms). */
+const ACK_RETRY_DELAY_MS = 2000;
+/** Maximum retransmissions before giving up on an ack-required envelope. */
+const ACK_MAX_ATTEMPTS = 3;
+/** LRU cap on the seen-id dedupe set. ~500 ids ≈ 16 min of pings
+ *  on the 2 s loop, far longer than any realistic re-send window. */
+const SEEN_IDS_CAPACITY = 500;
+
+/**
+ * Generate a UUID v4. Browsers shipping `crypto.randomUUID` use it
+ * directly; older engines fall back to a `getRandomValues`-based
+ * implementation that produces the same on-the-wire shape.
+ */
+/**
+ * Detach a timer handle from Node's "keep the event loop alive"
+ * accounting. In browsers `setTimeout` / `setInterval` return a
+ * number with no `unref` method, so the test is a harmless no-op.
+ * In Node the returned `Timeout` object has `unref()` and this is
+ * what stops unit tests from hanging until their hour-scale expiry
+ * timer would otherwise fire.
+ */
+function _unrefTimer(
+  t: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval> | null,
+): void {
+  if (t === null) return;
+  const maybe = t as unknown as { unref?: () => void };
+  if (typeof maybe.unref === "function") maybe.unref();
+}
+
+function uuidv4(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  buf[6] = (buf[6]! & 0x0f) | 0x40; // version 4
+  buf[8] = (buf[8]! & 0x3f) | 0x80; // variant 10
+  const h: string[] = [];
+  for (let i = 0; i < 16; i++) h.push(buf[i]!.toString(16).padStart(2, "0"));
+  return (
+    h.slice(0, 4).join("") +
+    "-" +
+    h.slice(4, 6).join("") +
+    "-" +
+    h.slice(6, 8).join("") +
+    "-" +
+    h.slice(8, 10).join("") +
+    "-" +
+    h.slice(10, 16).join("")
+  );
+}
+
 /** Convenience alias kept for callers that consumed the old shape. */
 export type Renewal = Pick<SignInResult, "sdJwtVc" | "claims" | "credential">;
 
@@ -197,6 +270,37 @@ export class PrsonLoginSession {
   /** "Fire on every event" subscribers — for logging / telemetry. */
   private _anyListeners: Set<(e: LoginEvent) => void> = new Set();
 
+  // ─── Transport-layer reliability state ───────────────────────────
+  //
+  // Mirrors the wallet's LoginSession protocol (see
+  // mobile-app/.../login_session_service.dart):
+  //
+  //   * `_seenIds` + `_seenIdsOrder` — LRU dedupe of inbound `id`s.
+  //   * `_pendingAcks`               — outbound ack-tracked sends.
+  //   * `_pingSendTimes`             — RTT correlation by ping id.
+  //   * `_pingTimer` + `_offlineTimer` — liveness loop.
+  //
+  // Browser-side critical sends are: `request`, `focus`, `ack`,
+  // `pong`. Of those only `request` already has its own
+  // RequestController/timeout contract; the rest are fire-and-forget
+  // today. To keep the surface small AND match the wallet, we add
+  // ack tracking on outbound `focus` only (high signal-to-noise for
+  // remote-nav UX). `request` keeps its existing semantics; `ack`
+  // and `pong` are never themselves ack-tracked (would loop).
+  private _seenIds: Set<string> = new Set();
+  private _seenIdsOrder: string[] = [];
+  private _pendingAcks: Map<
+    string,
+    { encoded: string; attempts: number; timer: ReturnType<typeof setTimeout> | null }
+  > = new Map();
+  private _pingSendTimes: Map<string, number> = new Map();
+  private _pingTimer: ReturnType<typeof setInterval> | null = null;
+  private _offlineTimer: ReturnType<typeof setTimeout> | null = null;
+  private _connectionStatus: ConnectionStatus = "unknown";
+  private _lastRttMs: number | null = null;
+  private _connectionListeners: Set<(s: ConnectionStatus, rttMs: number | null) => void> =
+    new Set();
+
   constructor(opts: {
     cnf: { jwk: CnfJwk };
     credential: { expiresAt: number };
@@ -259,6 +363,11 @@ export class PrsonLoginSession {
     this._avatar = opts.initialAvatar ?? null;
     this._armExpiryTimer();
     this._transport.onMessage((raw) => void this._handleMessage(raw));
+    // Start the wallet→browser liveness loop. The wallet runs the
+    // same loop on its side; either peer's ping triggers a pong on
+    // the other. Both sides independently track their own RTT view.
+    this._pingTimer = setInterval(() => this._sendPing(), PING_INTERVAL_MS);
+    _unrefTimer(this._pingTimer);
 
     // Fire `signed_in` via microtask so listeners attached
     // synchronously after `await signIn()` still receive it.
@@ -301,6 +410,30 @@ export class PrsonLoginSession {
    *  trust model as [displayName]. */
   get avatar(): { url: string; hash: string } | null {
     return this._avatar;
+  }
+
+  /** Coarse health of the wallet ↔ browser data channel as observed
+   *  via the periodic ping/pong loop. `unknown` until the first pong
+   *  lands; `offline` after 5 s of no pong; `unstable` when the most
+   *  recent RTT crossed 1 s; otherwise `stable`. */
+  get connectionStatus(): ConnectionStatus {
+    return this._connectionStatus;
+  }
+
+  /** Most recently observed RTT in milliseconds, or null until the
+   *  first pong lands. */
+  get lastRttMs(): number | null {
+    return this._lastRttMs;
+  }
+
+  /** Subscribe to connection-status changes. Fires on every transition
+   *  with the new status + the RTT that triggered it (null on the
+   *  `offline` transition). Returns an unsubscribe handle. */
+  onConnectionStatus(
+    cb: (status: ConnectionStatus, rttMs: number | null) => void,
+  ): Unsubscribe {
+    this._connectionListeners.add(cb);
+    return () => this._connectionListeners.delete(cb);
   }
 
   // ─── Subscription API ────────────────────────────────────────────
@@ -444,21 +577,16 @@ export class PrsonLoginSession {
       | null,
   ): Promise<void> {
     if (this._closed) return;
-    const recipientPk = this._walletSessionPk;
-    if (!recipientPk) return;
-    const payload: Record<string, unknown> = {
-      v: "prson_vp_v1",
+    if (!this._walletSessionPk) return;
+    // Focus updates drive the wallet drawer's mirrored input — the
+    // user can't edit a value the wallet never received, so we
+    // ack-track these. The promise is awaited only by tests; the
+    // common path (remote-nav helper firing on DOM focus events) is
+    // fire-and-forget.
+    await this._sendWithAck({
       msg: "focus",
-      issuedAt: Math.floor(Date.now() / 1000),
-      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
       focus,
-    };
-    try {
-      const boxed = boxToWallet(recipientPk, JSON.stringify(payload));
-      this._transport.send(boxed);
-    } catch {
-      /* swallow — channel down */
-    }
+    });
   }
 
   /**
@@ -655,6 +783,7 @@ export class PrsonLoginSession {
         this._armExpiryTimer();
       }
     }, chunk);
+    _unrefTimer(this._expiryTimer);
   }
 
   private async _handleMessage(raw: string) {
@@ -667,7 +796,202 @@ export class PrsonLoginSession {
       // peer-close signals here; those don't decrypt and that's fine.
       return;
     }
+
+    // ── Transport-layer protocol: dedupe + auto-ack + ping/pong ──
+    if (typeof envelope.id === "string") {
+      if (this._seenIds.has(envelope.id)) {
+        // Duplicate — our prior ack likely got lost. Re-ack so the
+        // wallet stops retransmitting, then drop locally.
+        void this._sendAckFor(envelope);
+        return;
+      }
+      this._markSeen(envelope.id);
+      void this._sendAckFor(envelope);
+    }
+
+    if (envelope.msg === "ack") {
+      this._handleAck(envelope.ackOf);
+      return;
+    }
+    if (envelope.msg === "ping") {
+      void this._sendPong(envelope);
+      return;
+    }
+    if (envelope.msg === "pong") {
+      this._handlePong(envelope);
+      return;
+    }
+
     await this._dispatchDecryptedForTest(envelope);
+  }
+
+  // ─── Transport-layer protocol helpers ─────────────────────────────
+
+  private _markSeen(id: string): void {
+    this._seenIds.add(id);
+    this._seenIdsOrder.push(id);
+    if (this._seenIdsOrder.length > SEEN_IDS_CAPACITY) {
+      const evict = this._seenIdsOrder.shift();
+      if (evict) this._seenIds.delete(evict);
+    }
+  }
+
+  /** Auto-ack any inbound envelope that carries an `id`, except
+   *  protocol primitives. `ping` is implicitly acked by `pong`;
+   *  `pong` and `ack` would loop. */
+  private async _sendAckFor(envelope: DecryptedEnvelope): Promise<void> {
+    if (typeof envelope.id !== "string") return;
+    if (envelope.msg === "ack" || envelope.msg === "ping" || envelope.msg === "pong") {
+      return;
+    }
+    if (!this._walletSessionPk) return;
+    const body = JSON.stringify({
+      v: "prson_vp_v1",
+      msg: "ack",
+      ackOf: envelope.id,
+      issuedAt: Math.floor(Date.now() / 1000),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+    });
+    try {
+      this._transport.send(boxToWallet(this._walletSessionPk, body));
+    } catch {
+      /* channel down — wallet will time out its retry budget */
+    }
+  }
+
+  private _handleAck(ackOf: string | undefined): void {
+    if (!ackOf) return;
+    const pending = this._pendingAcks.get(ackOf);
+    if (!pending) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    this._pendingAcks.delete(ackOf);
+  }
+
+  private async _sendPing(): Promise<void> {
+    if (this._closed) return;
+    if (!this._walletSessionPk) return;
+    const id = uuidv4();
+    const ts = Date.now();
+    this._pingSendTimes.set(id, ts);
+    const body = JSON.stringify({
+      v: "prson_vp_v1",
+      msg: "ping",
+      id,
+      ts,
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+    });
+    try {
+      this._transport.send(boxToWallet(this._walletSessionPk, body));
+    } catch {
+      /* swallow */
+    }
+    this._armOfflineTimer();
+  }
+
+  private async _sendPong(ping: DecryptedEnvelope): Promise<void> {
+    if (!this._walletSessionPk) return;
+    if (typeof ping.id !== "string") return;
+    const body = JSON.stringify({
+      v: "prson_vp_v1",
+      msg: "pong",
+      ackOf: ping.id,
+      ts: ping.ts,
+      recvTs: Date.now(),
+      domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
+    });
+    try {
+      this._transport.send(boxToWallet(this._walletSessionPk, body));
+    } catch {
+      /* swallow */
+    }
+  }
+
+  private _handlePong(envelope: DecryptedEnvelope): void {
+    if (typeof envelope.ackOf !== "string") return;
+    const sent = this._pingSendTimes.get(envelope.ackOf);
+    if (sent === undefined) return;
+    this._pingSendTimes.delete(envelope.ackOf);
+    const rtt = Date.now() - sent;
+    this._lastRttMs = rtt;
+    if (this._offlineTimer) {
+      clearTimeout(this._offlineTimer);
+      this._offlineTimer = null;
+    }
+    this._setConnectionStatus(
+      rtt > CONNECTION_UNSTABLE_THRESHOLD_MS ? "unstable" : "stable",
+      rtt,
+    );
+  }
+
+  private _armOfflineTimer(): void {
+    if (this._offlineTimer) clearTimeout(this._offlineTimer);
+    this._offlineTimer = setTimeout(() => {
+      if (this._closed) return;
+      this._setConnectionStatus("offline", null);
+    }, CONNECTION_OFFLINE_AFTER_MS);
+    _unrefTimer(this._offlineTimer);
+  }
+
+  private _setConnectionStatus(s: ConnectionStatus, rttMs: number | null): void {
+    if (this._connectionStatus === s && this._lastRttMs === rttMs) return;
+    this._connectionStatus = s;
+    if (rttMs !== null) this._lastRttMs = rttMs;
+    for (const cb of this._connectionListeners) {
+      try {
+        cb(s, rttMs);
+      } catch {
+        /* swallow — host bug shouldn't kill the loop */
+      }
+    }
+  }
+
+  /** Send a JSON envelope with ack tracking + retry. Stamps a fresh
+   *  `id` onto [body] and retransmits every [ACK_RETRY_DELAY_MS]
+   *  until the matching ack lands or [ACK_MAX_ATTEMPTS] is reached.
+   *  Resolves with `true` on ack, `false` on exhaustion. */
+  private async _sendWithAck(body: Record<string, unknown>): Promise<boolean> {
+    if (this._closed) return false;
+    if (!this._walletSessionPk) return false;
+    const id = uuidv4();
+    body.id = id;
+    body.v = body.v ?? "prson_vp_v1";
+    body.issuedAt = body.issuedAt ?? Math.floor(Date.now() / 1000);
+    body.domain =
+      body.domain ?? this._verifierContext.expectedAudience.replace(/^https?:\/\//, "");
+    const encoded = JSON.stringify(body);
+    const pending = { encoded, attempts: 0, timer: null as ReturnType<typeof setTimeout> | null };
+    this._pendingAcks.set(id, pending);
+    return new Promise<boolean>((resolve) => {
+      const attempt = () => {
+        if (this._closed) {
+          this._pendingAcks.delete(id);
+          resolve(false);
+          return;
+        }
+        pending.attempts += 1;
+        try {
+          this._transport.send(boxToWallet(this._walletSessionPk!, encoded));
+        } catch {
+          /* channel down — keep retrying; offline timer will fire */
+        }
+        pending.timer = setTimeout(() => {
+          if (!this._pendingAcks.has(id)) {
+            // Ack already arrived between attempts; the success path
+            // cleared the map entry.
+            resolve(true);
+            return;
+          }
+          if (pending.attempts >= ACK_MAX_ATTEMPTS) {
+            this._pendingAcks.delete(id);
+            resolve(false);
+            return;
+          }
+          attempt();
+        }, ACK_RETRY_DELAY_MS);
+        _unrefTimer(pending.timer);
+      };
+      attempt();
+    });
   }
 
   /**
@@ -926,6 +1250,13 @@ export class PrsonLoginSession {
     if (this._closed) return;
     this._closed = true;
     if (this._expiryTimer) clearTimeout(this._expiryTimer);
+    if (this._pingTimer) clearInterval(this._pingTimer);
+    if (this._offlineTimer) clearTimeout(this._offlineTimer);
+    for (const p of this._pendingAcks.values()) {
+      if (p.timer) clearTimeout(p.timer);
+    }
+    this._pendingAcks.clear();
+    this._pingSendTimes.clear();
     try {
       this._transport.close();
     } catch {
@@ -943,6 +1274,7 @@ export class PrsonLoginSession {
     // `session.on(...)` after teardown doesn't accumulate forever.
     this._listeners.clear();
     this._anyListeners.clear();
+    this._connectionListeners.clear();
   }
 }
 
