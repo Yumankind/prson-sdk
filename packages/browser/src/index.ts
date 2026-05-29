@@ -33,6 +33,24 @@ import { verifyPresentation } from "./verify.js";
 
 export type SignInOptions = {
   domain?: string;
+
+  /**
+   * Which Prson backend environment to sign in against. `"dev"` points
+   * the flow at the dev signaling Worker (`signaling-dev.prson.net`);
+   * omit (or `"production"`) for the live environment. For a custom /
+   * local Worker, set `signalingBase` instead (it takes precedence).
+   * Default `"production"`.
+   */
+  environment?: "production" | "dev";
+
+  /**
+   * Explicit signaling Worker base URL — overrides `environment`. Use
+   * for a local Worker (`https://localhost:8787`) or any non-standard
+   * deployment. The Worker returns the matching WebSocket URL in its
+   * draft response, so this single value steers the whole flow.
+   */
+  signalingBase?: string;
+
   required?: {
     minVerificationLevel?: 1 | 2 | 3 | 4 | 5 | 6;
     requiredClaims?: string[];
@@ -164,10 +182,22 @@ export const ANONYMOUS_WALLET_VCT =
 // `SESSION_TTL_SECONDS` in `cloudflare-workers/signaling-worker/src/index.ts`.
 export const DEFAULT_TTL_MINUTES = 2;
 export const MAX_TTL_MINUTES = 2;
-/** Cloudflare Worker single-API-surface base URL. Override in dev with
- *  `PrsonLogin.signIn({ ... signalingBase: "https://localhost:8787" })`
- *  via your own wrapper if you've stood up a local Worker. */
+/** Cloudflare Worker single-API-surface base URL (production). */
 export const SIGNALING_BASE = "https://signaling.prson.net";
+
+/** Dev environment Worker base. Selected via `signIn({ environment: "dev" })`,
+ *  or override either env with an explicit `signalingBase` (e.g. a local
+ *  Worker at `https://localhost:8787`). */
+export const SIGNALING_BASE_DEV = "https://signaling-dev.prson.net";
+
+/** Map an `environment` shorthand to its Worker base URL. */
+export function resolveSignalingBase(opts: {
+  environment?: "production" | "dev";
+  signalingBase?: string;
+}): string {
+  if (opts.signalingBase) return opts.signalingBase;
+  return opts.environment === "dev" ? SIGNALING_BASE_DEV : SIGNALING_BASE;
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Concurrency guard — one in-flight sign-in at a time
@@ -321,7 +351,9 @@ export class PrsonLogin {
     //    Anonymous + IP rate-limited. NO TURN allocation, NO Firebase
     //    in the path — the Worker is the single API surface and waits
     //    for the wallet to claim before allocating real capacity.
-    const draft = await createDraft(request);
+    const draft = await createDraft(request, {
+      signalingBase: resolveSignalingBase(opts),
+    });
     checkAborted();
 
     // 4. Render the QR encoding the deep-link URL the wallet scans /
