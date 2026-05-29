@@ -4848,7 +4848,7 @@ function bindMouse(session, opts) {
   }
   const offAmbient = session._setAmbientMouseHandler((mouseBody) => {
     if (disposed) return;
-    if (mouseBody.event !== "move" && mouseBody.event !== "click" && mouseBody.event !== "double-click" && mouseBody.event !== "scroll") {
+    if (mouseBody.event === "begin" || mouseBody.event === "end") {
       ensureCursor();
       return;
     }

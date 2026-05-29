@@ -943,16 +943,14 @@ export function bindMouse(
 
   const offAmbient = session._setAmbientMouseHandler((mouseBody) => {
     if (disposed) return;
-    // Treat wallet "begin" / "end" frames as no-ops on the cursor —
-    // they're protocol pairing tokens, not pointer events.
-    if (
-      mouseBody.event !== "move" &&
-      mouseBody.event !== "click" &&
-      mouseBody.event !== "double-click" &&
-      mouseBody.event !== "scroll"
-    ) {
-      // Make sure the cursor exists so the first real frame doesn't
-      // race the lazy initialiser.
+    // `begin` / `end` are protocol pairing tokens — they just need to
+    // make sure the cursor element exists (so the first real `move`
+    // frame doesn't race the lazy initialiser) and are otherwise
+    // no-ops. **Every other event** — including the visibility
+    // toggles `show` / `hide` — must be forwarded to `applyFrame`,
+    // which is what opens / closes the "point your phone" overlay
+    // and re-centres the cursor on resume.
+    if (mouseBody.event === "begin" || mouseBody.event === "end") {
       ensureCursor();
       return;
     }
