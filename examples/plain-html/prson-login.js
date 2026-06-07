@@ -5255,6 +5255,11 @@ var ANONYMOUS_WALLET_VCT2 = "https://app.prson.net/credentials/anonymous-wallet/
 var DEFAULT_TTL_MINUTES = 2;
 var MAX_TTL_MINUTES = 2;
 var SIGNALING_BASE = "https://signaling.prson.net";
+var SIGNALING_BASE_DEV = "https://signaling-dev.prson.net";
+function resolveSignalingBase(opts) {
+  if (opts.signalingBase) return opts.signalingBase;
+  return opts.environment === "dev" ? SIGNALING_BASE_DEV : SIGNALING_BASE;
+}
 var LoginAbortedError = class extends Error {
   constructor(message = "sign-in aborted by a newer signIn() call") {
     super(message);
@@ -5330,7 +5335,9 @@ var PrsonLogin = class {
         mouseControl: opts.mouseControl === true,
         ttlMaxMinutes
       };
-      const draft = await createDraft(request);
+      const draft = await createDraft(request, {
+        signalingBase: resolveSignalingBase(opts)
+      });
       checkAborted();
       const qrUrl = buildDeepLinkUrl({
         reqId: draft.reqId,
@@ -5497,10 +5504,12 @@ export {
   PrsonLogin,
   PrsonLoginSession,
   SIGNALING_BASE,
+  SIGNALING_BASE_DEV,
   TRUSTED_ISSUER,
   bindForm,
   bindInput,
   bindMouse,
-  enableRemoteNavigation
+  enableRemoteNavigation,
+  resolveSignalingBase
 };
-//# sourceMappingURL=index.js.map
+//# sourceMappingURL=prson-login.js.map

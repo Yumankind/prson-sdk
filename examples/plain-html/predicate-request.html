@@ -244,7 +244,7 @@
         $signinBtn.disabled = true;
         setStatus($signinStatus, "warn", "Waiting for QR scan…");
         try {
-          const result = await PrsonLogin.signIn({ ttlMinutes: 5 });
+          const result = await PrsonLogin.signIn({ ttlMinutes: 5, environment: "dev" });
           session = result.session;
           log("signed_in", { displayName: result.claims?.display_name });
           setStatus(
