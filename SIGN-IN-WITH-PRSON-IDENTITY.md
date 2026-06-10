@@ -322,6 +322,20 @@ Combine `required.minVerificationLevel: 0` with `allowAnonymous: true`
 to offer users the full choice: named-but-unverified identity OR
 fully anonymous key.
 
+### Unique-human id (`required.uniqueHumanId: true`)
+
+Orthogonal to the tiers above: the host can additionally require a
+**domain-scoped unique-human id** — a notary-signed pairwise identifier
+anchored to the user's verified government document (sybil resistance
+without cross-site correlation). The wallet only offers document-backed
+identities (level ≥ 4), fetches the credential at approve time
+(`issueUniqueHumanId`), and attaches it to the initial presentation
+envelope. The browser SDK gates on its presence and exposes it as
+`result.uniqueHumanId` — an OPAQUE pass-through the host MUST verify
+server-side with `@prson/login-verifier`'s `verifyUniqueHumanId`
+(`expectedAudience` = your host), then key accounts off
+`envelope.uniqueIdHash`.
+
 ## Appendix A. Backwards compatibility
 
 A host on the current SDK (no `request` arg) keeps the existing

@@ -68,6 +68,16 @@ export type SignInOptions = {
     requiredClaims?: string[];
     predicates?: string[];
     identityType?: "personal" | "organization";
+    /**
+     * Require a **domain-scoped unique-human id**: a notary-signed
+     * pairwise identifier anchored to the user's verified government
+     * document. Proves "one unique, document-verified human at YOUR
+     * domain" (sybil resistance) without any cross-site correlation
+     * handle. The wallet only offers document-backed identities
+     * (level ≥ 4) when this is set; the result carries
+     * `uniqueHumanId` for SERVER-SIDE verification.
+     */
+    uniqueHumanId?: boolean;
   };
   /**
    * If `true`, the SDK ALSO accepts an **anonymous-wallet** credential
@@ -172,6 +182,20 @@ export type SignInResult = {
     kid: string;
     expiresAt: number;
   };
+  /**
+   * Present when the host set `required.uniqueHumanId: true`: a
+   * notary-signed, domain-scoped uniqueness credential. OPAQUE
+   * pass-through — verify it SERVER-SIDE with
+   * `@prson/login-verifier`'s `verifyUniqueHumanId({...},
+   * { expectedAudience: "your.host" })`, then use
+   * `envelope.uniqueIdHash` as the sybil-resistant account key.
+   * Stable for this human at your domain; uncorrelatable anywhere else.
+   */
+  uniqueHumanId?: {
+    envelope: Record<string, unknown>;
+    signature: string;
+    kid: string;
+  } | null;
   session: PrsonLoginSession;
 };
 
@@ -524,11 +548,23 @@ export class PrsonLogin {
     // result first, hand it to the session as the initial-signed-in
     // payload (the session fires `signed_in` via microtask), and
     // return the same object.
+    // Unique-human id (when required): the wallet attaches it to the
+    // initial envelope; we gate on presence here and pass it through
+    // OPAQUE — cryptographic verification belongs on the host's server
+    // (verifier-node `verifyUniqueHumanId`), since a browser-side check
+    // could be bypassed by the page's own code anyway.
+    const uniqueHumanId =
+      (envelope as { uniqueHumanId?: SignInResult["uniqueHumanId"] }).uniqueHumanId ?? null;
+    if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
+      throw new Error("Presentation rejected: required uniqueHumanId credential missing");
+    }
+
     const result: SignInResult = {
       sdJwtVc: presentationStr,
       claims: verified.claims,
       cnf: verified.cnf,
       credential: verified.credential,
+      uniqueHumanId,
       // session is filled in below — temporary placeholder cast
       // avoids a circular-self-reference in the literal.
       session: undefined as unknown as PrsonLoginSession,

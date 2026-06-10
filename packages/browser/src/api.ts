@@ -19,6 +19,8 @@ export type VerifierRequest = {
     requiredClaims?: string[];
     predicates?: string[];
     identityType?: "personal" | "organization";
+    /** Require a domain-scoped unique-human id (document-anchored). */
+    uniqueHumanId?: boolean;
   };
   ttlMaxMinutes: number;
 };
