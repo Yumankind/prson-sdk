@@ -257,6 +257,13 @@ export type SignedFragmentNative = {
   propertyHash: string;
   propertyType: string;
   identityId: string;
+  /**
+   * Present on audience-scoped (pairwise) fragments. When set,
+   * `propertyHash` and `identityId` are pairwise identifiers derived
+   * for THIS domain only — stable here, uncorrelatable anywhere else —
+   * and the signature canonical carries an `:aud:<host>` suffix.
+   */
+  audience?: string;
   signedAt: string;
   expiresAt: string;
   signature: string;
@@ -268,6 +275,14 @@ export type FragmentVerifyOptions = Pick<
   "jwksUri" | "fetch" | "jwksCacheTtlMs" | "trustedIssuer"
 > & {
   acceptedPredicateVcts?: readonly string[];
+  /**
+   * Your domain (host). REQUIRED to accept audience-scoped fragments:
+   * the fragment's `audience` must equal this value or verification
+   * fails with `audience_mismatch` (a pairwise fragment minted for
+   * another relying party must never verify here). Legacy fragments
+   * (no `audience` field) are unaffected.
+   */
+  expectedAudience?: string;
   /** Override the current time, for deterministic tests. */
   now?: Date;
 };
@@ -278,7 +293,8 @@ export type FragmentVerifyFailureReason =
   | "issuer_sig_invalid"
   | "expired"
   | "vct_not_accepted"
-  | "unsupported_format";
+  | "unsupported_format"
+  | "audience_mismatch";
 
 export type FragmentVerifyResult =
   | { ok: false; reason: FragmentVerifyFailureReason; detail?: string }
@@ -323,6 +339,18 @@ export async function verifySignedFragment(
   if (new Date(fragment.expiresAt).getTime() <= now) {
     return { ok: false, reason: "expired" };
   }
+  // Audience-scoped (pairwise) fragments are domain-bound: the verifier
+  // must declare its own host and it must match what the issuer bound.
+  if (fragment.audience != null) {
+    const expected = (opts.expectedAudience ?? "").trim().toLowerCase();
+    if (!expected || expected !== String(fragment.audience).toLowerCase()) {
+      return {
+        ok: false,
+        reason: "audience_mismatch",
+        detail: `fragment bound to '${fragment.audience}', expectedAudience='${expected || "(unset)"}'`,
+      };
+    }
+  }
   const jwk = await resolveIssuerJwk(fragment.kid, opts);
   if (!jwk) return { ok: false, reason: "issuer_key_resolve_failed", detail: fragment.kid };
   let pem: ReturnType<typeof createPublicKey>;
@@ -331,7 +359,8 @@ export async function verifySignedFragment(
   } catch (e) {
     return { ok: false, reason: "issuer_key_resolve_failed", detail: (e as Error).message };
   }
-  const dataToSign = `${fragment.propertyHash}:${fragment.fragmentId}:${fragment.value}:${fragment.identityId}:${fragment.signedAt}:${fragment.expiresAt}`;
+  const base = `${fragment.propertyHash}:${fragment.fragmentId}:${fragment.value}:${fragment.identityId}:${fragment.signedAt}:${fragment.expiresAt}`;
+  const dataToSign = fragment.audience != null ? `${base}:aud:${fragment.audience}` : base;
   const verifier = createVerify("RSA-SHA256");
   verifier.update(dataToSign);
   verifier.end();
@@ -564,4 +593,117 @@ function sha256B64u(input: string): string {
 
 function b64uToString(s: string): string {
   return Buffer.from(s, "base64url").toString("utf8");
+}
+
+// ── Unique-human id verification (domain-scoped uniqueness) ─────────
+//
+// `issueUniqueHumanId` mints a notary-signed envelope proving "one
+// unique, government-document-verified human at YOUR domain". The
+// `uniqueIdHash` is a pairwise identifier: stable for the same human at
+// your domain (use it as a sybil-resistant account key), cryptographically
+// uncorrelatable with the id the same human gets anywhere else. No
+// global identifier (wallet id, identity id, document hash/number) is
+// present in the envelope.
+
+export type UniqueHumanIdEnvelope = {
+  scope: "prson-unique-human/1";
+  audience: string;
+  uniqueIdHash: string;
+  trustTier: "nfc" | "mrz";
+  verificationLevel: number;
+  documentType: string | null;
+  issuingCountry: string | null;
+  signedAt: string;
+  expiresAt: string;
+};
+
+export type UniqueHumanIdCredential = {
+  envelope: UniqueHumanIdEnvelope;
+  signature: string;
+  kid: string;
+};
+
+export type UniqueHumanIdVerifyResult =
+  | { ok: false; reason: FragmentVerifyFailureReason; detail?: string }
+  | { ok: true; uniqueIdHash: string; envelope: UniqueHumanIdEnvelope; kid: string };
+
+/**
+ * Sorted-keys JSON canonicalisation — byte-identical port of the
+ * server's `functions/utils/signatureUtils.js#canonicalStringify`,
+ * which is what the notary signed.
+ */
+function canonicalStringify(obj: unknown): string {
+  if (obj === null || obj === undefined) return "null";
+  if (typeof obj === "boolean" || typeof obj === "number") return obj.toString();
+  if (typeof obj === "string") return JSON.stringify(obj);
+  if (Array.isArray(obj)) return "[" + obj.map(canonicalStringify).join(",") + "]";
+  if (typeof obj === "object") {
+    const rec = obj as Record<string, unknown>;
+    const keys = Object.keys(rec).sort();
+    return (
+      "{" + keys.map((k) => JSON.stringify(k) + ":" + canonicalStringify(rec[k])).join(",") + "}"
+    );
+  }
+  return JSON.stringify(obj);
+}
+
+/**
+ * Verify a unique-human-id credential. Checks, in order: shape, scope,
+ * audience binding (must equal YOUR host — pass `expectedAudience`),
+ * expiry, and the notary RSA-SHA256 signature against the published
+ * JWKS (kid-pinned). On success, `uniqueIdHash` is safe to use as the
+ * per-domain uniqueness key.
+ */
+export async function verifyUniqueHumanId(
+  credential: UniqueHumanIdCredential,
+  opts: FragmentVerifyOptions = {},
+): Promise<UniqueHumanIdVerifyResult> {
+  const env = credential?.envelope;
+  if (
+    !env ||
+    typeof credential.signature !== "string" ||
+    typeof credential.kid !== "string" ||
+    typeof env.uniqueIdHash !== "string" ||
+    typeof env.audience !== "string" ||
+    typeof env.signedAt !== "string" ||
+    typeof env.expiresAt !== "string"
+  ) {
+    return { ok: false, reason: "malformed", detail: "missing required fields" };
+  }
+  if (env.scope !== "prson-unique-human/1") {
+    return { ok: false, reason: "unsupported_format", detail: `scope ${String(env.scope)}` };
+  }
+  const expected = (opts.expectedAudience ?? "").trim().toLowerCase();
+  if (!expected || expected !== env.audience.toLowerCase()) {
+    return {
+      ok: false,
+      reason: "audience_mismatch",
+      detail: `bound to '${env.audience}', expectedAudience='${expected || "(unset)"}'`,
+    };
+  }
+  const now = (opts.now ?? new Date()).getTime();
+  if (new Date(env.expiresAt).getTime() <= now) {
+    return { ok: false, reason: "expired" };
+  }
+  const jwk = await resolveIssuerJwk(credential.kid, opts);
+  if (!jwk) return { ok: false, reason: "issuer_key_resolve_failed", detail: credential.kid };
+  let pem: ReturnType<typeof createPublicKey>;
+  try {
+    pem = createPublicKey({ key: jwk as import("node:crypto").JsonWebKey, format: "jwk" });
+  } catch (e) {
+    return { ok: false, reason: "issuer_key_resolve_failed", detail: (e as Error).message };
+  }
+  const verifier = createVerify("RSA-SHA256");
+  verifier.update(canonicalStringify(env));
+  verifier.end();
+  let sigBytes: Buffer;
+  try {
+    sigBytes = Buffer.from(credential.signature, "base64");
+  } catch (e) {
+    return { ok: false, reason: "malformed", detail: `signature b64: ${(e as Error).message}` };
+  }
+  if (!verifier.verify(pem, sigBytes)) {
+    return { ok: false, reason: "issuer_sig_invalid" };
+  }
+  return { ok: true, uniqueIdHash: env.uniqueIdHash, envelope: env, kid: credential.kid };
 }

@@ -52,7 +52,19 @@ export type SignInOptions = {
   signalingBase?: string;
 
   required?: {
-    minVerificationLevel?: 1 | 2 | 3 | 4 | 5 | 6;
+    /**
+     * Minimum identity verification level (0–6). Omitted ⇒ 1.
+     *
+     * `0` opts into **pseudonymous identity sign-in**: the wallet may
+     * present an UNVERIFIED identity, and the minted credential
+     * honestly claims `verified_human: false` / `verification_level: 0`.
+     * You still get the stable per-domain `sub` (cnf.jwk continuity) —
+     * what you give up is any assurance a real, unique human is behind
+     * it. Distinct from `allowAnonymous`, which is identity-less: a
+     * level-0 identity sign-in carries the user's chosen identity and
+     * survives across sessions; anonymous carries only a key.
+     */
+    minVerificationLevel?: 0 | 1 | 2 | 3 | 4 | 5 | 6;
     requiredClaims?: string[];
     predicates?: string[];
     identityType?: "personal" | "organization";
@@ -469,6 +481,26 @@ export class PrsonLogin {
     });
     if (!verified.ok) {
       throw new Error(`Presentation rejected: ${verified.reason}`);
+    }
+
+    // Enforce the level floor against the VERIFIED claims (the wallet
+    // already gates UX-side, but the host's policy must not depend on
+    // the wallet's good behaviour). Anonymous-wallet credentials carry
+    // no level claim and are governed by `allowAnonymous` alone.
+    // Default floor is 1 — a `verified_human: false` (level-0)
+    // credential is only accepted when the host explicitly set
+    // `required.minVerificationLevel: 0`.
+    if (verified.credential.vct !== ANONYMOUS_WALLET_VCT) {
+      const minLevel = opts.required?.minVerificationLevel ?? 1;
+      const claimedLevel =
+        typeof verified.claims.verification_level === "number"
+          ? verified.claims.verification_level
+          : 0;
+      if (claimedLevel < minLevel) {
+        throw new Error(
+          `Presentation rejected: verification_level ${claimedLevel} below required ${minLevel}`,
+        );
+      }
     }
 
     // 9. Tear down the QR now that the sign-in is complete. The

@@ -14,7 +14,8 @@ export type VerifierRequest = {
   nonce: string;
   browserPk: string;
   required: {
-    minVerificationLevel?: 1 | 2 | 3 | 4 | 5 | 6;
+    /** 0 = pseudonymous (unverified identity) accepted; omitted ⇒ 1. */
+    minVerificationLevel?: 0 | 1 | 2 | 3 | 4 | 5 | 6;
     requiredClaims?: string[];
     predicates?: string[];
     identityType?: "personal" | "organization";

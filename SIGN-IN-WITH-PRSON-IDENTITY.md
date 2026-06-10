@@ -300,6 +300,28 @@ this account" flow needs. P3–P5 round out the privacy posture.
 
 ---
 
+## Acceptance tiers — anonymous vs level-0 vs verified
+
+A host configures what it accepts via two orthogonal knobs:
+
+| Mode | Option | What the RP gets | What it does NOT get |
+|---|---|---|---|
+| Anonymous | `allowAnonymous: true` | Self-signed per-domain key (`cnf.jwk.x` as stable id); no identity at all | No claims, no notary signature, no `sub` continuity if the user resets |
+| Pseudonymous (level 0) | `required.minVerificationLevel: 0` | Notary-minted SD-JWT-VC for an **unverified** identity — honest claims `verified_human: false`, `verification_level: 0`, `strength: "none"`; stable per-domain `sub`; full KB-JWT binding | Any assurance a real/unique human is behind it (TTL capped at 30 d) |
+| Verified | `required.minVerificationLevel: 1..6` (default 1) | The existing verified-human / verified-identity flow | — |
+
+Enforcement is layered: the wallet's drawer only offers identities
+meeting the floor (defaulting to 1 when the host didn't specify, so
+unverified identities are never offered by accident); the issuance
+endpoint refuses level-0 minting unless the request carries the
+host's explicit opt-in; and the browser SDK re-checks
+`claims.verification_level` against the floor AFTER cryptographic
+verification, so host policy never depends on wallet behaviour.
+
+Combine `required.minVerificationLevel: 0` with `allowAnonymous: true`
+to offer users the full choice: named-but-unverified identity OR
+fully anonymous key.
+
 ## Appendix A. Backwards compatibility
 
 A host on the current SDK (no `request` arg) keeps the existing
