@@ -361,6 +361,176 @@ Why this is replay/drain-safe (full model in
 - failed sends (SMS/letter) release the reservation and refund the
   sponsor, never burning the user's per-user slot.
 
+## App-to-app: using Sign in with Prson from a native mobile app
+
+Third-party **native apps** (not just websites) can use the full login
+flow — including predicates/facts, document-backed claims, the
+unique-human id, and sponsorships — on the same device as the Prson
+wallet. Two routes, one rule.
+
+### The rule: the audience is always your WEB domain
+
+Do **not** use your app's package name / bundle id as the domain. Every
+identity surface keys on a host — the per-domain holder key (HKDF), the
+pairwise ids, `bindToDomain`, login quotas, and the signaling worker's
+Origin pinning. Using your web domain means:
+
+- your app and your website see the **same stable per-user id**
+  (`cnf.jwk.x`, `sub`, unique-human id) — one account space;
+- the proof that *your app* may act for that domain is delegated to the
+  OS: Universal Links (AASA) / Android App Links (`assetlinks.json`)
+  only deliver `https://yourdomain.com/...` to the app your domain has
+  vouched for. A copied integration in a rogue app can't receive the
+  return leg.
+
+A package-name audience would create a *different* pairwise id than
+your website (by design — different audience string), so the wallet
+refuses non-host audiences outright.
+
+### Route 1 (recommended): your login page in a Custom Tab + `returnUrl`
+
+Open your own website's sign-in page in a Chrome Custom Tab /
+`SFSafariViewController`. The page runs this SDK exactly as on desktop —
+on a phone the QR is replaced by the universal-link tap
+(`https://app.prson.net/login/v1?...` opens the Prson wallet directly).
+Add `returnUrl` so the wallet bounces the user straight back into your
+app once the credential is delivered:
+
+```ts
+const session = await prson.signIn({
+  required: { predicates: ["age_gte_18"], uniqueHumanId: true },
+  // Your Universal Link / App Link — the OS routes it to YOUR app.
+  returnUrl: "https://yourdomain.com/app/signin-complete",
+});
+```
+
+Flow: your app → Custom Tab (your page, SDK `signIn`) → wallet opens via
+universal link → user approves in the drawer → wallet delivers the
+credential to your page over the established channel **and opens
+`returnUrl`** → the OS hands it to your app (App Link). Your page's
+`signIn()` promise resolves meanwhile; finish server-side verification
+(`@prson/login-verifier`) and mint your own app session (e.g. via the
+code you embedded in the `returnUrl` path/query yourself).
+
+`returnUrl` constraints (enforced in the SDK **and independently in the
+wallet** — a hand-rolled integration can't bypass them):
+
+- `https://` only. Custom schemes are refused — any installed app can
+  claim a custom scheme; https app links are domain-proven by the OS.
+- The URL's host must equal the login domain **exactly** (the same
+  worker-verified, Origin-pinned domain the user approves in the
+  drawer). A tampered request can therefore only "return" the user to
+  the domain they just signed in to.
+- Set it for same-device flows only. In cross-device QR logins the
+  wallet is on a different phone; the wallet will open your site there,
+  which is harmless but pointless.
+
+### Route 2: OpenID4VP (standards transport)
+
+If you already speak OpenID4VP, invoke the wallet with an
+`openid4vp://` authorization request (the scheme is registered on both
+platforms). v1 profile: `response_mode=direct_post`, DCQL with the
+`verified-human` SD-JWT-VC, `response_uri` host-pinned to your
+client-id host. The presentation is POSTed **server-side** to your
+`response_uri`; return a `redirect_uri` (your https app link) in the
+direct_post response body and the wallet opens it — same OS-verified
+bounce back into your app. Your app then learns the outcome from your
+backend. Note v1 does not present document credentials or predicates
+over this transport — use Route 1 for the full feature set. Details:
+`mobile-app/prson_app/docs/oid4vc.md`.
+
+### Same user id across web and app — why it works
+
+Both routes derive the holder key and audience from your web domain, so
+`cnf.jwk.x` / `sub` / `verifyUniqueHumanId` results are identical
+whether the user signs in on your website (any browser, any device) or
+inside your app. There is nothing to migrate or link — it's the same
+identifier from day one.
+
+## Wallet-action links — identity actions WITHOUT a login session
+
+Beyond sign-in, two standalone universal links let any app or site
+request a one-shot identity action. No SDK, no signaling session — just
+a link out and an HTTPS POST back.
+
+**Trust model.** These links are unauthenticated (anyone can craft one
+naming any domain), so safety comes from **delivery pinning**: the
+`responseUrl` (where the result is POSTed) and the optional `returnUrl`
+must be HTTPS on the **same host as the displayed domain**. A forged
+link can therefore only deliver the user's data to the domain the user
+saw and approved. Replay binding rides the `nonce` (inside the KB-JWT
+for facts; echoed in the body for PDFs). These actions count toward the
+domain's monthly login quota like a sign-in.
+
+### `https://app.prson.net/sign/v1` — request a PAdES PDF signature
+
+```
+/sign/v1?u=<pdfUrl>        // https, any host (your CDN/S3 is fine)
+        &d=<your-domain>   // shown to the user; pins delivery
+        &r=<responseUrl>   // https, host == d — receives the signed PDF
+        &n=<nonce>         // ≥ 8 chars, echoed in the response
+        [&ret=<returnUrl>] // https, host == d — app-to-app bounce
+        [&name=<fileName>] // display name on the consent screen
+```
+
+The wallet downloads the PDF (≤ 12 MB, `%PDF-` magic enforced), shows
+who's asking + the file, and the user signs with a verified identity
+(level 5+; the signature embeds their **notarised legal name**, chains
+to the Prson Identity Root CA, PAdES B-T — verifiable in Adobe and via
+`/.well-known/identity-ca.cer`). Response POST (JSON):
+
+```json
+{ "v": 1, "action": "sign", "nonce": "...", "fileName": "...",
+  "sha256": "<hex of signed pdf>", "pdfBase64": "<signed pdf>" }
+```
+
+### `https://app.prson.net/request/v1` — request verifiable facts
+
+```
+/request/v1?req=<base64url(JSON)>
+req = {
+  "v": 1,
+  "domain": "your-domain.com",
+  "nonce": "...",                       // ≥ 8 chars
+  "responseUrl": "https://your-domain.com/prson/facts",
+  "returnUrl":  "https://your-domain.com/app/done",   // optional
+  "required": {
+    "minVerificationLevel": 1,          // 0..6; 0 allows unverified
+    "claims": ["verified_human_at"],    // SD-JWT-VC disclosures
+    "predicates": ["age_gte_18"],       // fragment-catalog ids
+    "uniqueHumanId": true               // domain-scoped uniqueness id
+  }
+}
+```
+
+The consent screen shows identity choice + per-claim toggles + the
+fact picker (with local evaluation and "not present" outcomes).
+Response POST (JSON):
+
+```json
+{ "v": 1, "action": "request", "nonce": "...", "domain": "...",
+  "presentation": "<sd-jwt~…~kb-jwt>",        // when a VC was requested
+  "facts": { "status": "complete|partial",
+             "format": "native",
+             "facts": [ { "fragmentId": "age_gte_18", "ok": true,
+                          "credential": { ... }, "value": true } ] },
+  "uniqueHumanId": { "envelope": {...}, "signature": "...", "kid": "..." } }
+```
+
+**Verify with the SAME `@prson/login-verifier` calls as a login:**
+
+```ts
+verifyPresentation(body.presentation, {
+  expectedAudience: "https://your-domain.com",
+  expectedNonce: body.nonce,
+});
+verifySignedFragment(fact.credential, { expectedAudience: "your-domain.com" });
+verifyUniqueHumanId(body.uniqueHumanId, { expectedAudience: "your-domain.com" });
+```
+
+Everything is pairwise-scoped to your domain — the ids you receive are
+stable for your domain and uncorrelatable with any other verifier's.
+
 ## Appendix A. Backwards compatibility
 
 A host on the current SDK (no `request` arg) keeps the existing

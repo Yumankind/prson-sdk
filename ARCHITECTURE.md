@@ -175,6 +175,15 @@ on this site — and changing devices loses access to the account. See
                                   // anonymous-wallet credentials
        ephemeralIdentity: <bool>, // verifier requests a fresh per-sign-in
                                   // key (no stable per-site identifier)
+       returnUrl: <string?>,      // app-to-app return leg: https URL the
+                                  // wallet opens after delivering the
+                                  // credential. Wallet enforces https +
+                                  // host == domain EXACTLY (the worker-
+                                  // verified login domain), so it can
+                                  // only bounce to the signed-in site's
+                                  // own Universal/App Link. See
+                                  // SIGN-IN-WITH-PRSON-IDENTITY.md
+                                  // §App-to-app.
      }
 
 1. Browser → Cloudflare Worker: POST /session/draft  { request }

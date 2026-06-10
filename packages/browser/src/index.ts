@@ -134,6 +134,26 @@ export type SignInOptions = {
    */
   sponsorship?: { grantId: string };
 
+  /**
+   * **App-to-app return leg** (same-device native flows). An HTTPS URL
+   * on YOUR login domain that the wallet opens after the credential
+   * has been delivered — typically your Universal Link / Android App
+   * Link, so the OS bounces the user straight back into your native
+   * app (only the app your domain vouches for via AASA /
+   * assetlinks.json receives it).
+   *
+   * Constraints (enforced both here and in the wallet):
+   *   - `https://` only — custom schemes are refused (any installed
+   *     app could claim a custom scheme; app links are domain-proven).
+   *   - The URL's host MUST equal the login domain exactly.
+   *
+   * Only set this for same-device flows (your site opened inside a
+   * Custom Tab / SFSafariViewController from your app). In cross-device
+   * QR flows the wallet is on a different phone — it would open your
+   * site there, which is harmless but pointless.
+   */
+  returnUrl?: string;
+
   ttlMinutes?: number;
   ui?: {
     mountQrInto?: string | HTMLElement;
@@ -400,6 +420,9 @@ export class PrsonLogin {
       // See SignInOptions.mouseControl + bindMouse's ambient
       // subscriber path.
       mouseControl: opts.mouseControl === true,
+      // App-to-app return leg — validated here (fail fast at the
+      // integrator's desk) AND in the wallet (the enforcing side).
+      ...(opts.returnUrl ? { returnUrl: validateReturnUrl(opts.returnUrl, domain) } : {}),
       ttlMaxMinutes,
     };
 
@@ -687,6 +710,33 @@ function b64u(bytes: Uint8Array): string {
   let s = "";
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]!);
   return btoa(s).replace(/=+$/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+/**
+ * Validate SignInOptions.returnUrl: HTTPS, and its host (incl. any
+ * explicit port) must equal the login domain exactly. The wallet
+ * re-validates independently — this copy exists so a misconfigured
+ * integration fails at the integrator's desk, not on the user's phone.
+ */
+function validateReturnUrl(returnUrl: string, domain: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(returnUrl);
+  } catch {
+    throw new Error(`returnUrl is not a valid URL: ${returnUrl}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(
+      "returnUrl must be https:// (custom schemes are refused — any app " +
+        "could claim them; use a Universal Link / App Link on your domain)"
+    );
+  }
+  if (parsed.host.toLowerCase() !== domain.toLowerCase()) {
+    throw new Error(
+      `returnUrl host (${parsed.host}) must equal the login domain (${domain})`
+    );
+  }
+  return returnUrl;
 }
 
 function resolveMount(into: string | HTMLElement | undefined): HTMLElement | null {

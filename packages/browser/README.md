@@ -63,6 +63,14 @@ type SignInOptions = {
    *  fired. Default false. */
   allowAnonymous?: boolean;
 
+  /** App-to-app return leg (same-device native flows): an https URL on
+   *  YOUR login domain — typically your Universal Link / Android App
+   *  Link — that the wallet opens after delivering the credential, so
+   *  the OS bounces the user back into your native app. https-only,
+   *  host must equal the login domain exactly (enforced here AND in
+   *  the wallet). See SIGN-IN-WITH-PRSON-IDENTITY.md §App-to-app. */
+  returnUrl?: string;
+
   /** 1..15. Default 10. The credential's `exp` is clamped to this. */
   ttlMinutes?: number;
 
@@ -198,6 +206,13 @@ class PrsonLogin {
   Prson app is installed (universal-link probe), the QR is replaced
   by a "Sign in with Prson" button. The user taps it, the wallet
   opens, the rest is identical.
+- **Native apps (app-to-app).** Open your login page in a Custom Tab /
+  `SFSafariViewController` and set `returnUrl` to your Universal Link /
+  App Link — the wallet bounces the user back into your app after the
+  credential lands. Always use your WEB domain as the audience (never
+  the package name): same pairwise user id as your website, and the OS
+  app-link verification proves the app↔domain binding. Full pattern:
+  `SIGN-IN-WITH-PRSON-IDENTITY.md` §App-to-app.
 - **QR refresh.** Every QR encodes a one-shot `reqId` bound to a
   Cloudflare-Worker draft that's good for **60 seconds** to be
   claimed by a wallet. If the user idles past the draft expiry, the
