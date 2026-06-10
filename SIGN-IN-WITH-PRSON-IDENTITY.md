@@ -336,6 +336,31 @@ server-side with `@prson/login-verifier`'s `verifyUniqueHumanId`
 (`expectedAudience` = your host), then key accounts off
 `envelope.uniqueIdHash`.
 
+### Sponsored verifications (`sponsorship: { grantId }`)
+
+A host that requires paid facts (e.g. `phone_verified` — SMS-verified
+phone costs credits) can pay for them: the company's wallet creates a
+**sponsorship grant** (`createSponsorshipGrant`, signed by the company
+identity key) and the host passes the grantId in `signIn` options. The
+wallet stashes the offer at the login drawer (with a "paid by the site"
+notice) and routes the next premium verification's cost to the grant.
+
+Why this is replay/drain-safe (full model in
+`functions/api/sponsorships.js`):
+
+- the grantId is **not a bearer token** — possessing it authorises
+  nothing; every redemption is validated server-side against the
+  STORED grant (domain-bound, action-allowlisted, expiring, revocable);
+- creation is identity-key-signed over a nonce'd canonical payload
+  with a deterministic grant id — creation replays can't mint
+  duplicates, and the signature is the sponsor's auditable consent;
+- redemptions are idempotency-keyed per (beneficiary, action) with a
+  `perUserMax` cap (default 1) and a transactional total budget —
+  replaying the charge call cannot double-charge, and draining requires
+  one REAL completed verification per distinct wallet;
+- failed sends (SMS/letter) release the reservation and refund the
+  sponsor, never burning the user's per-user slot.
+
 ## Appendix A. Backwards compatibility
 
 A host on the current SDK (no `request` arg) keeps the existing

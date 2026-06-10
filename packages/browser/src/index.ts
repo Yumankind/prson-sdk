@@ -117,6 +117,23 @@ export type SignInOptions = {
    */
   ephemeralIdentity?: boolean;
 
+  /**
+   * Sponsorship: pay for premium verifications your users need.
+   *
+   * If your `required.predicates` include facts that need a PAID
+   * verification the user may not have yet (e.g. `phone_verified` —
+   * SMS costs credits), create a **sponsorship grant** from your
+   * company wallet (Prson app → `createSponsorshipGrant`) and put its
+   * id here. The user's wallet then routes those verification costs
+   * to your grant instead of the user.
+   *
+   * Safe to expose in page source: the grantId authorises nothing by
+   * itself. Every redemption is validated server-side against the
+   * STORED grant — bound to YOUR domain, capped per user (default
+   * once), capped in total budget, expiring, and instantly revocable.
+   */
+  sponsorship?: { grantId: string };
+
   ttlMinutes?: number;
   ui?: {
     mountQrInto?: string | HTMLElement;
@@ -367,6 +384,9 @@ export class PrsonLogin {
       // offered. The SDK side enforces acceptance below at verify time;
       // the wallet enforces drawer UX based on this flag.
       allowAnonymous: opts.allowAnonymous === true,
+      // Sponsorship offer (advisory on the wire — the server enforces
+      // the stored grant's domain/caps/budget at charge time).
+      ...(opts.sponsorship?.grantId ? { sponsorship: { grantId: opts.sponsorship.grantId } } : {}),
       // If set, instructs the wallet to mint a fresh random Ed25519
       // keypair for this single sign-in (no deterministic per-domain
       // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
