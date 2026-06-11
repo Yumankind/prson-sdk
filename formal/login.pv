@@ -1,0 +1,162 @@
+(*
+  Sign in with Prson — symbolic (Dolev-Yao) model of the login protocol.
+  Verified with ProVerif 2.05.
+
+  Protocol (white paper §10.2; ARCHITECTURE.md §4):
+    1. Page -> relay  (POST /session/draft over TLS): {domain, nonce, browserPk}.
+       The relay ENFORCES Origin == domain (browsers do not let page JS
+       forge the Origin header), and stores the canonical request.
+    2. relay -> wallet (QR / universal link, over the air): pointer + request.
+    3. wallet -> relay (POST /session/claim over TLS): identity-key signature
+       over (reqId, domain, serverTs); relay returns the CANONICAL stored
+       request; the wallet byte-compares it against the scanned QR (anti-tamper).
+    4. wallet <-> page (WebRTC data channel, P2P): the wallet seals the
+       SD-JWT-VC + KB-JWT presentation in a NaCl box to the page's
+       ephemeral X25519 key.
+
+  ATTACKER MODEL (Dolev-Yao). The attacker controls the air-gapped /
+  peer-to-peer transport `net` (the QR channel and the WebRTC/signaling
+  path): it can read, inject, replay, reorder and tamper there. The
+  TLS connections to the relay are modelled as authentic confidential
+  channels (`tls_pd` page<->relay, `tls_wr` wallet<->relay) — this is
+  the trust we actually rely on, stated explicitly rather than hidden.
+  The relay is honest (it is our own infrastructure and the security
+  argument depends on its Origin check). The attacker may run its OWN
+  malicious pages on origins it controls and engage the relay/wallet
+  freely; it never learns an honest page's ephemeral private key nor
+  the wallet's identity key.
+
+  OUT OF SCOPE (stated): the WebRTC/DTLS handshake beneath the data
+  channel, TURN allocation, biometric unlock, and verifier policy. We
+  model the cryptographic core that the security claims rest on.
+*)
+
+(* preciseActions recovers message linearity for receives: ProVerif's
+   default Horn abstraction lets a message sent once be consumed many
+   times, which spuriously breaks INJECTIVE agreement (the relay marks
+   each reqId single-use; a draft is sent once and consumed once). With
+   precise actions the per-session injective correspondence is exact. *)
+set preciseActions = true.
+
+(* ---- channels ---- *)
+free net: channel.            (* attacker-controlled: QR air-gap + P2P  *)
+free connect: channel [private]. (* authentic TLS: wallet opens a claim
+   connection to the relay's endpoint. Each connection carries a fresh
+   per-session reply channel (`repl`), so distinct TLS sessions are
+   distinct channels — modelling real connections rather than a shared
+   bus, which is what makes injective agreement meaningful. *)
+
+(* ---- types ---- *)
+type skey. type pkey.
+type ekey. type epub.
+type nonce. type host.
+
+(* ---- signatures (unforgeable) ---- *)
+fun spk(skey): pkey.
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; checksign(sign(m,k), spk(k)) = m.
+
+(* ---- authenticated encryption to a page ephemeral key ---- *)
+fun epk(ekey): epub.
+fun aenc(bitstring, epub): bitstring.
+reduc forall m: bitstring, k: ekey; adec(aenc(m, epk(k)), k) = m.
+
+(* ---- message shapes ---- *)
+fun request(host, nonce, epub): bitstring [data].
+fun claim(host, nonce, bitstring): bitstring [data].
+fun presentation(host, nonce): bitstring [data].
+
+(* secrecy witness sealed into the presentation box *)
+free presentationSecret: bitstring [private].
+
+(* events *)
+event PageInit(host, nonce, epub).
+event WalletAccept(host, nonce, epub).
+event WalletPresented(host, nonce).
+event PageAccepted(host, nonce).
+
+(* ============================ QUERIES ============================ *)
+
+(* (S1) presentation secrecy: the witness never leaks to the attacker,
+   even though the sealed box is sent over the attacker-controlled net. *)
+query attacker(presentationSecret).
+
+(* (A2) domain-binding authentication (non-injective): the wallet only
+   ever accepts a session for (domain,nonce,pk) that an honest page on
+   that very origin initiated. Formalises Origin-pin + claim + echo. *)
+query d: host, n: nonce, p: epub;
+  event(WalletAccept(d,n,p)) ==> event(PageInit(d,n,p)).
+
+(* (T3) tamper / injective agreement: distinct wallet acceptances map to
+   distinct page initiations (a relay cannot duplicate/forge a request
+   the page did not make for that exact triple). *)
+query d: host, n: nonce, p: epub;
+  inj-event(WalletAccept(d,n,p)) ==> inj-event(PageInit(d,n,p)).
+
+(* (R4) end-to-end replay resistance (INJECTIVE): each page acceptance
+   corresponds to a DISTINCT wallet presentation for that (domain,nonce)
+   — the attacker cannot replay one genuine presentation into two
+   accepted sessions, despite controlling the P2P delivery channel. *)
+query d: host, n: nonce;
+  inj-event(PageAccepted(d,n)) ==> inj-event(WalletPresented(d,n)).
+
+(* (Sanity) non-vacuity: an honest run can actually complete. If this
+   "reachability" query is FALSE, PageAccepted is reachable, confirming
+   the correspondence proofs above are not vacuously true. *)
+query d: host, n: nonce; event(PageAccepted(d,n)) ==> false.
+
+(* ============================ PROCESSES ============================ *)
+
+(* Honest initiator = RP page + relay for one origin d0. The page and
+   relay are both honest infrastructure in the same trust domain, and
+   Origin-pinning means the relay faithfully adopts the page's true
+   origin (browsers forbid page JS from forging Origin). Modelling them
+   as one honest initiator per origin is therefore faithful AND makes
+   each session linear: one draft, served once, by construction — the
+   operational single-use-reqId guarantee, captured structurally.
+   The attacker's own malicious pages are NOT this process; the attacker
+   acts directly on `net` and may run arbitrary sessions there. *)
+let initiator(pkI: pkey, d0: host) =
+  new e: ekey; new n: nonce;
+  let pk = epk(e) in
+  event PageInit(d0, n, pk);                   (* Origin-pinned: relay adopts d0 *)
+  new ts: bitstring;
+  out(net, (d0, n, ts));                        (* QR pointer + serverTs (public) *)
+  (* claim step: accept the wallet's TLS connection for THIS reqId n,
+     verify the identity-key signature binds (d0,n,ts), then return the
+     canonical request on the connection's fresh reply channel. *)
+  in(connect, (=n, repl: channel, claimSig: bitstring));
+  let claim(=d0, =n, =ts) = checksign(claimSig, pkI) in
+  out(repl, request(d0, n, pk));                (* canonical echo (byte-compare basis) *)
+  (* page side: receive the sealed presentation over the P2P net and
+     check (d0,n) binding before accepting. *)
+  in(net, c: bitstring);
+  let m = adec(c, e) in
+  let (=presentation(d0, n), s: bitstring) = m in
+  event PageAccepted(d0, n).
+
+(* Wallet: receives the QR pointer (d,n,ts) over the air (attacker may
+   tamper it), signs the claim over (d,n,ts) with its identity key, and
+   sends it to the relay over TLS. The relay only proceeds if the claim
+   matches a real stored session, then returns the canonical request,
+   which the wallet treats as authoritative (the byte-compare). The
+   wallet accepts the CANONICAL (d,n,pk) and seals a presentation bound
+   to (d,n) to the page's ephemeral key. *)
+let wallet(skI: skey) =
+  in(net, ptr: bitstring);                      (* scanned QR pointer (attacker net) *)
+  let (d0: host, n0: nonce, ts0: bitstring) = ptr in
+  new repl: channel;                            (* fresh per-connection reply stream *)
+  out(connect, (n0, repl, sign(claim(d0, n0, ts0), skI)));  (* open claim connection *)
+  in(repl, canon: bitstring);                   (* canonical request from relay *)
+  let request(d: host, n: nonce, pk: epub) = canon in
+  event WalletAccept(d, n, pk);
+  event WalletPresented(d, n);
+  out(net, aenc((presentation(d, n), presentationSecret), pk)).
+
+process
+  new skI: skey;
+  out(net, spk(skI));                          (* attacker knows the public key *)
+  (
+    ( ! new d: host; out(net, d); initiator(spk(skI), d) ) (* honest sessions, fresh origins *)
+  | ( ! wallet(skI) )
+  )

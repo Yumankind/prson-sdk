@@ -1,0 +1,78 @@
+(*
+  NEGATIVE CONTROL for login.pv — a deliberately BROKEN variant that
+  removes the protections, to demonstrate the model has teeth: it must
+  FIND the attacks that the real protocol's Origin-pinning + canonical
+  echo prevent. A formal model that proves everything regardless of the
+  protocol is worthless; this file is the falsification check.
+
+  Difference from login.pv: the wallet trusts the RAW request it reads
+  off the attacker-controlled `net` (the scanned QR), with NO honest
+  relay, NO Origin pinning, and NO canonical-echo byte-compare. This is
+  the strawman protocol of §10.1 ("phishable where the binding between
+  session and origin is human-checked").
+
+  EXPECTED RESULT: domain-binding (A2) and presentation secrecy (S1)
+  are FALSE — ProVerif produces concrete attack traces. (Verified:
+  both reported false by ProVerif 2.05.)
+*)
+
+set preciseActions = true.
+
+free net: channel.
+
+type skey. type pkey.
+type ekey. type epub.
+type nonce. type host.
+
+fun spk(skey): pkey.
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; checksign(sign(m,k), spk(k)) = m.
+
+fun epk(ekey): epub.
+fun aenc(bitstring, epub): bitstring.
+reduc forall m: bitstring, k: ekey; adec(aenc(m, epk(k)), k) = m.
+
+fun request(host, nonce, epub): bitstring [data].
+fun presentation(host, nonce): bitstring [data].
+
+free presentationSecret: bitstring [private].
+
+event PageInit(host, nonce, epub).
+event WalletAccept(host, nonce, epub).
+
+(* (S1) secrecy — EXPECTED FALSE. *)
+query attacker(presentationSecret).
+
+(* (A2) domain binding — EXPECTED FALSE: a malicious page can make the
+   wallet accept a session for an honest origin / its own key. *)
+query d: host, n: nonce, p: epub;
+  event(WalletAccept(d,n,p)) ==> event(PageInit(d,n,p)).
+
+(* Honest page: publishes its request straight onto the public net
+   (no relay, no Origin pin) and later tries to receive a presentation. *)
+let rpPage(d0: host) =
+  new e: ekey; new n: nonce;
+  let pk = epk(e) in
+  event PageInit(d0, n, pk);
+  out(net, request(d0, n, pk));        (* unprotected: attacker sees + can replace *)
+  in(net, c: bitstring);
+  let m = adec(c, e) in
+  let (=presentation(d0, n), s: bitstring) = m in
+  0.
+
+(* Naive wallet: trusts whatever request it reads off net (the raw QR),
+   no canonical echo, no Origin check. Seals the presentation to the
+   key in that request — which the attacker may have substituted. *)
+let wallet(skI: skey) =
+  in(net, req: bitstring);
+  let request(d: host, n: nonce, pk: epub) = req in
+  event WalletAccept(d, n, pk);
+  out(net, aenc((presentation(d, n), presentationSecret), pk)).
+
+process
+  new skI: skey;
+  out(net, spk(skI));
+  (
+    ( ! new d: host; out(net, d); rpPage(d) )
+  | ( ! wallet(skI) )
+  )

@@ -1,0 +1,264 @@
+Process 0 (that is, the initial process):
+{1}new skI: skey;
+{2}out(net, spk(skI));
+(
+    {3}!
+    {4}new d: host;
+    {5}out(net, d);
+    {6}let pkI: pkey = spk(skI) in
+    {7}let d0: host = d in
+    {8}new e: ekey;
+    {9}new n: nonce;
+    {10}let pk: epub = epk(e) in
+    {11}event PageInit(d0,n,pk);
+    {12}new ts: bitstring;
+    {13}out(net, (d0,n,ts));
+    {14}in(connect, (=n,repl: channel,claimSig: bitstring));
+    {15}let claim(=d0,=n,=ts) = checksign(claimSig,pkI) in
+    {16}out(repl, request(d0,n,pk));
+    {17}in(net, c: bitstring);
+    {18}let m: bitstring = adec(c,e) in
+    {19}let (=presentation(d0,n),s: bitstring) = m in
+    {20}event PageAccepted(d0,n)
+) | (
+    {21}!
+    {22}let skI_1: skey = skI in
+    {23}in(net, ptr: bitstring);
+    {24}let (d0_1: host,n0: nonce,ts0: bitstring) = ptr in
+    {25}new repl_1: channel;
+    {26}out(connect, (n0,repl_1,sign(claim(d0_1,n0,ts0),skI_1)));
+    {27}in(repl_1, canon: bitstring);
+    {28}let request(d_1: host,n_1: nonce,pk_1: epub) = canon in
+    {29}event WalletAccept(d_1,n_1,pk_1);
+    {30}event WalletPresented(d_1,n_1);
+    {31}out(net, aenc((presentation(d_1,n_1),presentationSecret),pk_1))
+)
+
+--  Process 1 (that is, process 0, with let moved downwards):
+{1}new skI: skey;
+{2}out(net, spk(skI));
+(
+    {3}!
+    {4}new d: host;
+    {5}out(net, d);
+    {8}new e: ekey;
+    {9}new n: nonce;
+    {10}let pk: epub = epk(e) in
+    {7}let d0: host = d in
+    {11}event PageInit(d0,n,pk);
+    {12}new ts: bitstring;
+    {13}out(net, (d0,n,ts));
+    {14}in(connect, (=n,repl: channel,claimSig: bitstring));
+    {6}let pkI: pkey = spk(skI) in
+    {15}let claim(=d0,=n,=ts) = checksign(claimSig,pkI) in
+    {16}out(repl, request(d0,n,pk));
+    {17}in(net, c: bitstring);
+    {18}let m: bitstring = adec(c,e) in
+    {19}let (=presentation(d0,n),s: bitstring) = m in
+    {20}event PageAccepted(d0,n)
+) | (
+    {21}!
+    {23}in(net, ptr: bitstring);
+    {24}let (d0_1: host,n0: nonce,ts0: bitstring) = ptr in
+    {25}new repl_1: channel;
+    {22}let skI_1: skey = skI in
+    {26}out(connect, (n0,repl_1,sign(claim(d0_1,n0,ts0),skI_1)));
+    {27}in(repl_1, canon: bitstring);
+    {28}let request(d_1: host,n_1: nonce,pk_1: epub) = canon in
+    {29}event WalletAccept(d_1,n_1,pk_1);
+    {30}event WalletPresented(d_1,n_1);
+    {31}out(net, aenc((presentation(d_1,n_1),presentationSecret),pk_1))
+)
+
+-- Query not attacker(presentationSecret[]) in process 1.
+Translating the process into Horn clauses...
+Completing...
+Starting query not attacker(presentationSecret[])
+RESULT not attacker(presentationSecret[]) is true.
+-- Query event(WalletAccept(d_2,n_2,p)) ==> event(PageInit(d_2,n_2,p)) in process 1.
+Translating the process into Horn clauses...
+Completing...
+Starting query event(WalletAccept(d_2,n_2,p)) ==> event(PageInit(d_2,n_2,p))
+goal reachable: b-event(@p_act(@occ14_2,(n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[])))) && b-event(@p_act(@occ27_2,request(d_2,n_2,epk(e_1)))) && b-event(PageInit(d_2,n_2,epk(e_1))) && b-event(@p_act(@occ23_2,(d_2,n_2,ts_1))) -> event(WalletAccept(d_2,n_2,epk(e_1)))
+Abbreviations:
+d_2 = d[!1 = @sid]
+n_2 = n[!1 = @sid]
+e_1 = e[!1 = @sid]
+@occ14_2 = @occ14_1[!1 = @sid]
+ts_1 = ts[!1 = @sid]
+repl_2 = repl_1[ptr = (d_2,n_2,ts_1),!1 = @sid_1]
+@occ27_2 = @occ27_1[!1 = @sid_1]
+@occ23_2 = @occ23_1[!1 = @sid_1]
+RESULT event(WalletAccept(d_2,n_2,p)) ==> event(PageInit(d_2,n_2,p)) is true.
+-- Query inj-event(WalletAccept(d_2,n_2,p)) ==> inj-event(PageInit(d_2,n_2,p)) in process 1.
+Translating the process into Horn clauses...
+Completing...
+Starting query inj-event(WalletAccept(d_2,n_2,p)) ==> inj-event(PageInit(d_2,n_2,p))
+goal reachable: b-event(@p_act(@occ14_3,(n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[])))) && b-event(@p_act(@occ27_3,request(d_2,n_2,epk(e_1)))) && b-inj-event(PageInit(d_2,n_2,epk(e_1)),@occ11_1) && b-event(@p_act(@occ23_3,(d_2,n_2,ts_1))) -> inj-event(WalletAccept(d_2,n_2,epk(e_1)),@occ29_1)
+The 1st, 2nd, 3rd, 4th hypotheses occur strictly before the conclusion.
+Abbreviations:
+d_2 = d[!1 = @sid]
+n_2 = n[!1 = @sid]
+e_1 = e[!1 = @sid]
+ts_1 = ts[!1 = @sid]
+@occ29_1 = @occ29[canon = request(d_2,n_2,epk(e_1)),ptr = (d_2,n_2,ts_1),!1 = @sid_1]
+@occ14_3 = @occ14_2[!1 = @sid]
+repl_2 = repl_1[ptr = (d_2,n_2,ts_1),!1 = @sid_1]
+@occ27_3 = @occ27_2[!1 = @sid_1]
+@occ11_1 = @occ11[!1 = @sid]
+@occ23_3 = @occ23_2[!1 = @sid_1]
+RESULT inj-event(WalletAccept(d_2,n_2,p)) ==> inj-event(PageInit(d_2,n_2,p)) is true.
+-- Query inj-event(PageAccepted(d_2,n_2)) ==> inj-event(WalletPresented(d_2,n_2)) in process 1.
+Translating the process into Horn clauses...
+Completing...
+Starting query inj-event(PageAccepted(d_2,n_2)) ==> inj-event(WalletPresented(d_2,n_2))
+goal reachable: b-inj-event(WalletPresented(d_2,n_2),@occ30_1) && b-event(@p_act(@occ27_4,request(d_2,n_2,epk(e_1)))) && b-event(@p_act(@occ17_4,aenc((presentation(d_2,n_2),presentationSecret[]),epk(e_1)))) && b-event(@p_act(@occ23_4,(d_2,n_2,ts_1))) && b-event(@p_act(@occ14_4,(n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[])))) -> inj-event(PageAccepted(d_2,n_2),@occ20_1)
+The 1st, 2nd, 3rd, 4th, 5th hypotheses occur strictly before the conclusion.
+Abbreviations:
+d_2 = d[!1 = @sid]
+n_2 = n[!1 = @sid]
+e_1 = e[!1 = @sid]
+ts_1 = ts[!1 = @sid]
+repl_2 = repl_1[ptr = (d_2,n_2,ts_1),!1 = @sid_1]
+@occ20_1 = @occ20[c = aenc((presentation(d_2,n_2),presentationSecret[]),epk(e_1)),claimSig = sign(claim(d_2,n_2,ts_1),skI[]),repl = repl_2,!1 = @sid]
+@occ30_1 = @occ30[canon = request(d_2,n_2,epk(e_1)),ptr = (d_2,n_2,ts_1),!1 = @sid_1]
+@occ27_4 = @occ27_3[!1 = @sid_1]
+@occ17_4 = @occ17_3[!1 = @sid]
+@occ23_4 = @occ23_3[!1 = @sid_1]
+@occ14_4 = @occ14_3[!1 = @sid]
+RESULT inj-event(PageAccepted(d_2,n_2)) ==> inj-event(WalletPresented(d_2,n_2)) is true.
+-- Query not event(PageAccepted(d_2,n_2)) in process 1.
+Translating the process into Horn clauses...
+Completing...
+Starting query not event(PageAccepted(d_2,n_2))
+goal reachable: b-event(@p_act(@occ27_5,request(d_2,n_2,epk(e_1)))) && b-event(@p_act(@occ17_5,aenc((presentation(d_2,n_2),presentationSecret[]),epk(e_1)))) && b-event(@p_act(@occ23_5,(d_2,n_2,ts_1))) && b-event(@p_act(@occ14_5,(n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[])))) -> event(PageAccepted(d_2,n_2))
+Abbreviations:
+d_2 = d[!1 = @sid]
+n_2 = n[!1 = @sid]
+@occ27_5 = @occ27_4[!1 = @sid_1]
+e_1 = e[!1 = @sid]
+@occ17_5 = @occ17_4[!1 = @sid]
+@occ23_5 = @occ23_4[!1 = @sid_1]
+ts_1 = ts[!1 = @sid]
+@occ14_5 = @occ14_4[!1 = @sid]
+repl_2 = repl_1[ptr = (d_2,n_2,ts_1),!1 = @sid_1]
+
+Derivation:
+Abbreviations:
+d_2 = d[!1 = @sid]
+n_2 = n[!1 = @sid]
+e_1 = e[!1 = @sid]
+ts_1 = ts[!1 = @sid]
+repl_2 = repl_1[ptr = (d_2,n_2,ts_1),!1 = @sid_1]
+@occ14_5 = @occ14_4[!1 = @sid]
+@occ27_5 = @occ27_4[!1 = @sid_1]
+@occ23_5 = @occ23_4[!1 = @sid_1]
+@occ17_5 = @occ17_4[!1 = @sid]
+
+1. The message (d_2,n_2,ts_1) may be sent to the attacker at output {13}.
+attacker((d_2,n_2,ts_1)).
+
+2. By 1, the attacker may know (d_2,n_2,ts_1).
+Using the function 3-proj-3-tuple the attacker may obtain ts_1.
+attacker(ts_1).
+
+3. By 1, the attacker may know (d_2,n_2,ts_1).
+Using the function 2-proj-3-tuple the attacker may obtain n_2.
+attacker(n_2).
+
+4. The message d_2 may be sent to the attacker at output {5}.
+attacker(d_2).
+
+5. By 4, the attacker may know d_2.
+By 3, the attacker may know n_2.
+By 2, the attacker may know ts_1.
+Using the function 3-tuple the attacker may obtain (d_2,n_2,ts_1).
+attacker((d_2,n_2,ts_1)).
+
+6. The event @p_act(@occ23_5,(d_2,n_2,ts_1)) records how variables are instantiated at {23}.
+The message (d_2,n_2,ts_1) that the attacker may have by 5 may be received at input {23}.
+So the message (n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[])) may be sent on channel connect[] at output {26}.
+mess(connect[],(n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[]))).
+
+7. The event @p_act(@occ14_5,(n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[]))) records how variables are instantiated at {14}.
+The message (n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[])) that may be sent on channel connect[] by 6 may be received at input {14}.
+So the message request(d_2,n_2,epk(e_1)) may be sent on channel repl_2 at output {16}.
+mess(repl_2,request(d_2,n_2,epk(e_1))).
+
+8. The event @p_act(@occ23_5,(d_2,n_2,ts_1)) records how variables are instantiated at {23}.
+The message (d_2,n_2,ts_1) that the attacker may have by 5 may be received at input {23}.
+The event @p_act(@occ27_5,request(d_2,n_2,epk(e_1))) records how variables are instantiated at {27}.
+The message request(d_2,n_2,epk(e_1)) that may be sent on channel repl_2 by 7 may be received at input {27}.
+So the message aenc((presentation(d_2,n_2),presentationSecret[]),epk(e_1)) may be sent to the attacker at output {31}.
+attacker(aenc((presentation(d_2,n_2),presentationSecret[]),epk(e_1))).
+
+9. The event @p_act(@occ14_5,(n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[]))) records how variables are instantiated at {14}.
+The message (n_2,repl_2,sign(claim(d_2,n_2,ts_1),skI[])) that may be sent on channel connect[] by 6 may be received at input {14}.
+The event @p_act(@occ17_5,aenc((presentation(d_2,n_2),presentationSecret[]),epk(e_1))) records how variables are instantiated at {17}.
+The message aenc((presentation(d_2,n_2),presentationSecret[]),epk(e_1)) that the attacker may have by 8 may be received at input {17}.
+So event PageAccepted(d_2,n_2) may be executed at {20}.
+event(PageAccepted(d_2,n_2)).
+
+10. By 9, event(PageAccepted(d_2,n_2)).
+The goal is reached, represented in the following fact:
+event(PageAccepted(d_2,n_2)).
+
+
+A more detailed output of the traces is available with
+  set traceDisplay = long.
+
+new skI: skey creating skI_2 at {1}
+
+out(net, ~M) with ~M = spk(skI_2) at {2}
+
+new d: host creating d_3 at {4} in copy a
+
+out(net, ~M_1) with ~M_1 = d_3 at {5} in copy a
+
+new e: ekey creating e_2 at {8} in copy a
+
+new n: nonce creating n_3 at {9} in copy a
+
+event PageInit(d_3,n_3,epk(e_2)) at {11} in copy a
+
+new ts: bitstring creating ts_2 at {12} in copy a
+
+out(net, (~M_2,~M_3,~M_4)) with ~M_2 = d_3, ~M_3 = n_3, ~M_4 = ts_2 at {13} in copy a
+
+in(net, (~M_1,~M_3,~M_4)) with ~M_1 = d_3, ~M_3 = n_3, ~M_4 = ts_2 at {23} in copy a_1
+
+new repl_1: channel creating repl_3 at {25} in copy a_1
+
+out(connect, (n_3,repl_3,sign(claim(d_3,n_3,ts_2),skI_2))) at {26} in copy a_1 received at {14} in copy a
+
+out(repl_3, request(d_3,n_3,epk(e_2))) at {16} in copy a received at {27} in copy a_1
+
+event WalletAccept(d_3,n_3,epk(e_2)) at {29} in copy a_1
+
+event WalletPresented(d_3,n_3) at {30} in copy a_1
+
+out(net, ~M_5) with ~M_5 = aenc((presentation(d_3,n_3),presentationSecret),epk(e_2)) at {31} in copy a_1
+
+in(net, ~M_5) with ~M_5 = aenc((presentation(d_3,n_3),presentationSecret),epk(e_2)) at {17} in copy a
+
+event PageAccepted(d_3,n_3) at {20} in copy a (goal)
+
+The event PageAccepted(d_3,n_3) is executed at {20} in copy a.
+A trace has been found.
+RESULT not event(PageAccepted(d_2,n_2)) is false.
+
+--------------------------------------------------------------
+Verification summary:
+
+Query not attacker(presentationSecret[]) is true.
+
+Query event(WalletAccept(d_2,n_2,p)) ==> event(PageInit(d_2,n_2,p)) is true.
+
+Query inj-event(WalletAccept(d_2,n_2,p)) ==> inj-event(PageInit(d_2,n_2,p)) is true.
+
+Query inj-event(PageAccepted(d_2,n_2)) ==> inj-event(WalletPresented(d_2,n_2)) is true.
+
+Query not event(PageAccepted(d_2,n_2)) is false.
+
+--------------------------------------------------------------
+

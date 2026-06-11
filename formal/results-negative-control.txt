@@ -1,0 +1,178 @@
+Process 0 (that is, the initial process):
+{1}new skI: skey;
+{2}out(net, spk(skI));
+(
+    {3}!
+    {4}new d: host;
+    {5}out(net, d);
+    {6}let d0: host = d in
+    {7}new e: ekey;
+    {8}new n: nonce;
+    {9}let pk: epub = epk(e) in
+    {10}event PageInit(d0,n,pk);
+    {11}out(net, request(d0,n,pk));
+    {12}in(net, c: bitstring);
+    {13}let m: bitstring = adec(c,e) in
+    {14}let (=presentation(d0,n),s: bitstring) = m in
+    0
+) | (
+    {15}!
+    {16}let skI_1: skey = skI in
+    {17}in(net, req: bitstring);
+    {18}let request(d_1: host,n_1: nonce,pk_1: epub) = req in
+    {19}event WalletAccept(d_1,n_1,pk_1);
+    {20}out(net, aenc((presentation(d_1,n_1),presentationSecret),pk_1))
+)
+
+--  Process 1 (that is, process 0, with let moved downwards):
+{1}new skI: skey;
+{2}out(net, spk(skI));
+(
+    {3}!
+    {4}new d: host;
+    {5}out(net, d);
+    {7}new e: ekey;
+    {8}new n: nonce;
+    {9}let pk: epub = epk(e) in
+    {6}let d0: host = d in
+    {10}event PageInit(d0,n,pk);
+    {11}out(net, request(d0,n,pk));
+    {12}in(net, c: bitstring);
+    {13}let m: bitstring = adec(c,e) in
+    {14}let (=presentation(d0,n),s: bitstring) = m in
+    0
+) | (
+    {15}!
+    {17}in(net, req: bitstring);
+    {18}let request(d_1: host,n_1: nonce,pk_1: epub) = req in
+    {19}event WalletAccept(d_1,n_1,pk_1);
+    {20}out(net, aenc((presentation(d_1,n_1),presentationSecret),pk_1))
+)
+
+-- Query not attacker(presentationSecret[]) in process 1.
+Translating the process into Horn clauses...
+Completing...
+Starting query not attacker(presentationSecret[])
+goal reachable: attacker(d_2) && attacker(n_2) && b-event(@p_act(@occ17_1,request(d_2,n_2,epk(k)))) && attacker(k) -> attacker(presentationSecret[])
+Abbreviations:
+@occ17_1 = @occ17[!1 = @sid]
+
+Derivation:
+Abbreviations:
+@occ17_1 = @occ17[!1 = @sid]
+
+1. We assume as hypothesis that
+attacker(k).
+
+2. By 1, the attacker may know k.
+Using the function epk the attacker may obtain epk(k).
+attacker(epk(k)).
+
+3. We assume as hypothesis that
+attacker(n_2).
+
+4. We assume as hypothesis that
+attacker(d_2).
+
+5. By 4, the attacker may know d_2.
+By 3, the attacker may know n_2.
+By 2, the attacker may know epk(k).
+Using the function request the attacker may obtain request(d_2,n_2,epk(k)).
+attacker(request(d_2,n_2,epk(k))).
+
+6. The event @p_act(@occ17_1,request(d_2,n_2,epk(k))) records how variables are instantiated at {17}.
+The message request(d_2,n_2,epk(k)) that the attacker may have by 5 may be received at input {17}.
+So the message aenc((presentation(d_2,n_2),presentationSecret[]),epk(k)) may be sent to the attacker at output {20}.
+attacker(aenc((presentation(d_2,n_2),presentationSecret[]),epk(k))).
+
+7. By 6, the attacker may know aenc((presentation(d_2,n_2),presentationSecret[]),epk(k)).
+By 1, the attacker may know k.
+Using the function adec the attacker may obtain (presentation(d_2,n_2),presentationSecret[]).
+attacker((presentation(d_2,n_2),presentationSecret[])).
+
+8. By 7, the attacker may know (presentation(d_2,n_2),presentationSecret[]).
+Using the function 2-proj-2-tuple the attacker may obtain presentationSecret[].
+attacker(presentationSecret[]).
+
+9. By 8, attacker(presentationSecret[]).
+The goal is reached, represented in the following fact:
+attacker(presentationSecret[]).
+
+
+A more detailed output of the traces is available with
+  set traceDisplay = long.
+
+new skI: skey creating skI_2 at {1}
+
+out(net, ~M) with ~M = spk(skI_2) at {2}
+
+in(net, request(a,a_1,epk(a_2))) at {17} in copy a_3
+
+event WalletAccept(a,a_1,epk(a_2)) at {19} in copy a_3
+
+out(net, ~M_1) with ~M_1 = aenc((presentation(a,a_1),presentationSecret),epk(a_2)) at {20} in copy a_3
+
+The attacker has the message 2-proj-2-tuple(adec(~M_1,a_2)) = presentationSecret.
+A trace has been found.
+RESULT not attacker(presentationSecret[]) is false.
+-- Query event(WalletAccept(d_2,n_2,p)) ==> event(PageInit(d_2,n_2,p)) in process 1.
+Translating the process into Horn clauses...
+Completing...
+Starting query event(WalletAccept(d_2,n_2,p)) ==> event(PageInit(d_2,n_2,p))
+goal reachable: attacker(d_2) && attacker(n_2) && attacker(p) && b-event(@p_act(@occ17_2,request(d_2,n_2,p))) -> event(WalletAccept(d_2,n_2,p))
+Abbreviations:
+@occ17_2 = @occ17_1[!1 = @sid]
+
+Derivation:
+Abbreviations:
+@occ17_2 = @occ17_1[!1 = @sid]
+
+1. We assume as hypothesis that
+attacker(p).
+
+2. We assume as hypothesis that
+attacker(n_2).
+
+3. We assume as hypothesis that
+attacker(d_2).
+
+4. By 3, the attacker may know d_2.
+By 2, the attacker may know n_2.
+By 1, the attacker may know p.
+Using the function request the attacker may obtain request(d_2,n_2,p).
+attacker(request(d_2,n_2,p)).
+
+5. The event @p_act(@occ17_2,request(d_2,n_2,p)) records how variables are instantiated at {17}.
+The message request(d_2,n_2,p) that the attacker may have by 4 may be received at input {17}.
+So event WalletAccept(d_2,n_2,p) may be executed at {19}.
+event(WalletAccept(d_2,n_2,p)).
+
+6. By 5, event(WalletAccept(d_2,n_2,p)).
+The goal is reached, represented in the following fact:
+event(WalletAccept(d_2,n_2,p)).
+
+
+A more detailed output of the traces is available with
+  set traceDisplay = long.
+
+new skI: skey creating skI_2 at {1}
+
+out(net, ~M) with ~M = spk(skI_2) at {2}
+
+in(net, request(a,a_1,a_2)) at {17} in copy a_3
+
+event WalletAccept(a,a_1,a_2) at {19} in copy a_3 (goal)
+
+The event WalletAccept(a,a_1,a_2) is executed at {19} in copy a_3.
+A trace has been found.
+RESULT event(WalletAccept(d_2,n_2,p)) ==> event(PageInit(d_2,n_2,p)) is false.
+
+--------------------------------------------------------------
+Verification summary:
+
+Query not attacker(presentationSecret[]) is false.
+
+Query event(WalletAccept(d_2,n_2,p)) ==> event(PageInit(d_2,n_2,p)) is false.
+
+--------------------------------------------------------------
+
