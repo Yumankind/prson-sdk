@@ -6,7 +6,8 @@
   "workspaces": [
     "packages/browser",
     "packages/browser-ui",
-    "packages/verifier-node"
+    "packages/verifier-node",
+    "packages/cli-node"
   ],
   "scripts": {
     "build": "npm run build -ws --if-present",

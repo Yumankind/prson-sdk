@@ -94,7 +94,7 @@ login-sdk/
     └── express-verifier/    # tiny Node.js verifier that prints claims
 ```
 
-## The three flows it supports
+## The four flows it supports
 
 ### 1. Cross-device (desktop → phone via QR + WebRTC)
 
@@ -150,6 +150,18 @@ delivery, the wallet HTTPS POSTs the presentation to a `response_uri`.
 The credential is unchanged; only the transport is. See
 [ARCHITECTURE.md §3.4](./ARCHITECTURE.md).
 
+### 4. CLI / terminal programs (QR or short code → your backend)
+
+`mycli login` renders a QR (or a typeable short code) built by
+[`@prson/login-cli`](./packages/cli-node/README.md); the user approves
+on their phone and the wallet POSTs the presentation + signed
+predicates to **your backend's** delivery-pinned HTTPS endpoint — the
+same `/request/v1` wallet-action transport used for one-shot fact
+requests, so no new trust surface. The CLI polls your backend (keyed
+by the request nonce) and receives whatever session your backend mints
+after verifying with `@prson/login-verifier`. Raw credentials never
+touch the terminal.
+
 ## Sessions, renewal, revocation
 
 SD-JWT-VC presentations are **short-lived by design** — the SDK
@@ -204,6 +216,7 @@ The browser SDK same.
 |---|---|
 | Integrate into a website in 5 minutes | [`packages/browser/README.md`](./packages/browser/README.md) |
 | Run a verifier in your backend | [`packages/verifier-node/README.md`](./packages/verifier-node/README.md) |
+| Add "Sign in with Prson" to a CLI tool | [`packages/cli-node/README.md`](./packages/cli-node/README.md) |
 | Understand the wire formats | [`ARCHITECTURE.md`](./ARCHITECTURE.md) |
 | Audit the crypto / threat model | [`SECURITY.md`](./SECURITY.md) |
 | Understand how identity is proven (and why the HMAC token doesn't gate identity) | [`TRUST-CHAIN.md`](./TRUST-CHAIN.md) |

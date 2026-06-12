@@ -1,0 +1,42 @@
+{
+  "name": "@prson/login-cli",
+  "version": "0.1.0",
+  "description": "Sign in with Prson from terminal programs. Builds delivery-pinned /request/v1 wallet links, renders them as terminal QR codes (or short codes), and polls your backend for the wallet's response. Pure-function; no Prson account or API key required.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "prson",
+    "cli",
+    "device-flow",
+    "qr-login",
+    "sd-jwt-vc",
+    "verifiable-credentials"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Yumankind/prson-network",
+    "directory": "login-sdk/packages/cli-node"
+  },
+  "license": "TBD"
+}
