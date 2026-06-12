@@ -439,6 +439,35 @@ backend. Note v1 does not present document credentials or predicates
 over this transport — use Route 1 for the full feature set. Details:
 `mobile-app/prson_app/docs/oid4vc.md`.
 
+**"Continue with Prson" universal link.** The same authorization
+request also works as an https link — preferable on web pages, since
+it survives copy-paste and camera-app QR scans and falls back
+gracefully when the app isn't installed:
+
+```
+https://app.prson.net/openid4vp/v1?client_id=...&nonce=...
+    &response_mode=direct_post&response_uri=...&dcql_query=...
+```
+
+Query parameters are the standard OID4VP request, verbatim — the
+wallet treats it exactly like the `openid4vp://` scheme (`request_uri`
+indirection included). Render it as a **Continue with Prson** button
+for iOS/Android visitors. This is the documented iOS web-verifier
+path: Safari's Digital Credentials API is entitlement-gated, so there
+is no OS picker on iOS — the link IS the channel.
+
+**Android Digital Credentials API.** On Android Chrome (and desktop
+Chrome via cross-device QR), you can instead call
+`navigator.credentials.get({digital: {requests: [{protocol:
+"openid4vp-v1-unsigned", data: {...}}]}})` and the OS picker offers
+Prson next to Google Wallet. Two differences from the link route: the
+response comes back through the browser promise (no `response_uri`
+POST — use `response_mode=dc_api`), and the KB-JWT audience you must
+verify is `origin:<your web origin>` instead of your client id. All
+Prson credential types (verified-human, verified-identity, property
+VCs) present over this channel. Details:
+`mobile-app/prson_app/docs/dc_api_android.md`.
+
 ### Same user id across web and app — why it works
 
 Both routes derive the holder key and audience from your web domain, so
