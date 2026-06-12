@@ -20,7 +20,7 @@
 > via `session.on(type, cb)` / `session.onAny(cb)`; the wallet
 > emits `display-update` and `credential-revoked` envelopes
 > automatically from the
-> [`ActiveSessionEventBridge`](../mobile-app/prson_app/lib/core/services/active_session_event_bridge.dart)
+> [`ActiveSessionEventBridge`](../mobile-app/prson_app/lib/core/services/login/active_session_event_bridge.dart)
 > when the bound identity changes. **§1.5 (request channel) is
 > also shipped** — `session.request(...)` opens a verifier→wallet
 > bidirectional surface for claim-value asks, fragment checks,

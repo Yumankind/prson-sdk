@@ -549,7 +549,7 @@ default sensibly on return visits:
 
 | Surface | Where | Sensitivity |
 |---|---|---|
-| `lastIdentity.<domain>` → `DerivedIdentity.id` (or `__ephemeral__` sentinel) | `SharedPreferences` via [LoginSettingsService.rememberLastUsedIdentity](../mobile-app/prson_app/lib/core/services/login_settings_service.dart) | Non-secret — just a UX pointer. |
+| `lastIdentity.<domain>` → `DerivedIdentity.id` (or `__ephemeral__` sentinel) | `SharedPreferences` via [LoginSettingsService.rememberLastUsedIdentity](../mobile-app/prson_app/lib/core/services/login/login_settings_service.dart) | Non-secret — just a UX pointer. |
 | `ephKey.<domain>` → b64u(32-byte Ed25519 seed) | [SecureStorageService](../mobile-app/prson_app/lib/core/storage/secure_storage_service.dart) (`first_unlock_this_device` on iOS, encrypted SharedPreferences excluded from Auto Backup on Android) | **Device-bound secret.** Treated like any other identity key on the device. |
 
 The login drawer ([login_request_drawer.dart](../mobile-app/prson_app/lib/views/identity/login_request_drawer.dart)) pre-selects in this order: last-used identity (if still eligible) → globally-active identity (if eligible) → null (user picks). The picker still always lets the user override.
@@ -565,7 +565,7 @@ The cost is a hard one: the seed is **not** derived from the recovery phrase, so
 
 Why not derive the ephemeral seed from the mnemonic? Because the whole point of `ephemeralIdentity: true` (audit §M-5) is that a mnemonic compromise must NOT retroactively de-anonymise every site the user ever visited. If the seed were mnemonic-derived, the security property collapses.
 
-When the user revokes an active session for the domain (active-sessions tile → Revoke), the wallet purges both entries — see [LoginSettingsService.forgetLastUsedIdentity](../mobile-app/prson_app/lib/core/services/login_settings_service.dart) + [forgetEphemeralSeed](../mobile-app/prson_app/lib/core/services/login_settings_service.dart). The next sign-in to that domain mints a fresh key.
+When the user revokes an active session for the domain (active-sessions tile → Revoke), the wallet purges both entries — see [LoginSettingsService.forgetLastUsedIdentity](../mobile-app/prson_app/lib/core/services/login/login_settings_service.dart) + [forgetEphemeralSeed](../mobile-app/prson_app/lib/core/services/login/login_settings_service.dart). The next sign-in to that domain mints a fresh key.
 
 ## 6. Standards compatibility
 

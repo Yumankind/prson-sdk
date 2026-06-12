@@ -580,7 +580,7 @@ re-prompt with a clearer "please update your Prson wallet" message.
   responsibilities.
 - [`packages/verifier-node/src/index.ts`](./packages/verifier-node/src/index.ts) —
   `verifyPresentation`, `verifySignedFragment`, `verifyFragmentCredential`.
-- [`mobile-app/prson_app/lib/core/services/identity_credential_service.dart`](../mobile-app/prson_app/lib/core/services/identity_credential_service.dart) —
+- [`mobile-app/prson_app/lib/core/services/credentials/identity_credential_service.dart`](../mobile-app/prson_app/lib/core/services/credentials/identity_credential_service.dart) —
   `exportHumanPresentation`, `exportIdentityPresentation`.
 - [`mobile-app/prson_app/docs/trust_architecture.md`](../mobile-app/prson_app/docs/trust_architecture.md) §6.3 —
   per-domain holder-key derivation (which `sub` derivation mirrors).
