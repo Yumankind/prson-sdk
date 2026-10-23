@@ -546,6 +546,7 @@ export async function resolveIssuerKey(
 // ── Internals ─────────────────────────────────────────────────────────
 
 const jwksCache = new Map<string, { fetchedAt: number; keys: Record<string, unknown> }>();
+const JWKS_REFETCH_MIN_MS = 60_000;
 
 async function resolveIssuerJwk(
   kid: string,
@@ -554,7 +555,10 @@ async function resolveIssuerJwk(
   const uri = opts.jwksUri ?? DEFAULT_JWKS_URI;
   const ttl = opts.jwksCacheTtlMs ?? DEFAULT_JWKS_CACHE_TTL_MS;
   const cached = jwksCache.get(uri);
-  if (cached && Date.now() - cached.fetchedAt < ttl) {
+  // A kid we don't know yet usually means Prson just rotated its key: look
+  // again, but at most once a minute (so unknown kids can't hammer the JWKS).
+  const fresh = cached && Date.now() - cached.fetchedAt < ttl;
+  if (fresh && (cached.keys[kid] || Date.now() - cached.fetchedAt < JWKS_REFETCH_MIN_MS)) {
     return cached.keys[kid] ?? null;
   }
   const fetchImpl = (opts.fetch ?? (globalThis as unknown as { fetch: FetchLike }).fetch) as FetchLike;
