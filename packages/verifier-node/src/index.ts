@@ -10,6 +10,9 @@
  */
 import { createHash, createPublicKey, createVerify } from "node:crypto";
 import { importJWK, jwtVerify } from "jose";
+import { checkCredentialStatus, type StatusCheckOptions, type StatusPolicy } from "./status.js";
+
+export { checkCredentialStatus, clearStatusCache, type StatusCheckOptions, type StatusCheckResult, type StatusPolicy } from "./status.js";
 
 export {
   canonicalJson,
@@ -45,6 +48,13 @@ export type VerifyOptions = {
   fetch?: FetchLike;
   jwksCacheTtlMs?: number;
   acceptedVcts?: readonly string[];
+  /**
+   * Revocation (the credential's Token Status List entry, status.ts).
+   * onUnavailable: when the list can't be fetched or verified; default
+   * "fail-closed" for verified humans (level 5+), "fail-open" below.
+   * cacheSeconds: how long a list is reused (default 60).
+   */
+  status?: { onUnavailable?: StatusPolicy; cacheSeconds?: number };
 };
 
 export type VerifyFailureReason =
@@ -60,7 +70,9 @@ export type VerifyFailureReason =
   | "aud_mismatch"
   | "nonce_mismatch"
   | "sd_hash_mismatch"
-  | "kb_iat_stale";
+  | "kb_iat_stale"
+  | "vc_revoked"
+  | "status_unavailable";
 
 export type VerifyResult =
   | { ok: false; reason: VerifyFailureReason; detail?: string }
@@ -163,6 +175,14 @@ export async function verifyPresentation(
   } catch (e) {
     return { ok: false, reason: "issuer_sig_invalid", detail: (e as Error).message };
   }
+
+  // ── 1b. Not revoked (the issuer's Token Status List) ──────────────
+  const status = await checkCredentialStatus(payload, {
+    resolveKey: async (kid) => (await resolveIssuerJwk(kid, opts)) as Awaited<ReturnType<StatusCheckOptions["resolveKey"]>>,
+    onUnavailable: opts.status?.onUnavailable,
+    cacheSeconds: opts.status?.cacheSeconds,
+  });
+  if (!status.ok) return { ok: false, reason: status.reason, detail: status.detail };
 
   // ── 2. Verify every Disclosure digest is bound by the JWS's _sd ───
   const sdSet = collectSdDigests(payload);
