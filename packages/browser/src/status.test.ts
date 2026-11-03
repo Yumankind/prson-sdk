@@ -76,3 +76,14 @@ test("credentials without a status entry aren't checked; a malformed one is refu
   const bad = await checkCredentialStatus({ status: { status_list: { idx: -1, uri: "http://insecure.example/1" } } }, { resolveKey: async () => null, fetch: down });
   assert.equal(bad.ok, false);
 });
+test("decodes the Token Status List draft's example list (1-bit, lst eNrbuRgAAhcBXQ)", async () => {
+  clearStatusCache();
+  const { pair, jwk } = await issuer();
+  // draft-ietf-oauth-status-list, "Status List" example: statuses 0..15.
+  const expected = [1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1];
+  const opts = { resolveKey: async () => jwk, fetch: served(await token(pair.privateKey, [], { status_list: { bits: 1, lst: "eNrbuRgAAhcBXQ" } })) };
+  for (const [idx, bit] of expected.entries()) {
+    const res = await checkCredentialStatus({ status: { status_list: { idx, uri: URI } } }, opts);
+    assert.equal(res.ok, bit === 0, `idx ${idx}`);
+  }
+});

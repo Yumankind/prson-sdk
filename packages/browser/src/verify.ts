@@ -55,6 +55,7 @@ export type VerifyErr = {
     | "issuer_sig_invalid"
     | "vc_expired"
     | "vct_not_accepted"
+    | "typ_not_accepted"
     | "disclosure_unmatched"
     | "kb_missing"
     | "kb_sig_invalid"
@@ -114,13 +115,19 @@ export async function verifyPresentation(
   } catch {
     return { ok: false, reason: "malformed" };
   }
+  // SD-JWT VC media type (draft-ietf-oauth-sd-jwt-vc): dc+sd-jwt, or the older vc+sd-jwt.
+  if (header.typ !== "dc+sd-jwt" && header.typ !== "vc+sd-jwt") {
+    return { ok: false, reason: "typ_not_accepted" };
+  }
   if (typeof payload.iss !== "string" || payload.iss !== opts.trustedIssuer) {
     return { ok: false, reason: "issuer_key_resolve_failed" };
   }
   if (typeof payload.vct !== "string" || !opts.acceptedVcts.includes(payload.vct)) {
     return { ok: false, reason: "vct_not_accepted" };
   }
-  if (typeof payload.exp === "number" && payload.exp * 1000 < Date.now()) {
+  // Prson always sets an expiry; a credential without one is not Prson's.
+  if (typeof payload.exp !== "number") return { ok: false, reason: "malformed" };
+  if (payload.exp * 1000 < Date.now()) {
     return { ok: false, reason: "vc_expired" };
   }
 

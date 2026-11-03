@@ -64,6 +64,7 @@ export type VerifyFailureReason =
   | "vc_expired"
   | "vc_not_yet_valid"
   | "vct_not_accepted"
+  | "typ_not_accepted"
   | "disclosure_unmatched"
   | "kb_missing"
   | "kb_sig_invalid"
@@ -139,6 +140,10 @@ export async function verifyPresentation(
   } catch {
     return { ok: false, reason: "malformed", detail: "json" };
   }
+  // SD-JWT VC media type (draft-ietf-oauth-sd-jwt-vc): dc+sd-jwt, or the older vc+sd-jwt.
+  if (header.typ !== "dc+sd-jwt" && header.typ !== "vc+sd-jwt") {
+    return { ok: false, reason: "typ_not_accepted", detail: String(header.typ) };
+  }
 
   const trustedIssuer = opts.trustedIssuer ?? DEFAULT_TRUSTED_ISSUER;
   if (payload.iss !== trustedIssuer) {
@@ -153,7 +158,11 @@ export async function verifyPresentation(
     return { ok: false, reason: "vct_not_accepted", detail: String(payload.vct) };
   }
   const nowSec = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp === "number" && payload.exp < nowSec) {
+  // Prson always sets an expiry; a credential without one is not Prson's.
+  if (typeof payload.exp !== "number") {
+    return { ok: false, reason: "malformed", detail: "no exp" };
+  }
+  if (payload.exp < nowSec) {
     return { ok: false, reason: "vc_expired" };
   }
   if (typeof payload.nbf === "number" && payload.nbf > nowSec + 30) {
@@ -286,6 +295,8 @@ export async function verifyPresentation(
 // proof — its anti-replay is the short TTL + the propertyHash binding.
 
 const DEFAULT_PREDICATE_VCT = "https://app.prson.net/credentials/predicate/v1";
+/** The VC Data Model `type` of a predicate fact in the vc+jwt format. */
+const PREDICATE_VC_TYPE = "PrsonPredicateCredential";
 
 export type SignedFragmentNative = {
   fragmentId: string;
@@ -470,16 +481,26 @@ export async function verifyFragmentCredential(
     return { ok: false, reason: "malformed", detail: `json: ${(e as Error).message}` };
   }
 
+  // vc+jwt: a VC Data Model 2.0 credential secured with JOSE, typed by its
+  // `type`; vc+sd-jwt: an SD-JWT VC (typ dc+sd-jwt), typed by its `vct`.
   let format: "vc+jwt" | "vc+sd-jwt";
   if (header.typ === "vc+jwt") {
     format = "vc+jwt";
-  } else if (header.typ === "sd-jwt") {
+    const ctx = payload["@context"];
+    const types = payload.type;
+    if (!Array.isArray(ctx) || ctx[0] !== "https://www.w3.org/ns/credentials/v2") {
+      return { ok: false, reason: "malformed", detail: "@context" };
+    }
+    if (!Array.isArray(types) || !types.includes("VerifiableCredential") || !types.includes(PREDICATE_VC_TYPE)) {
+      return { ok: false, reason: "vct_not_accepted", detail: `type=${JSON.stringify(types)}` };
+    }
+  } else if (header.typ === "dc+sd-jwt") {
     format = "vc+sd-jwt";
+    if (typeof payload.vct !== "string" || !accepted.includes(payload.vct)) {
+      return { ok: false, reason: "vct_not_accepted", detail: String(payload.vct) };
+    }
   } else {
     return { ok: false, reason: "unsupported_format", detail: String(header.typ) };
-  }
-  if (typeof payload.vct !== "string" || !accepted.includes(payload.vct)) {
-    return { ok: false, reason: "vct_not_accepted", detail: String(payload.vct) };
   }
 
   const trustedIssuer = opts.trustedIssuer ?? DEFAULT_TRUSTED_ISSUER;
