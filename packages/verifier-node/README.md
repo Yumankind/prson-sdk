@@ -111,6 +111,14 @@ envelope (made before verdicts covered values) can still have a valid
 signature, but no value verifies against it (`reason: "not-covered"`).
 `verdictDisclosureDigest(d)` and `canonicalJson(v)` are exported too.
 
+## Website notifications
+
+`readNotifyHandle(body)` reads the handle the browser SDK returned
+(`signIn({ notifications: true })`); keep it on the account you just verified.
+`sendNotification({ apiKey, handle, title, body, url? })` posts to
+`/v1/notify` (an API key with `notify:write`); `revoked: true` (410) means
+the person turned your site off. See `documentation/SITE_NOTIFICATIONS.md`.
+
 ## Build status
 
 Phase 1 ships the spec, the type surface in `src/index.ts`, and this

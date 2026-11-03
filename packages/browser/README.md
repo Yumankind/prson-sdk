@@ -225,6 +225,16 @@ class PrsonLogin {
   encode the cnf.jwk identifier (server-side session cookie is the
   obvious default).
 
+## Notifications (opt-in)
+
+`signIn({ notifications: true })` makes the wallet offer an unticked "Let
+{site} send you notifications" row. If the person ticks it,
+`result.notifications.handle` is a handle for them at your domain (random per
+site). Send it to your backend with the presentation and send from there with
+`@prson/login-verifier`'s `sendNotification` (an API key with `notify:write`).
+A 410 means they turned you off: forget the handle. Rules and limits:
+`documentation/SITE_NOTIFICATIONS.md`.
+
 ## Backend verification
 
 Use [`@prson/login-verifier`](../verifier-node/) — drop-in for
