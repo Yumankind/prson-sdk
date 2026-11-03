@@ -25,7 +25,7 @@ Three signatures stack inside that string:
 
 | Layer | Signed by | What it proves |
 |---|---|---|
-| **Issuer JWS** (the VC body) | Prson notary key (RS256, kid in keyring at `functions/utils/companyKeys.js`) | The claims in the VC (`verified_human: 5`, `given_name: "…"`, `aud: "https://<domain>"`, `cnf: { jwk: <holder-pk> }`) are facts the notary attested to |
+| **Issuer JWS** (the VC body) | Prson notary key (RS256, kid in the keyring at `cloudflare-workers/api/src/lib/companyKeys.ts`; issued by the Prson API's `POST /v1/fn/issueIdentityCredential`) | The claims in the VC (`verified_human: 5`, `given_name: "…"`, `cnf: { jwk: <holder-pk> }`) are facts the notary attested to. The VC body carries no `aud`: the audience is bound by the KB-JWT |
 | **Disclosures** | (none — content-addressed by hash) | Each disclosure has its SHA-256 digest in the JWS payload's `_sd[]` array. Selective disclosure: the holder reveals only the digests it chose; the verifier rehashes the revealed disclosures and matches against the array |
 | **KB-JWT** (Key Binding) | Holder's per-domain Ed25519 (matches `cnf.jwk`) | **Proof-of-possession**: the user holding the private key right now signed this exact set of disclosures for this exact `aud`/`nonce` |
 
@@ -51,11 +51,12 @@ a specific `reason` code.
    `allowAnonymous: true`) `anonymous-wallet/v1`. Unknown VCTs are
    rejected without ever invoking the dispatcher.
 
-3. **`aud` matches** `https://<domain>` in **both** the VC body AND
-   the KB-JWT. A presentation issued for `bank.com` will not verify
-   on `evil.com`. The wallet refuses to mint a credential bound to
-   any domain except the one it parsed from the deep-link payload, so
-   forging `aud` requires controlling the wallet's signing call site.
+3. **`aud` matches** the expected audience in the **KB-JWT** (the VC
+   body has no `aud`; the KB-JWT is what binds a presentation to one
+   site). A presentation made for `bank.com` will not verify on
+   `evil.com`. The wallet signs a KB-JWT only for the domain it parsed
+   from the deep-link payload, so forging `aud` requires controlling
+   the wallet's signing call site.
 
 4. **`nonce` matches** the one the browser put in the QR. The nonce
    is 32 bytes of `crypto.getRandomValues` minted per `signIn()`, so
@@ -224,9 +225,9 @@ Captured by network sniffing, browser extension, evil ISP, anything.
 The classic "evil twin" attack — phisher's page asks the wallet to
 sign in, then forwards the credential to a real-domain verifier.
 
-- Rule 3 fails: the VC body has `aud: https://victim.com` notarised
-  in; the phisher's verifier is `https://phisher.com`. The KB-JWT's
-  `aud` is similarly bound.
+- Rule 3 fails: the KB-JWT's `aud` is the domain the wallet signed
+  for; a verifier expecting another audience rejects it. (The VC body
+  carries no `aud`; the per-domain `cnf.jwk` also differs per site.)
 - **Belt-and-suspenders**: the wallet refuses to mint a credential
   bound to any domain except the one in the deep-link payload, which
   the user sees on the wallet drawer before consenting. The Worker's
