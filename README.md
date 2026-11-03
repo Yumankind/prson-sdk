@@ -18,7 +18,7 @@ const result = await PrsonLogin.signIn({
     identityType: "personal",                      // | "organization"
   },
   ttlMinutes: 2,                                   // capped at 2 today (see below)
-  ui: { mountQrInto: "#prson-login-qr" },          // any DOM ref
+  ui: { theme: "auto" },                           // the SDK's own dialog; or mountQrInto: "#el"
 });
 
 console.log(result.sdJwtVc);          // standard SD-JWT-VC presentation
@@ -162,6 +162,121 @@ requests, so no new trust surface. The CLI polls your backend (keyed
 by the request nonce) and receives whatever session your backend mints
 after verifying with `@prson/login-verifier`. Raw credentials never
 touch the terminal.
+
+## The default UI: button and sign-in dialog (`@prson/login-sdk-ui`)
+
+Load the UI bundle next to the SDK and you get both pieces with no
+configuration:
+
+```html
+<script type="module" src="prson-login-ui.js"></script>
+<prson-signin-button id="signin" variant="amber" size="lg"></prson-signin-button>
+<script type="module">
+  import { PrsonLogin } from "./prson-login.js";
+  document.querySelector("#signin").addEventListener("click", async () => {
+    const result = await PrsonLogin.signIn({
+      // A function: a refreshed code gets a fresh backend nonce. result.nonce says which one was used.
+      nonce: async () => (await fetch("/auth/nonce", { method: "POST" }).then((r) => r.json())).nonce,
+      required: { predicates: ["age_gte_18"], requiredClaims: ["given_name"] },
+      // No ui.mountQrInto: the SDK's own dialog (recommended).
+    });
+  });
+</script>
+```
+
+### The "Sign in with Prson" button
+
+The Prson mark (the "p" on a rounded square) followed by "Sign in with
+Prson" in Inter 600. Every variant and size is at least 44 px tall, with a
+3 px focus ring and a 1 px press. Press and busy animations stop under
+reduced motion.
+
+| Variant | Looks like | Use on |
+|---|---|---|
+| `amber` (default) | Amber #FBBF24 fill, ink #0A0A0A text, ink square with an amber "p" | Light pages: the brand's primary action |
+| `dark` | Ink fill, white text, amber square with an ink "p" | Light pages that want less colour |
+| `light` | White fill, hairline border, ink text, amber mark | Dark or photographic backgrounds |
+| `outline` | Transparent, 1.5 px border and text in the surrounding text colour, amber mark | Anywhere; it adapts to light and dark |
+
+Sizes: `md` is 44 px with 15 px text, and `lg` is 52 px with 16 px text.
+`full-width` stretches it to its container. `busy` makes the mark pulse
+and sets `aria-busy`. `disabled` disables it. `label` changes the text,
+for example to "Continue with Prson".
+
+There are three ways to use it:
+
+- **Custom element:** `<prson-signin-button variant="dark" size="lg">`. It renders a real `<button>` in the light DOM, so forms, focus and your CSS work as usual. Listen for `click` on the element.
+- **From script:** `createSignInButton({ variant, size, label, fullWidth, onClick })` returns an `HTMLButtonElement`.
+- **Plain HTML:** `<button class="prson-signin-btn prson-signin-btn--amber">` plus the markup from `prsonMarkSvg()`, styled by the injected stylesheet.
+
+The developer console has a Vue version with the same design:
+`prson-website/app/components/PrsonSignInButton.vue`.
+
+### The sign-in dialog
+
+`signIn()` without `ui.mountQrInto` opens an accessible dialog. It uses
+`role="dialog"` and `aria-modal`, and is labelled "Sign in to <site>".
+Focus moves into the dialog and stays there; when the dialog closes,
+focus goes back to the page. Esc, a click outside or the close button
+cancel the sign-in: `signIn()` then rejects with `LoginAbortedError`, or
+with the error on screen if there was one. On screens up to 480 px wide
+the dialog is a bottom sheet.
+
+From top to bottom:
+
+1. **Header:** the Prson mark, "Sign in with Prson" and a 44 px close button.
+2. **The site:**
+   - "Sign in to" over the domain in 24 px bold, for example **shop.example.com**.
+   - A tinted square with the site's initial ("E") next to it. The same domain always gets the same tint.
+   - The domain comes from the request inside the code, which is the domain the wallet signs.
+3. **The code (computers):**
+   - A large, always dark-on-white QR in a white rounded frame, with the Prson mark in the centre.
+   - The frame's border is the countdown ring, an amber stroke that runs down over the code's lifetime (the Worker's 3-minute draft). It turns amber-600 for the last 30 seconds.
+   - Under it: "Open Prson on your phone and scan this code." and "Code expires in 2:41".
+4. **Phones:**
+   - No QR. Instead, one full-width amber "Open Prson" button: the same universal link (`https://app.prson.net/login/v1?…`).
+   - "Scan with another phone instead" reveals the code.
+5. **What the site will get:** read from the code's own request, for example:
+   - "Verified human"
+   - "18 or older", with "Not your date of birth" under it
+   - "Your name"
+   - "A sign-in key just for this site"
+
+   A unique-human request reads "Verified unique person · Passport or ID checked · not trackable across sites".
+6. **Anti-relay cue:** a lock icon and "Only scan codes shown on **shop.example.com**. Never scan one someone sent you."
+7. **Footer:** "Don't have Prson? Get the app" (`ui.getAppUrl`, default https://app.prson.net/).
+
+Progress replaces the code with an overlay. Each step is announced
+through an `aria-live` region:
+
+| Step | What the dialog shows |
+|---|---|
+| Phone connected | A pulsing phone icon: the wallet claimed the code |
+| Receiving your proof | The encrypted channel is open |
+| Checking the proof | The SDK is verifying it |
+| Signed in | An amber disc pops in, the check draws itself, and "You're signed in to shop.example.com". It holds for 1 s (0.45 s with reduced motion), then the dialog closes and `signIn()` resolves. |
+| This code expired | "Get a new code" makes a new draft in place |
+| Sign-in didn't finish | The reason in plain words, and "Try again" |
+
+The wallet claims the code only when the person approves on the phone.
+So "Phone connected" and the steps after it follow the approval; the
+browser can't see the scan itself.
+
+Theme: `ui.theme` is `"auto"` (follows `prefers-color-scheme`),
+`"light"` or `"dark"`. Light is the brand's primary look; dark uses
+zinc-900 surfaces with amber accents. The QR stays dark on white in every
+theme. You can override the colours with `--prson-*` custom properties on
+`[data-prson-login-ui]`.
+
+Nothing on the dialog can usefully be copied: the code is single-use,
+bound to this browser's ephemeral key and expires in minutes. The URL is
+never printed or offered for copying on a computer.
+
+**Compatibility:**
+
+- The 0.1 renderer contract still works: `window.__prsonLoginQrRenderer(url, mount, theme)` returning `{ dispose }`.
+- New renderers get a fourth `context` argument (`mode`, `domain`, `refresh`, `cancel`, `getAppUrl`, `titleId`) and may return `update(state)`.
+- With `ui.mountQrInto`, the card renders inline as before. The bubbling `prson-login-refresh-requested` event still fires on "Get a new code". If the page doesn't call `signIn()` again from it, the SDK refreshes the code itself.
 
 ## Sessions, renewal, revocation
 

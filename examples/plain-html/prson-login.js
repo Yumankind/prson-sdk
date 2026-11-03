@@ -2379,6 +2379,76 @@ function boxToWallet(walletSessionPkB64u, plaintext) {
   });
 }
 
+// src/status.ts
+var cache = /* @__PURE__ */ new Map();
+function isStrongCredential(payload) {
+  return payload.verified_human === true || typeof payload.verification_level === "number" && payload.verification_level >= 5;
+}
+async function checkCredentialStatus(payload, opts) {
+  const ref = payload.status?.status_list;
+  if (!ref) return { ok: true, checked: false };
+  const policy = opts.onUnavailable ?? (isStrongCredential(payload) ? "fail-closed" : "fail-open");
+  const unavailable = (detail) => policy === "fail-open" ? { ok: true, checked: false, unavailable: detail } : { ok: false, reason: "status_unavailable", detail };
+  const idx = ref.idx;
+  const uri = ref.uri;
+  if (typeof idx !== "number" || !Number.isInteger(idx) || idx < 0 || typeof uri !== "string" || !/^https:\/\//.test(uri)) {
+    return { ok: false, reason: "status_unavailable", detail: "malformed status reference" };
+  }
+  let entry;
+  try {
+    entry = await statusList(uri, opts);
+  } catch (e) {
+    return unavailable(e.message);
+  }
+  const bitOffset = idx * entry.bits;
+  const byte = entry.list[bitOffset >> 3];
+  if (byte === void 0) return unavailable("index outside the list");
+  const value = byte >> (bitOffset & 7) & (1 << entry.bits) - 1;
+  if (value !== 0) return { ok: false, reason: "vc_revoked", detail: value === 2 ? "suspended" : "invalid" };
+  return { ok: true, checked: true };
+}
+async function statusList(uri, opts) {
+  const now = opts.now?.() ?? Date.now();
+  const cached = cache.get(uri);
+  if (cached && now - cached.fetchedAt < cached.ttlMs && (cached.exp === null || cached.exp * 1e3 > now)) return cached;
+  const doFetch = opts.fetch ?? ((u) => fetch(u, { headers: { Accept: "application/statuslist+jwt" } }));
+  const res = await doFetch(uri);
+  if (!res.ok) throw new Error(`status list HTTP ${res.status}`);
+  const jwt = (await res.text()).trim();
+  const [h, p, s] = jwt.split(".");
+  if (!h || !p || !s) throw new Error("status list token malformed");
+  const header = JSON.parse(utf8(b64uBytes(h)));
+  const payload = JSON.parse(utf8(b64uBytes(p)));
+  if (header.typ !== "statuslist+jwt" || header.alg !== "RS256" || !header.kid) throw new Error("status list token header");
+  const jwk = await opts.resolveKey(header.kid);
+  if (!jwk) throw new Error("status list key unknown");
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+  if (!await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, b64uBytes(s), new TextEncoder().encode(`${h}.${p}`))) throw new Error("status list signature");
+  if (payload.sub !== uri) throw new Error("status list subject");
+  if (typeof payload.exp === "number" && payload.exp * 1e3 <= now) throw new Error("status list expired");
+  const bits = payload.status_list?.bits;
+  if (bits !== 1 && bits !== 2 && bits !== 4 && bits !== 8) throw new Error("status list bits");
+  if (typeof payload.status_list?.lst !== "string") throw new Error("status list lst");
+  const list = await inflate(b64uBytes(payload.status_list.lst));
+  const want = (opts.cacheSeconds ?? 60) * 1e3;
+  const ttlMs = typeof payload.ttl === "number" ? Math.min(want, payload.ttl * 1e3) : want;
+  const entry = { fetchedAt: now, ttlMs, exp: typeof payload.exp === "number" ? payload.exp : null, bits, list };
+  cache.set(uri, entry);
+  return entry;
+}
+async function inflate(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+var utf8 = (b) => new TextDecoder().decode(b);
+function b64uBytes(s) {
+  const pad = (4 - s.length % 4) % 4;
+  const bin = atob((s + "=".repeat(pad)).replace(/-/g, "+").replace(/_/g, "/"));
+  const out = new Uint8Array(new ArrayBuffer(bin.length));
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 // src/verify.ts
 var ANONYMOUS_WALLET_VCT = "https://app.prson.net/credentials/anonymous-wallet/v1";
 async function verifyPresentation(sdJwt, opts) {
@@ -2406,8 +2476,8 @@ async function verifyPresentation(sdJwt, opts) {
   let header;
   let payload;
   try {
-    header = JSON.parse(new TextDecoder().decode(b64uBytes(hB64)));
-    payload = JSON.parse(new TextDecoder().decode(b64uBytes(pB64)));
+    header = JSON.parse(new TextDecoder().decode(b64uBytes2(hB64)));
+    payload = JSON.parse(new TextDecoder().decode(b64uBytes2(pB64)));
   } catch {
     return { ok: false, reason: "malformed" };
   }
@@ -2432,15 +2502,21 @@ async function verifyPresentation(sdJwt, opts) {
   const issuerOk = await crypto.subtle.verify(
     "RSASSA-PKCS1-v1_5",
     issuerKey,
-    b64uBytes(sigB64),
+    b64uBytes2(sigB64),
     new TextEncoder().encode(`${hB64}.${pB64}`)
   );
   if (!issuerOk) return { ok: false, reason: "issuer_sig_invalid" };
+  const status = await checkCredentialStatus(payload, {
+    resolveKey: (kid) => resolveIssuerJwk(kid, opts),
+    onUnavailable: opts.status?.onUnavailable,
+    cacheSeconds: opts.status?.cacheSeconds
+  });
+  if (!status.ok) return { ok: false, reason: status.reason };
   const sdSet = collectSdDigests(payload);
   const disclosed = [];
   for (const t of discTokens) {
     if (!t) continue;
-    const arr = JSON.parse(new TextDecoder().decode(b64uBytes(t)));
+    const arr = JSON.parse(new TextDecoder().decode(b64uBytes2(t)));
     if (!Array.isArray(arr) || arr.length < 2) {
       return { ok: false, reason: "disclosure_unmatched" };
     }
@@ -2460,8 +2536,8 @@ async function verifyPresentation(sdJwt, opts) {
   let kbHeader;
   let kbPayload;
   try {
-    kbHeader = JSON.parse(new TextDecoder().decode(b64uBytes(kbH)));
-    kbPayload = JSON.parse(new TextDecoder().decode(b64uBytes(kbP)));
+    kbHeader = JSON.parse(new TextDecoder().decode(b64uBytes2(kbH)));
+    kbPayload = JSON.parse(new TextDecoder().decode(b64uBytes2(kbP)));
   } catch {
     return { ok: false, reason: "kb_sig_invalid" };
   }
@@ -2489,7 +2565,7 @@ async function verifyPresentation(sdJwt, opts) {
   const kbOk = await crypto.subtle.verify(
     "Ed25519",
     holderKey,
-    b64uBytes(kbS),
+    b64uBytes2(kbS),
     new TextEncoder().encode(`${kbH}.${kbP}`)
   );
   if (!kbOk) return { ok: false, reason: "kb_sig_invalid" };
@@ -2551,7 +2627,7 @@ function collectSdDigests(payload, out = /* @__PURE__ */ new Set()) {
   }
   return out;
 }
-function b64uBytes(s) {
+function b64uBytes2(s) {
   const pad = (4 - s.length % 4) % 4;
   const std = (s + "=".repeat(pad)).replace(/-/g, "+").replace(/_/g, "/");
   const bin = atob(std);
@@ -2571,8 +2647,8 @@ async function verifyAnonymousWallet(jws, opts) {
   let header;
   let payload;
   try {
-    header = JSON.parse(new TextDecoder().decode(b64uBytes(hB64)));
-    payload = JSON.parse(new TextDecoder().decode(b64uBytes(pB64)));
+    header = JSON.parse(new TextDecoder().decode(b64uBytes2(hB64)));
+    payload = JSON.parse(new TextDecoder().decode(b64uBytes2(pB64)));
   } catch {
     return { ok: false, reason: "malformed" };
   }
@@ -2609,7 +2685,7 @@ async function verifyAnonymousWallet(jws, opts) {
   const ok = await crypto.subtle.verify(
     "Ed25519",
     key,
-    b64uBytes(sigB64),
+    b64uBytes2(sigB64),
     new TextEncoder().encode(`${hB64}.${pB64}`)
   );
   if (!ok) return { ok: false, reason: "issuer_sig_invalid" };
@@ -3931,24 +4007,62 @@ async function establishTransport(opts) {
 function createModalQrMount(opts) {
   const scrim = document.createElement("div");
   scrim.setAttribute("data-prson-login-modal", "1");
-  scrim.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.5);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;";
+  const sheet = typeof window.matchMedia === "function" && window.matchMedia("(max-width: 480px)").matches;
+  scrim.style.cssText = "position:fixed;inset:0;background:rgba(10,10,10,0.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:2147483647;display:flex;overflow-y:auto;box-sizing:border-box;justify-content:center;" + (sheet ? "align-items:flex-end;padding:0;" : "align-items:center;padding:24px 16px;");
   const mount = document.createElement("div");
   mount.setAttribute("data-prson-login-modal-mount", "1");
-  mount.style.cssText = "display:flex;align-items:center;justify-content:center;";
+  mount.setAttribute("role", "dialog");
+  mount.setAttribute("aria-modal", "true");
+  if (opts.titleId) mount.setAttribute("aria-labelledby", opts.titleId);
+  else mount.setAttribute("aria-label", "Sign in with Prson");
+  mount.tabIndex = -1;
+  mount.style.cssText = "display:flex;align-items:center;justify-content:center;outline:none;max-width:100%;" + (sheet ? "width:100%;" : "margin:auto 0;");
   scrim.append(mount);
+  const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const root = document.documentElement;
+  const prevOverflow = root.style.overflow;
+  root.style.overflow = "hidden";
   document.body.append(scrim);
+  setTimeout(() => {
+    if (!disposed && !mount.contains(document.activeElement)) mount.focus({ preventScroll: true });
+  }, 0);
   let disposed = false;
   function dispose() {
     if (disposed) return;
     disposed = true;
     document.removeEventListener("keydown", onKey, true);
     scrim.remove();
+    root.style.overflow = prevOverflow;
+    try {
+      previouslyFocused?.focus({ preventScroll: true });
+    } catch {
+    }
   }
   function onKey(e) {
     if (e.key === "Escape" || e.key === "Esc") {
       e.preventDefault();
       e.stopPropagation();
       opts.onDismiss();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const focusable = Array.from(
+      mount.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')
+    ).filter((el) => el.getClientRects().length > 0);
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) {
+      e.preventDefault();
+      mount.focus();
+      return;
+    }
+    const active2 = document.activeElement;
+    if (e.shiftKey && (active2 === first || active2 === mount || !mount.contains(active2))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active2 === last || !mount.contains(active2))) {
+      e.preventDefault();
+      first.focus();
     }
   }
   scrim.addEventListener("click", (e) => {
@@ -3959,9 +4073,9 @@ function createModalQrMount(opts) {
   document.addEventListener("keydown", onKey, true);
   return { mount, dispose };
 }
-function renderLoginQr(url, mount, theme) {
+function renderLoginQr(url, mount, theme, context) {
   const override = window.__prsonLoginQrRenderer;
-  if (override) return override(url, mount, theme);
+  if (override) return override(url, mount, theme, context);
   console.warn(
     "[@prson/login-sdk] No QR renderer installed. Set window.__prsonLoginQrRenderer to a function (url, mount, theme) => { dispose: () => void } before calling signIn()."
   );
@@ -5271,14 +5385,23 @@ var LoginAbortedError = class extends Error {
 var _inflight = null;
 function makeInflight() {
   const teardowns = [];
+  let rejectAborted = () => {
+  };
+  const whenAborted = new Promise((_, reject) => {
+    rejectAborted = reject;
+  });
+  whenAborted.catch(() => {
+  });
   const self2 = {
     aborted: false,
+    whenAborted,
     pushTeardown(t) {
       teardowns.push(t);
     },
-    async abort() {
+    async abort(message) {
       if (self2.aborted) return;
       self2.aborted = true;
+      rejectAborted(new LoginAbortedError(message));
       while (teardowns.length) {
         const t = teardowns.pop();
         try {
@@ -5295,193 +5418,81 @@ var PrsonLogin = class {
    * Drive a full sign-in. The promise resolves once the wallet has
    * delivered a verified SD-JWT-VC; the returned session lives until
    * one of the four `ExpiryReason` triggers.
+   *
+   * Without `ui.mountQrInto` the SDK shows its own dialog and handles
+   * everything in it: an expired code or a failure offers a fresh code
+   * (a new draft, and a new nonce when `nonce` is a function) while this
+   * promise keeps waiting; closing the dialog rejects with
+   * `LoginAbortedError` (or with the error on screen, if one was shown).
    */
   static async signIn(opts = {}) {
     const prior = _inflight;
     if (prior) await prior.abort();
     const me = makeInflight();
     _inflight = me;
-    const checkAborted = () => {
-      if (me.aborted) throw new LoginAbortedError();
-    };
     try {
       const domain = opts.domain ?? window.location.origin.replace(/^https?:\/\//, "");
-      const ttlMaxMinutes = Math.min(
-        Math.max(opts.ttlMinutes ?? DEFAULT_TTL_MINUTES, 1),
-        MAX_TTL_MINUTES
-      );
-      const ephKeys = await generateEphemeralKeypair();
-      checkAborted();
-      if (opts.nonce !== void 0 && !/^[A-Za-z0-9_-]{22,128}$/.test(opts.nonce)) {
-        throw new Error("nonce must be 22-128 base64url characters (at least 16 random bytes)");
-      }
-      const nonce = opts.nonce ?? b64u(crypto.getRandomValues(new Uint8Array(32)));
-      const request = {
-        domain,
-        nonce,
-        browserPk: ephKeys.publicKeyB64u,
-        required: opts.required ?? {},
-        // Carried into the wallet's drawer so an "Anonymous" option is
-        // offered. The SDK side enforces acceptance below at verify time;
-        // the wallet enforces drawer UX based on this flag.
-        allowAnonymous: opts.allowAnonymous === true,
-        // Sponsorship offer (advisory on the wire — the server enforces
-        // the stored grant's domain/caps/budget at charge time).
-        ...opts.sponsorship?.grantId ? { sponsorship: { grantId: opts.sponsorship.grantId } } : {},
-        // If set, instructs the wallet to mint a fresh random Ed25519
-        // keypair for this single sign-in (no deterministic per-domain
-        // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
-        ephemeralIdentity: opts.ephemeralIdentity === true,
-        // QR-mode remote navigation — wallet surfaces Prev / Next /
-        // Submit / Logout / Mouse on a persistent banner. See
-        // SignInOptions.remoteNavigation + bind.ts:enableRemoteNavigation.
-        remoteNavigation: opts.remoteNavigation === true,
-        // Pre-grant mouse control — wallet enables the Touchpad /
-        // Magic wand buttons on the banner drawer from session start.
-        // See SignInOptions.mouseControl + bindMouse's ambient
-        // subscriber path.
-        mouseControl: opts.mouseControl === true,
-        // App-to-app return leg — validated here (fail fast at the
-        // integrator's desk) AND in the wallet (the enforcing side).
-        ...opts.returnUrl ? { returnUrl: validateReturnUrl(opts.returnUrl, domain) } : {},
-        ttlMaxMinutes
-      };
-      const draft = await createDraft(request, {
-        signalingBase: resolveSignalingBase(opts)
-      });
-      checkAborted();
-      const qrUrl = buildDeepLinkUrl({
-        reqId: draft.reqId,
-        browserPk: ephKeys.publicKeyB64u,
-        nonce,
-        domain,
-        request,
-        serverTs: draft.serverTs
-      });
+      const theme = opts.ui?.theme ?? "auto";
+      const titleId = `prson-login-title-${b64u(crypto.getRandomValues(new Uint8Array(6)))}`;
       const explicitMount = resolveMount(opts.ui?.mountQrInto);
-      let qrHandle = null;
-      let modalHandle = null;
-      if (explicitMount) {
-        qrHandle = renderLoginQr(qrUrl, explicitMount, opts.ui?.theme ?? "auto");
-      } else {
-        modalHandle = createModalQrMount({
-          onDismiss: () => {
-            void me.abort();
-          }
+      const dialog = { current: null };
+      const getMount = () => {
+        if (explicitMount) return explicitMount;
+        if (!dialog.current) {
+          const m = createModalQrMount({ titleId, onDismiss: () => void me.abort("sign-in closed") });
+          dialog.current = m;
+          me.pushTeardown(() => m.dispose());
+        }
+        return dialog.current.mount;
+      };
+      for (; ; ) {
+        const attempt = makeInflight();
+        me.pushTeardown(() => attempt.abort());
+        let requestRestart = () => {
+        };
+        const restart = new Promise((resolve) => {
+          requestRestart = () => resolve("restart");
         });
-        qrHandle = renderLoginQr(
-          qrUrl,
-          modalHandle.mount,
-          opts.ui?.theme ?? "auto"
-        );
-      }
-      if (qrHandle) me.pushTeardown(() => qrHandle.dispose());
-      if (modalHandle) me.pushTeardown(() => modalHandle.dispose());
-      const signaling = await connectSignaling({
-        url: draft.signalingWss,
-        role: "browser",
-        sigToken: draft.draftToken
-      });
-      me.pushTeardown(() => signaling.close());
-      checkAborted();
-      const transport = await establishTransport({
-        stunOnly: true,
-        signaling,
-        role: "browser",
-        // When the Worker minted TURN creds at draft time, hand them
-        // to the peer connection so the browser also has a relay
-        // candidate. Older Workers may omit `turn` from the draft
-        // response; falling back to STUN-only matches the prior
-        // behaviour.
-        turn: draft.turn
-      });
-      me.pushTeardown(() => transport.close());
-      checkAborted();
-      const first = await transport.awaitFirstMessage();
-      checkAborted();
-      const envelope = await decryptEnvelope(first, ephKeys);
-      if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
-        throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
-      }
-      const presentationStr = envelope.presentation;
-      if (!presentationStr) {
-        throw new Error("Initial presentation envelope had no presentation field");
-      }
-      const acceptedVcts = opts.allowAnonymous ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT2] : [...KNOWN_VCTS];
-      const verified = await verifyPresentation(presentationStr, {
-        expectedAudience: `https://${domain}`,
-        expectedNonce: nonce,
-        acceptedVcts,
-        trustedIssuer: TRUSTED_ISSUER
-      });
-      if (!verified.ok) {
-        throw new Error(`Presentation rejected: ${verified.reason}`);
-      }
-      if (verified.credential.vct !== ANONYMOUS_WALLET_VCT2) {
-        const minLevel = opts.required?.minVerificationLevel ?? 1;
-        const claimedLevel = typeof verified.claims.verification_level === "number" ? verified.claims.verification_level : 0;
-        if (claimedLevel < minLevel) {
-          throw new Error(
-            `Presentation rejected: verification_level ${claimedLevel} below required ${minLevel}`
-          );
+        const context = {
+          mode: explicitMount ? "inline" : "modal",
+          domain,
+          titleId,
+          getAppUrl: opts.ui?.getAppUrl ?? GET_APP_URL,
+          // A no-op once this sign-in is over or the host re-called
+          // signIn() from the `prson-login-refresh-requested` event.
+          refresh: () => {
+            if (!me.aborted && !attempt.aborted && _inflight === me) requestRestart();
+          },
+          cancel: () => void me.abort("sign-in closed")
+        };
+        const ui = { handle: null };
+        const run = runAttempt(opts, { domain, getMount, theme, context, attempt, me, ui });
+        run.catch(() => {
+        });
+        try {
+          const out = await Promise.race([run, restart, me.whenAborted]);
+          if (out === "restart") {
+            await attempt.abort();
+            continue;
+          }
+          ui.handle?.dispose();
+          dialog.current?.dispose();
+          return out;
+        } catch (err) {
+          if (err instanceof LoginAbortedError) throw err;
+          ui.handle?.update?.({ state: "error", message: friendlyError(err) });
+          if (!dialog.current || !ui.handle?.update) {
+            if (dialog.current) await me.abort();
+            throw err;
+          }
+          try {
+            await Promise.race([restart, me.whenAborted]);
+          } catch {
+            throw err;
+          }
+          await attempt.abort();
         }
       }
-      qrHandle?.dispose();
-      modalHandle?.dispose();
-      const uniqueHumanId = envelope.uniqueHumanId ?? null;
-      if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
-        throw new Error("Presentation rejected: required uniqueHumanId credential missing");
-      }
-      const result = {
-        sdJwtVc: presentationStr,
-        nonce,
-        claims: verified.claims,
-        cnf: verified.cnf,
-        credential: verified.credential,
-        uniqueHumanId,
-        // session is filled in below — temporary placeholder cast
-        // avoids a circular-self-reference in the literal.
-        session: void 0
-      };
-      const session = new PrsonLoginSession({
-        cnf: verified.cnf,
-        credential: verified.credential,
-        transport,
-        ephKeys,
-        verifierContext: {
-          expectedAudience: `https://${domain}`,
-          expectedNonceFactory: () => nonce,
-          // renewals carry a fresh nonce; see session.ts
-          acceptedVcts: [...KNOWN_VCTS],
-          trustedIssuer: TRUSTED_ISSUER
-        },
-        // Cache the verified claims so the session can diff them
-        // against future `claim-update` envelopes — see ROADMAP §1.
-        initialClaims: verified.claims,
-        // Fire `signed_in` on the typed event stream. Microtask-
-        // deferred inside the constructor, so listeners attached
-        // synchronously after this `signIn()` resolves still
-        // receive it.
-        initialSignedInResult: result,
-        // Forward `walletSessionPk` + `preferredLanguage` from the
-        // FIRST envelope (which `signIn()` consumed before the session
-        // existed) so they're available immediately on the session
-        // handle. Without this seed the session would have
-        // `walletSessionPk: null` (breaking the request channel) and
-        // `preferredLanguage: null` (host can't localise on first
-        // paint) until a subsequent envelope arrives.
-        walletSessionPk: envelope.walletSessionPk,
-        initialPreferredLanguage: envelope.preferredLanguage,
-        // Public-profile fields the wallet may stamp onto the first
-        // envelope. They aren't part of the verified-human VC (which
-        // carries verification facts only), so without seeding here
-        // the host's `session.displayName` would stay null until a
-        // later `display-update` envelope.
-        initialDisplayName: envelope.displayName,
-        initialAvatar: envelope.avatar
-      });
-      result.session = session;
-      return result;
     } finally {
       if (_inflight === me) _inflight = null;
     }
@@ -5496,6 +5507,209 @@ var PrsonLogin = class {
     return null;
   }
 };
+var GET_APP_URL = "https://app.prson.net/";
+async function runAttempt(opts, env) {
+  const { domain, attempt, me } = env;
+  const guard = (p) => Promise.race([p, attempt.whenAborted, me.whenAborted]);
+  const checkAborted = () => {
+    if (me.aborted || attempt.aborted) throw new LoginAbortedError();
+  };
+  const ttlMaxMinutes = Math.min(
+    Math.max(opts.ttlMinutes ?? DEFAULT_TTL_MINUTES, 1),
+    MAX_TTL_MINUTES
+  );
+  const ephKeys = await guard(generateEphemeralKeypair());
+  checkAborted();
+  const given = typeof opts.nonce === "function" ? await guard(Promise.resolve(opts.nonce())) : opts.nonce;
+  checkAborted();
+  if (given !== void 0 && (typeof given !== "string" || !/^[A-Za-z0-9_-]{22,128}$/.test(given))) {
+    throw new Error("nonce must be 22-128 base64url characters (at least 16 random bytes)");
+  }
+  const nonce = given ?? b64u(crypto.getRandomValues(new Uint8Array(32)));
+  const request = {
+    domain,
+    nonce,
+    browserPk: ephKeys.publicKeyB64u,
+    required: opts.required ?? {},
+    // Carried into the wallet's drawer so an "Anonymous" option is
+    // offered. The SDK side enforces acceptance below at verify time;
+    // the wallet enforces drawer UX based on this flag.
+    allowAnonymous: opts.allowAnonymous === true,
+    // Sponsorship offer (advisory on the wire — the server enforces
+    // the stored grant's domain/caps/budget at charge time).
+    ...opts.sponsorship?.grantId ? { sponsorship: { grantId: opts.sponsorship.grantId } } : {},
+    // If set, instructs the wallet to mint a fresh random Ed25519
+    // keypair for this single sign-in (no deterministic per-domain
+    // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
+    ephemeralIdentity: opts.ephemeralIdentity === true,
+    // QR-mode remote navigation — wallet surfaces Prev / Next /
+    // Submit / Logout / Mouse on a persistent banner. See
+    // SignInOptions.remoteNavigation + bind.ts:enableRemoteNavigation.
+    remoteNavigation: opts.remoteNavigation === true,
+    // Pre-grant mouse control — wallet enables the Touchpad /
+    // Magic wand buttons on the banner drawer from session start.
+    // See SignInOptions.mouseControl + bindMouse's ambient
+    // subscriber path.
+    mouseControl: opts.mouseControl === true,
+    // App-to-app return leg — validated here (fail fast at the
+    // integrator's desk) AND in the wallet (the enforcing side).
+    ...opts.returnUrl ? { returnUrl: validateReturnUrl(opts.returnUrl, domain) } : {},
+    ttlMaxMinutes
+  };
+  const draft = await guard(
+    createDraft(request, {
+      signalingBase: resolveSignalingBase(opts)
+    })
+  );
+  checkAborted();
+  const qrUrl = buildDeepLinkUrl({
+    reqId: draft.reqId,
+    browserPk: ephKeys.publicKeyB64u,
+    nonce,
+    domain,
+    request,
+    serverTs: draft.serverTs
+  });
+  const handle = renderLoginQr(qrUrl, env.getMount(), env.theme, env.context);
+  env.ui.handle = handle;
+  attempt.pushTeardown(() => handle.dispose());
+  const show = (s) => {
+    if (!attempt.aborted && !me.aborted) void handle.update?.(s);
+  };
+  const signaling = await guard(
+    connectSignaling({
+      url: draft.signalingWss,
+      role: "browser",
+      sigToken: draft.draftToken
+    })
+  );
+  attempt.pushTeardown(() => signaling.close());
+  checkAborted();
+  let scanned = false;
+  signaling.onMessage((m) => {
+    if (!scanned && (m.msg === "answer" || m.msg === "peer-ready")) {
+      scanned = true;
+      show({ state: "scanned" });
+    }
+  });
+  const transport = await guard(
+    establishTransport({
+      stunOnly: true,
+      signaling,
+      role: "browser",
+      // When the Worker minted TURN creds at draft time, hand them
+      // to the peer connection so the browser also has a relay
+      // candidate. Older Workers may omit `turn` from the draft
+      // response; falling back to STUN-only matches the prior
+      // behaviour.
+      turn: draft.turn
+    })
+  );
+  attempt.pushTeardown(() => transport.close());
+  checkAborted();
+  show({ state: "approving" });
+  const first = await guard(transport.awaitFirstMessage());
+  checkAborted();
+  show({ state: "verifying" });
+  const envelope = await decryptEnvelope(first, ephKeys);
+  if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
+    throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
+  }
+  const presentationStr = envelope.presentation;
+  if (!presentationStr) {
+    throw new Error("Initial presentation envelope had no presentation field");
+  }
+  const acceptedVcts = opts.allowAnonymous ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT2] : [...KNOWN_VCTS];
+  const verified = await verifyPresentation(presentationStr, {
+    expectedAudience: `https://${domain}`,
+    expectedNonce: nonce,
+    acceptedVcts,
+    trustedIssuer: TRUSTED_ISSUER
+  });
+  if (!verified.ok) {
+    throw new Error(`Presentation rejected: ${verified.reason}`);
+  }
+  if (verified.credential.vct !== ANONYMOUS_WALLET_VCT2) {
+    const minLevel = opts.required?.minVerificationLevel ?? 1;
+    const claimedLevel = typeof verified.claims.verification_level === "number" ? verified.claims.verification_level : 0;
+    if (claimedLevel < minLevel) {
+      throw new Error(
+        `Presentation rejected: verification_level ${claimedLevel} below required ${minLevel}`
+      );
+    }
+  }
+  const uniqueHumanId = envelope.uniqueHumanId ?? null;
+  if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
+    throw new Error("Presentation rejected: required uniqueHumanId credential missing");
+  }
+  checkAborted();
+  const hold = handle.update?.({ state: "success", domain });
+  if (hold && typeof hold.then === "function") {
+    await Promise.race([hold, new Promise((r) => setTimeout(r, 1500))]);
+  }
+  checkAborted();
+  const result = {
+    sdJwtVc: presentationStr,
+    nonce,
+    claims: verified.claims,
+    cnf: verified.cnf,
+    credential: verified.credential,
+    uniqueHumanId,
+    // session is filled in below — temporary placeholder cast
+    // avoids a circular-self-reference in the literal.
+    session: void 0
+  };
+  const session = new PrsonLoginSession({
+    cnf: verified.cnf,
+    credential: verified.credential,
+    transport,
+    ephKeys,
+    verifierContext: {
+      expectedAudience: `https://${domain}`,
+      expectedNonceFactory: () => nonce,
+      // renewals carry a fresh nonce; see session.ts
+      acceptedVcts: [...KNOWN_VCTS],
+      trustedIssuer: TRUSTED_ISSUER
+    },
+    // Cache the verified claims so the session can diff them
+    // against future `claim-update` envelopes — see ROADMAP §1.
+    initialClaims: verified.claims,
+    // Fire `signed_in` on the typed event stream. Microtask-
+    // deferred inside the constructor, so listeners attached
+    // synchronously after this `signIn()` resolves still
+    // receive it.
+    initialSignedInResult: result,
+    // Forward `walletSessionPk` + `preferredLanguage` from the
+    // FIRST envelope (which `signIn()` consumed before the session
+    // existed) so they're available immediately on the session
+    // handle. Without this seed the session would have
+    // `walletSessionPk: null` (breaking the request channel) and
+    // `preferredLanguage: null` (host can't localise on first
+    // paint) until a subsequent envelope arrives.
+    walletSessionPk: envelope.walletSessionPk,
+    initialPreferredLanguage: envelope.preferredLanguage,
+    // Public-profile fields the wallet may stamp onto the first
+    // envelope. They aren't part of the verified-human VC (which
+    // carries verification facts only), so without seeding here
+    // the host's `session.displayName` would stay null until a
+    // later `display-update` envelope.
+    initialDisplayName: envelope.displayName,
+    initialAvatar: envelope.avatar
+  });
+  result.session = session;
+  return result;
+}
+function friendlyError(err) {
+  const m = err instanceof Error ? err.message : String(err);
+  if (/Too many login sessions/i.test(m)) return "Too many sign-ins from this network. Wait a moment and try again.";
+  if (/createDraft failed|Failed to fetch|NetworkError|signaling: WS/i.test(m)) {
+    return "Couldn't reach Prson. Check your connection and try again.";
+  }
+  if (/uniqueHumanId/i.test(m)) return "This site needs a passport or ID card verified in the Prson app.";
+  if (/verification_level/i.test(m)) return "This site needs a more verified identity than the one chosen.";
+  if (/data channel/i.test(m)) return "Your phone couldn't connect to this browser. Try again.";
+  return "Sign-in didn't finish. Try again.";
+}
 function b64u(bytes) {
   let s = "";
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
@@ -5542,6 +5756,7 @@ function buildDeepLinkUrl(args) {
 export {
   ANONYMOUS_WALLET_VCT2 as ANONYMOUS_WALLET_VCT,
   DEFAULT_TTL_MINUTES,
+  GET_APP_URL,
   KNOWN_VCTS,
   LoginAbortedError,
   MAX_TTL_MINUTES,

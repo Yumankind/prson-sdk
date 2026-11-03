@@ -4,39 +4,38 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Sign in with Prson — plain-HTML example</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
     <style>
       /*
-       * Page-level chrome ONLY. The QR card + countdown + refresh
-       * affordance are styled by `@prson/login-sdk-ui`, which
-       * injects its own `<style data-prson-login-ui>` block on
-       * import. Don't duplicate those rules here — partner-side
-       * overrides should target `[data-prson-login-ui]` selectors
-       * with higher specificity instead.
+       * Page-level chrome ONLY. The sign-in dialog and the "Sign in with
+       * Prson" button are styled by `@prson/login-sdk-ui`, which injects
+       * its own `<style data-prson-login-ui>` block on import. Partner-side
+       * overrides should target `[data-prson-login-ui]` (the card) or
+       * `.prson-signin-btn` (the button) with higher specificity.
        */
       :root {
         color-scheme: light dark;
-        font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
-        --bg: #fafafa;
-        --fg: #111;
-        --muted: #6b7280;
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        --bg: #fafaf9;
+        --fg: #0a0a0a;
+        --muted: #52525b;
         --card: #ffffff;
-        --border: rgba(0, 0, 0, 0.08);
-        --shadow: 0 8px 24px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.05);
-        --accent: #111;
-        --accent-on: #ffffff;
+        --border: rgba(10, 10, 10, 0.08);
+        --accent: #d97706;
       }
       @media (prefers-color-scheme: dark) {
         :root {
           --bg: #0b0b0c;
-          --fg: #f5f5f7;
-          --muted: #9ca3af;
+          --fg: #fafafa;
+          --muted: #a1a1aa;
           --card: #18181b;
-          --border: rgba(255, 255, 255, 0.08);
-          --shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
-          --accent: #f5f5f7;
-          --accent-on: #0b0b0c;
+          --border: rgba(255, 255, 255, 0.1);
+          --accent: #fbbf24;
         }
       }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
         background: var(--bg);
@@ -45,131 +44,111 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        padding: 48px 20px;
-        box-sizing: border-box;
+        padding: 56px 16px;
+        -webkit-font-smoothing: antialiased;
       }
-      .hero {
-        max-width: 560px;
-        text-align: center;
-        margin-bottom: 32px;
-      }
-      h1 {
-        font-weight: 600;
-        letter-spacing: -0.6px;
-        font-size: 30px;
-        margin: 0 0 8px;
-      }
-      .hero p {
-        color: var(--muted);
-        margin: 0;
-        line-height: 1.55;
-        font-size: 15px;
-      }
-      .signin {
-        font-size: 16px;
-        font-weight: 500;
-        padding: 12px 22px;
-        border-radius: 10px;
-        border: 0;
-        cursor: pointer;
-        background: var(--accent);
-        color: var(--accent-on);
-        margin-top: 20px;
-        transition: transform 0.05s ease, opacity 0.15s ease;
-      }
-      .signin:hover { opacity: 0.92; }
-      .signin:active { transform: translateY(1px); }
-      .signin:disabled { opacity: 0.5; cursor: not-allowed; }
-      #prson-login-qr { display: contents; }
-
+      .hero { max-width: 560px; text-align: center; }
+      .eyebrow { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 12px; letter-spacing: 0.2px; }
+      h1 { font-weight: 700; letter-spacing: -1px; font-size: clamp(30px, 6vw, 42px); line-height: 1.08; margin: 0 0 14px; }
+      h1 span { color: var(--accent); }
+      .hero p { color: var(--muted); margin: 0 auto; line-height: 1.55; font-size: 16px; max-width: 460px; }
+      .actions { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+      .variants { margin-top: 48px; width: 100%; max-width: 560px; display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+      .swatch { border-radius: 16px; padding: 18px; display: grid; place-items: center; border: 1px solid var(--border); }
+      .swatch--light { background: #ffffff; color: #0a0a0a; }
+      .swatch--dark { background: #0a0a0a; color: #ffffff; border-color: #0a0a0a; }
+      .swatch small { display: block; margin-top: 8px; font-size: 12px; opacity: 0.7; }
       .result-card {
         margin-top: 40px;
         max-width: 560px;
         width: 100%;
         background: var(--card);
         border: 1px solid var(--border);
-        border-radius: 12px;
+        border-radius: 16px;
         padding: 20px;
-        box-shadow: var(--shadow);
       }
-      .result-card h2 {
-        font-size: 13px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.6px;
-        color: var(--muted);
-        margin: 0 0 10px;
-      }
+      .result-card h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 10px; }
       pre {
         margin: 0;
-        font-family: "SF Mono", Menlo, monospace;
+        font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
         font-size: 12.5px;
         line-height: 1.55;
         overflow: auto;
         max-height: 320px;
-        background: transparent;
-        padding: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
       }
     </style>
   </head>
   <body>
-    <div class="hero">
-      <h1>Sign in with Prson</h1>
+    <main class="hero">
+      <p class="eyebrow">Static page, no backend</p>
+      <h1>Know it's a real person. <span>Ask nothing else.</span></h1>
       <p>
-        Static page, no backend. The SDK opens an end-to-end-encrypted
-        channel to your phone; your phone returns a verifiable credential
-        that lands here.
+        The SDK opens an end-to-end-encrypted channel to your phone; the
+        Prson app returns a verifiable credential that lands here.
       </p>
-      <button id="signin" type="button" class="signin">Sign in with Prson</button>
-    </div>
+      <div class="actions">
+        <!-- The button: a custom element that renders a real <button>. -->
+        <prson-signin-button id="signin" variant="amber" size="lg"></prson-signin-button>
+      </div>
+    </main>
 
-    <div id="prson-login-qr"></div>
+    <section class="variants" aria-label="Button variants">
+      <div class="swatch swatch--light">
+        <prson-signin-button variant="dark"></prson-signin-button>
+        <small>variant="dark"</small>
+      </div>
+      <div class="swatch swatch--light">
+        <prson-signin-button variant="outline"></prson-signin-button>
+        <small>variant="outline"</small>
+      </div>
+      <div class="swatch swatch--dark">
+        <prson-signin-button variant="light"></prson-signin-button>
+        <small>variant="light"</small>
+      </div>
+      <div class="swatch swatch--dark">
+        <prson-signin-button variant="outline"></prson-signin-button>
+        <small>variant="outline" on dark</small>
+      </div>
+    </section>
 
-    <div class="result-card">
-      <h2>Result</h2>
-      <pre id="out">awaiting a successful sign-in…</pre>
-    </div>
+    <section class="result-card" aria-labelledby="result-title">
+      <h2 id="result-title">Result</h2>
+      <pre id="out" aria-live="polite">Waiting for a sign-in…</pre>
+    </section>
 
     <!--
       ─── @prson/login-sdk-ui ────────────────────────────────────────
-      Optional companion bundle. Side-effect import: registers a styled
-      QR card renderer on `window.__prsonLoginQrRenderer` before the
-      base SDK calls signIn(). If you remove this script tag the
-      base SDK still works — it'll fall back to a text-only QR url
-      with a console warning.
+      Optional companion bundle. Side-effect import: registers the
+      sign-in dialog on `window.__prsonLoginQrRenderer` and the
+      <prson-signin-button> element. Without it the base SDK still works
+      (a text-only fallback with a console warning).
 
-      Built from `login-sdk/packages/browser-ui` via:
-        cd login-sdk/packages/browser-ui
-        npm run build:example
+      Built from `login-sdk` via `npm run build:example`.
       ────────────────────────────────────────────────────────────────
     -->
     <script type="module" src="./prson-login-ui.js"></script>
 
     <script type="module">
       // ─── @prson/login-sdk (the base, headless SDK) ───────────────
-      // Built from `login-sdk/packages/browser` via:
-      //   cd login-sdk/packages/browser
-      //   npx esbuild src/index.ts --bundle --format=esm \
-      //     --target=es2020 --platform=browser \
-      //     --outfile=../../examples/plain-html/prson-login.js \
-      //     --sourcemap
-      //
       // In production: host the bundle on your own CDN or
-      // npm-install `@prson/login-sdk` + (optional)
-      // `@prson/login-sdk-ui`.
+      // npm-install `@prson/login-sdk` + (optional) `@prson/login-sdk-ui`.
       import { PrsonLogin } from "./prson-login.js";
 
       const out = document.querySelector("#out");
       const btn = document.querySelector("#signin");
 
       btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        out.textContent = "starting…";
+        btn.setAttribute("busy", "");
+        out.textContent = "Waiting for your phone…";
         try {
+          // No `ui.mountQrInto`: the SDK shows its own dialog (the site's
+          // domain, what it will get, a countdown, progress, a fresh code
+          // on expiry). On phones it shows one "Open Prson" button.
           const result = await PrsonLogin.signIn({
-            required: { },
-            ttlMinutes: 10,
-            ui: { mountQrInto: "#prson-login-qr", theme: "auto" },
+            required: { predicates: ["age_gte_18"], requiredClaims: ["given_name"] },
+            ui: { theme: "auto" },
             environment: "dev",
           });
 
@@ -191,20 +170,10 @@
             out.textContent += `\n\nexpired: ${reason}`;
           });
         } catch (err) {
-          out.textContent = `error: ${err.message ?? err}`;
+          out.textContent = err?.name === "LoginAbortedError" ? "Sign-in closed." : `Error: ${err?.message ?? err}`;
         } finally {
-          btn.disabled = false;
+          btn.removeAttribute("busy");
         }
-      });
-
-      // ─── Refresh contract ────────────────────────────────────────
-      // When the QR's TTL expires the UI's refresh button dispatches
-      // a bubbling `prson-login-refresh-requested` event. We listen
-      // at document level and re-click the main Sign-in button —
-      // the SDK tears the prior card down via dispose() and mounts
-      // a new one with a fresh server timestamp.
-      document.addEventListener("prson-login-refresh-requested", () => {
-        btn.click();
       });
     </script>
   </body>
