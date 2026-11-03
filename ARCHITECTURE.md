@@ -72,18 +72,20 @@ on the fly; the browser keeps X25519 (KX) and never signs with it.
    └─────────────────────────────┘  channel   └────────────────────────────┘
 
    ┌─────────────────────────────────────────────────────────────────────┐
-   │ Firebase Functions (credential-issuance ONLY — unrelated to relay)  │
-   │  · issueIdentityCredential        — mints the SD-JWT-VC the wallet  │
-   │                                     presents, with cnfJwkOverride   │
-   │                                     for the per-domain holder key.  │
-   │  · revokeIdentityCredential       — wallet-driven sign-out.         │
-   │  · jwtVcIssuerMetadata            — JWKS for verifiers.             │
+   │ Prson API Worker, api.prson.net (credential issuance ONLY —         │
+   │ unrelated to relay)                                                 │
+   │  · POST /v1/fn/issueIdentityCredential — mints the SD-JWT-VC the    │
+   │                                     wallet presents, with           │
+   │                                     cnfJwkOverride for the          │
+   │                                     per-domain holder key.          │
+   │  · POST /v1/fn/revokeIdentityCredential — wallet-driven sign-out.   │
+   │  · GET /.well-known/jwt-vc-issuer — JWKS for verifiers.             │
    └─────────────────────────────────────────────────────────────────────┘
                                   ▲
-                                  │ Firebase ID token
+                                  │ wallet session (Firebase Auth ID token)
                                   │ (wallet only; the browser SDK never
-                                  │  calls Firebase directly — partner
-                                  │  sites don't need Firebase config)
+                                  │  calls it — partner sites need no
+                                  │  Prson or Firebase config)
                                   │
                           ┌───────┴────────┐
                           │  Mobile wallet │
@@ -95,16 +97,18 @@ Two separate planes — the **relay** and the **credentials**:
 1. **Cloudflare Worker** is the **single API surface for the relay**.
    Three routes (`POST /session/draft`, `POST /session/claim`, the WS
    upgrade) plus a Durable Object per `reqId`. Browser SDK + wallet
-   talk to the Worker directly; **no Firebase Functions in the path**.
-   Partner sites embedding the SDK never need Firebase config.
+   talk to the Worker directly. Partner sites embedding the SDK never
+   need Firebase config.
    Cloudflare TURN credentials are minted inside the Worker (API token
    is a Worker secret), only after `/session/claim` verifies a wallet
    Ed25519 signature.
-2. **Firebase callables** handle only the **credential-issuance** path
+2. **The Prson API Worker** (`cloudflare-workers/api`, `api.prson.net`)
+   handles only the **credential-issuance** path
    (`issueIdentityCredential` + its per-domain `cnfJwkOverride` mode,
-   `revokeIdentityCredential`, and the public `jwtVcIssuerMetadata`
-   JWKS endpoint). Those are wallet-only calls, Firebase-authenticated,
-   and never traverse the browser SDK.
+   `revokeIdentityCredential`, and the public `/.well-known/jwt-vc-issuer`
+   JWKS). These used to be Firebase callables, now retired. Issuance
+   and revocation are wallet-only calls with a wallet session, and
+   never traverse the browser SDK.
 
 The transport is **WebRTC peer-to-peer with Cloudflare TURN as a
 fallback relay** — chosen over a hosted SFU because we're moving
@@ -519,15 +523,17 @@ tens of millions of sessions before duration starts billing. Latency:
 <100 ms globally (DOs run at the edge nearest to whichever peer
 connects first).
 
-### 5.2 What stays on Firebase
+### 5.2 Credential issuance (Prson API Worker)
 
-Only the **credential-issuance** path — unrelated to the relay:
+Only the **credential-issuance** path — unrelated to the relay. These
+were Firebase callables; they now run in the Prson API Worker
+(`api.prson.net`, `POST /v1/fn/<name>`), with the same names:
 
 | Callable | Auth | Description |
 |---|---|---|
-| `issueIdentityCredential` | Firebase ID token (wallet) | Mints the VC. Existing callable; accepts an optional `cnfJwkOverride` + `bindToDomain` to swap the cnf for the per-domain Ed25519 key the wallet derives. |
-| `revokeIdentityCredential` | Firebase ID token (wallet) | Marks the wallet's credentials revoked. |
-| `jwtVcIssuerMetadata` | unauth (HTTPS) | Serves the JWKS at `/.well-known/jwt-vc-issuer`. |
+| `issueIdentityCredential` | wallet session (Firebase Auth ID token) | Mints the VC. Existing callable; accepts an optional `cnfJwkOverride` + `bindToDomain` to swap the cnf for the per-domain Ed25519 key the wallet derives. |
+| `revokeIdentityCredential` | wallet session (Firebase Auth ID token) | Marks the wallet's credentials revoked. |
+| `GET /.well-known/jwt-vc-issuer` | unauth (HTTPS) | Serves the JWKS. |
 
 Cloudflare TURN credentials are NOT minted here; they're minted by
 the Worker on `/session/claim` where the API token is a Worker secret.

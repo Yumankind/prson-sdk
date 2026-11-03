@@ -17,7 +17,7 @@ const result = await PrsonLogin.signIn({
     predicates: ["age_gte_18"],                    // on-demand signed predicates
     identityType: "personal",                      // | "organization"
   },
-  ttlMinutes: 10,                                  // 1..15 — credential lifetime
+  ttlMinutes: 2,                                   // capped at 2 today (see below)
   ui: { mountQrInto: "#prson-login-qr" },          // any DOM ref
 });
 
@@ -137,7 +137,8 @@ desktop browser            Cloudflare Worker            mobile wallet
 
 When the browser detects a touch-capable device + Prson wallet
 installed, the QR is replaced by a "Sign in with Prson" button that
-fires a deep link (`prson://login?…`) into the wallet. The wallet
+fires a universal / app link (`https://app.prson.net/login/v1?…`) into
+the wallet (the old `prson://` scheme is no longer emitted). The wallet
 returns to the browser through a universal-link callback OR, if the
 browser doesn't support same-app return, through the same WebRTC
 channel.
@@ -164,8 +165,11 @@ touch the terminal.
 
 ## Sessions, renewal, revocation
 
-SD-JWT-VC presentations are **short-lived by design** — the SDK
-enforces 1-15 min TTL, default 10 min. The session keeps living on
+SD-JWT-VC presentations are **short-lived by design**. Today the SDK
+caps sessions at 2 minutes (`DEFAULT_TTL_MINUTES` = `MAX_TTL_MINUTES` =
+2 in `packages/browser/src/index.ts`, matching the signaling Worker's
+`SESSION_TTL_SECONDS`) so expiry and renewal are exercised often; the
+production target is a 10-minute default and 15-minute maximum. The session keeps living on
 your site as long as the wallet keeps pushing renewals.
 
 ```ts
