@@ -82,6 +82,35 @@ app.post("/api/login", async (req, res) => {
 });
 ```
 
+## Proof verdicts (`prson-truth-verdict/2`)
+
+A verification answer (`GET /v1/verifications/:id`, its webhooks) carries
+Prson's signed verdict and the values it covers:
+
+```ts
+import { verifyVerdict } from "@prson/login-verifier";
+
+// response.verdict_signature  = { envelope, signature, kid }
+// response.verdict_disclosures = [[salt, kind, id, value], ...]
+const keys = (await (await fetch("https://api.prson.net/v1/company/public-key")).json())
+  .verificationKeys.map((k: { kid: string; publicKey: string }) => ({ kid: k.kid, publicKey: k.publicKey }));
+const { envelope, signature, kid } = response.verdict_signature;
+const result = verifyVerdict(envelope, signature, response.verdict_disclosures, { keys, kid });
+// result.ok: the signature checks and every value is one Prson signed.
+// result.disclosures: [{ kind, id, value, verified, reason? }] per value.
+```
+
+The envelope holds one `{kind, id, digest}` per disclosed item (`kind`:
+`fact`, `property` or `document_field`), with
+`digest = base64url(SHA-256(canonicalJson([salt, kind, id, value])))`; the
+16-byte random salt means the envelope alone reveals no value. Keep the
+envelope, signature and disclosures together and anyone can re-check them
+offline later. `opts` takes `publicKey` (SPKI PEM, JWK or `KeyObject`) or
+`keys: [{kid, publicKey}]` plus the seal's `kid`. A `prson-truth-verdict/1`
+envelope (made before verdicts covered values) can still have a valid
+signature, but no value verifies against it (`reason: "not-covered"`).
+`verdictDisclosureDigest(d)` and `canonicalJson(v)` are exported too.
+
 ## Build status
 
 Phase 1 ships the spec, the type surface in `src/index.ts`, and this

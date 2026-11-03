@@ -11,6 +11,23 @@
 import { createHash, createPublicKey, createVerify } from "node:crypto";
 import { importJWK, jwtVerify } from "jose";
 
+export {
+  canonicalJson,
+  verdictDisclosureDigest,
+  verifyVerdict,
+  VERDICT_SCOPE_V1,
+  VERDICT_SCOPE_V2,
+} from "./verdict.js";
+export type {
+  VerdictDisclosure,
+  VerdictDisclosureKind,
+  VerdictEnvelope,
+  VerdictPublicKey,
+  VerifiedDisclosure,
+  VerifyVerdictOptions,
+  VerifyVerdictResult,
+} from "./verdict.js";
+
 // ── Public API ────────────────────────────────────────────────────────
 
 type FetchLike = (input: string, init?: { headers?: Record<string, string> }) => Promise<{

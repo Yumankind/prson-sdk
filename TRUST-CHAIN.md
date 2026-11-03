@@ -340,6 +340,43 @@ narrow the attack surface before the cryptography ever runs:
 - **Concurrency guard on `signIn()`** so a double-click can't spawn
   two parallel flows whose QR cards stack.
 
+## 8b. Proof verdicts: what Prson vouched for, offline
+
+Outside sign-in, Prson countersigns each truth proof (a capture, a fact,
+a property's value, a document's fields) with a **verdict envelope**,
+RS256 with the notary key over its canonical JSON (keys sorted at every
+level, no whitespace), as `{ envelope, signature, kid }`. Scope
+`prson-truth-verdict/2`:
+
+```json
+{
+  "scope": "prson-truth-verdict/2",
+  "proofId": "…", "type": "fragment | property | document | photo | …",
+  "captureHash": "…", "artefactHashes": { … } ,
+  "challengeId": "…", "slotId": "…",
+  "signerIdentityId": "… (an org's pairwise respondent_id)",
+  "level": "strong | weak | failed", "verifiedAt": "ISO-8601",
+  "disclosures": [ { "kind": "fact | property | document_field", "id": "…", "digest": "…" } ]
+}
+```
+
+`disclosures` commits to each disclosed value, SD-JWT style: Prson
+makes 16 random bytes of salt per value when it signs, and
+`digest = base64url(SHA-256(canonicalJson([salt, kind, id, value])))`.
+`id` is the fact's fragment id, the property type, or the document field
+name (`document_type`, `issuing_country`, `expires_on` and the chosen
+chip fields). Whoever receives a value also receives
+`[salt, kind, id, value]` (`verdict_disclosures` in the REST API and
+webhooks, `verdictDisclosures` in proof packages and challenge answers).
+To check a value: verify the signature against Prson's keys
+(`GET /v1/company/public-key` or `/.well-known/jwks.json`), recompute the
+digest and find it in `disclosures` under the same kind and id. Keep the
+three together and anyone can later prove, offline, that Prson vouched
+for exactly those values. The envelope alone reveals no value (the salt
+makes it unguessable); a property shared without its value has no entry;
+a capture's list is empty. `verifyVerdict()` in
+`@prson/login-verifier` does this.
+
 ## 9. Reading paths
 
 - *I'm a verifier integrator and want to know what to trust*: §1 →
@@ -350,3 +387,4 @@ narrow the attack surface before the cryptography ever runs:
   (layer separation), §5 (HMAC vs JWT).
 - *I'm a wallet engineer*: §1 → §3 → §6 (where the wallet's mistakes
   would cascade).
+- *I hold a proof verdict and want to check what it vouches for*: §8b.
