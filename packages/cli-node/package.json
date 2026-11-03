@@ -39,14 +39,14 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Yumankind/prson-network",
-    "directory": "login-sdk/packages/cli-node"
+    "url": "git+https://github.com/Yumankind/prson-sdk.git",
+    "directory": "packages/cli-node"
   },
   "license": "Apache-2.0",
   "author": "Yumankind OÜ <support@prson.net>",
   "homepage": "https://prson.net/developers",
   "bugs": {
-    "url": "https://github.com/Yumankind/prson-network/issues",
+    "url": "https://github.com/Yumankind/prson-sdk/issues",
     "email": "security@yumankind.com"
   },
   "publishConfig": {

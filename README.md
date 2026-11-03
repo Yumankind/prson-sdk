@@ -6,6 +6,14 @@
 > over an end-to-end-encrypted WebRTC channel — never touching the
 > website's backend until you choose to forward it.
 
+Packages: [`@prson/login-sdk`](packages/browser) (browser),
+[`@prson/login-sdk-ui`](packages/browser-ui) (button and QR),
+[`@prson/login-verifier`](packages/verifier-node) (server checks) and
+[`@prson/login-cli`](packages/cli-node) (command line). Apache-2.0.
+This repository is mirrored from Prson's main repository, so some links in
+the design documents point to server code that isn't public. Security
+reports: security@yumankind.com (see [SECURITY.md](SECURITY.md)).
+
 ```ts
 import { PrsonLogin } from "@prson/login-sdk";
 

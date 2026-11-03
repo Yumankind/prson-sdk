@@ -1,0 +1,59 @@
+# Publishes the SDK packages to npm when a tag like sdk-v0.1.1 is pushed.
+# This repository is published from Prson's main repository (login-sdk/).
+#
+# Uses npm trusted publishing (OIDC): no npm token is stored in GitHub. Each
+# package must list this repository and this workflow file as its trusted
+# publisher on npmjs.com (package settings → Trusted publishing). The first
+# release of a new package is published by hand, then trust is configured.
+#
+# Every package whose version is already on npm is skipped, so a tag only
+# publishes the packages whose version was bumped. The tag's version must
+# match at least one package, so a typo can't publish nothing silently.
+name: Publish SDK
+
+on:
+  push:
+    tags: ['sdk-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm trusted publishing and provenance
+
+concurrency:
+  group: publish-sdk
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@11.6.2
+      - run: npm ci --no-audit --no-fund
+      - name: Tag version matches a package
+        if: startsWith(github.ref, 'refs/tags/sdk-v')
+        run: |
+          want="${GITHUB_REF_NAME#sdk-v}"
+          for p in packages/*/package.json; do
+            [ "$(node -p "require('./$p').version")" = "$want" ] && exit 0
+          done
+          echo "No package has version $want" >&2
+          exit 1
+      # Order matters: login-sdk-ui has a peer dependency on login-sdk.
+      - name: Publish
+        run: |
+          for ws in @prson/login-sdk @prson/login-sdk-ui @prson/login-verifier @prson/login-cli; do
+            version="$(npm pkg get version -w "$ws" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Object.values(JSON.parse(s))[0]))')"
+            if npm view "$ws@$version" version >/dev/null 2>&1; then
+              echo "$ws@$version is already on npm, skipping"
+              continue
+            fi
+            echo "Publishing $ws@$version"
+            npm publish -w "$ws" --access public --provenance
+          done
