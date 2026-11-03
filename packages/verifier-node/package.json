@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "echo 'TODO: vitest' && exit 0"
+    "test": "tsc && node --test dist/status.test.js"
   },
   "dependencies": {
     "jose": "^5.2.0"

@@ -17,6 +17,7 @@
  * for older targets we'd polyfill with `@stablelib/ed25519`.
  */
 import type { CnfJwk } from "./index.js";
+import { checkCredentialStatus, type StatusPolicy } from "./status.js";
 
 export type VerifyOptions = {
   expectedAudience: string;
@@ -25,6 +26,13 @@ export type VerifyOptions = {
   trustedIssuer: string; // e.g. "did:web:app.prson.net"
   maxKbAgeSeconds?: number; // default 60
   jwksUri?: string;        // override (default: derived from trustedIssuer)
+  /**
+   * Revocation (the credential's Token Status List entry, status.ts).
+   * onUnavailable: when the list can't be fetched or verified; default
+   * "fail-closed" for verified humans (level 5+), "fail-open" below.
+   * cacheSeconds: how long a list is reused (default 60).
+   */
+  status?: { onUnavailable?: StatusPolicy; cacheSeconds?: number };
 };
 
 export type VerifyOk = {
@@ -53,7 +61,9 @@ export type VerifyErr = {
     | "aud_mismatch"
     | "nonce_mismatch"
     | "sd_hash_mismatch"
-    | "kb_iat_stale";
+    | "kb_iat_stale"
+    | "vc_revoked"
+    | "status_unavailable";
 };
 
 export type VerifyResult = VerifyOk | VerifyErr;
@@ -131,6 +141,14 @@ export async function verifyPresentation(
     new TextEncoder().encode(`${hB64}.${pB64}`),
   );
   if (!issuerOk) return { ok: false, reason: "issuer_sig_invalid" };
+
+  // ── 2b. Not revoked (the issuer's Token Status List) ─────────────
+  const status = await checkCredentialStatus(payload, {
+    resolveKey: (kid) => resolveIssuerJwk(kid, opts),
+    onUnavailable: opts.status?.onUnavailable,
+    cacheSeconds: opts.status?.cacheSeconds,
+  });
+  if (!status.ok) return { ok: false, reason: status.reason };
 
   // ── 3. Verify every Disclosure digest is in the JWS's _sd ──────
   const sdSet = collectSdDigests(payload);
