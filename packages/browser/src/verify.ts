@@ -39,6 +39,14 @@ export type VerifyOk = {
   ok: true;
   claims: Record<string, unknown>;
   cnf: { jwk: CnfJwk };
+  /**
+   * The holder-signed binding: what the cnf key signed for THIS
+   * presentation (the KB-JWT, or the anonymous credential's payload).
+   * `walletSessionPk` is the `prson_wsk` claim — the wallet's X25519
+   * session key the data channel must come from; absent from wallets
+   * that predate it.
+   */
+  binding: { iat: number; nonce: string; walletSessionPk?: string };
   credential: {
     vct: string;
     iss: string;
@@ -182,7 +190,7 @@ export async function verifyPresentation(
   const [kbH, kbP, kbS] = kbJwt.split(".");
   if (!kbH || !kbP || !kbS) return { ok: false, reason: "kb_sig_invalid" };
   let kbHeader: { alg?: string; typ?: string };
-  let kbPayload: { aud?: string; nonce?: string; sd_hash?: string; iat?: number };
+  let kbPayload: { aud?: string; nonce?: string; sd_hash?: string; iat?: number; prson_wsk?: unknown };
   try {
     kbHeader = JSON.parse(new TextDecoder().decode(b64uBytes(kbH)));
     kbPayload = JSON.parse(new TextDecoder().decode(b64uBytes(kbP)));
@@ -243,6 +251,11 @@ export async function verifyPresentation(
     ok: true,
     claims,
     cnf: { jwk: cnf },
+    binding: {
+      iat: kbPayload.iat,
+      nonce: kbPayload.nonce as string,
+      ...walletSessionKeyClaim(kbPayload.prson_wsk),
+    },
     credential: {
       vct: payload.vct as string,
       iss: payload.iss as string,
@@ -250,6 +263,16 @@ export async function verifyPresentation(
       expiresAt: typeof payload.exp === "number" ? payload.exp * 1000 : 0,
     },
   };
+}
+
+/**
+ * The `prson_wsk` claim: the wallet's X25519 session key (32 bytes,
+ * base64url without padding), signed by the cnf key so the data channel
+ * can be tied to the holder. Anything malformed counts as absent.
+ */
+function walletSessionKeyClaim(v: unknown): { walletSessionPk?: string } {
+  if (typeof v !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(v)) return {};
+  return { walletSessionPk: v };
 }
 
 /** Lazy in-memory cache of the Prson issuer JWKS. 1 h TTL. */
@@ -397,6 +420,11 @@ async function verifyAnonymousWallet(
       anonymous: true,
     },
     cnf: { jwk: cnf },
+    binding: {
+      iat: payload.iat as number,
+      nonce: payload.nonce as string,
+      ...walletSessionKeyClaim(payload.prson_wsk),
+    },
     credential: {
       vct: ANONYMOUS_WALLET_VCT,
       iss: typeof payload.iss === "string" ? payload.iss : opts.trustedIssuer,

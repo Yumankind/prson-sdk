@@ -2326,7 +2326,10 @@ async function generateEphemeralKeypair() {
     publicKeyB64u: stripPad((0, import_base64.encodeURLSafe)(kp.publicKey))
   };
 }
-async function decryptEnvelope(raw, keys) {
+async function decryptEnvelope(raw, keys, expectedSenderPkB64u) {
+  return (await openEnvelope(raw, keys, expectedSenderPkB64u)).envelope;
+}
+async function openEnvelope(raw, keys, expectedSenderPkB64u) {
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -2341,13 +2344,29 @@ async function decryptEnvelope(raw, keys) {
   const ct = (0, import_base64.decodeURLSafe)(addPad(parsed.ct));
   if (ephPk.length !== 32) throw new Error("decryptEnvelope: bad ephPk length");
   if (nonce.length !== 24) throw new Error("decryptEnvelope: bad nonce length");
-  const pt = (0, import_nacl.openBox)(ephPk, keys.secretKey, nonce, ct);
+  let senderPk = ephPk;
+  if (expectedSenderPkB64u !== void 0) {
+    const expected = (0, import_base64.decodeURLSafe)(addPad(expectedSenderPkB64u));
+    if (expected.length !== 32 || !bytesEqual(expected, ephPk)) {
+      throw new Error("decryptEnvelope: not sent by the pinned wallet key");
+    }
+    senderPk = expected;
+  }
+  const pt = (0, import_nacl.openBox)(senderPk, keys.secretKey, nonce, ct);
   if (!pt) throw new Error("decryptEnvelope: authentication failed (wrong key or tampered ciphertext)");
+  let envelope;
   try {
-    return JSON.parse(new TextDecoder().decode(pt));
+    envelope = JSON.parse(new TextDecoder().decode(pt));
   } catch {
     throw new Error("decryptEnvelope: decrypted but not JSON");
   }
+  return { envelope, senderPk: stripPad((0, import_base64.encodeURLSafe)(senderPk)) };
+}
+function bytesEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 function stripPad(s) {
   return s.replace(/=+$/, "");
@@ -2356,12 +2375,12 @@ function addPad(s) {
   const mod = s.length % 4;
   return mod === 0 ? s : s + "=".repeat(4 - mod);
 }
-function boxToWallet(walletSessionPkB64u, plaintext) {
+function boxToWallet(walletSessionPkB64u, plaintext, sender) {
   const recipientPk = (0, import_base64.decodeURLSafe)(addPad(walletSessionPkB64u));
   if (recipientPk.length !== 32) {
     throw new Error("boxToWallet: bad walletSessionPk length");
   }
-  const ephemeral = (0, import_x25519.generateKeyPair)();
+  const ephemeral = sender ?? (0, import_x25519.generateKeyPair)();
   const nonce = (0, import_random.randomBytes)(24);
   const pt = new TextEncoder().encode(plaintext);
   const ct = (0, import_nacl.box)(
@@ -2481,13 +2500,17 @@ async function verifyPresentation(sdJwt, opts) {
   } catch {
     return { ok: false, reason: "malformed" };
   }
+  if (header.typ !== "dc+sd-jwt" && header.typ !== "vc+sd-jwt") {
+    return { ok: false, reason: "typ_not_accepted" };
+  }
   if (typeof payload.iss !== "string" || payload.iss !== opts.trustedIssuer) {
     return { ok: false, reason: "issuer_key_resolve_failed" };
   }
   if (typeof payload.vct !== "string" || !opts.acceptedVcts.includes(payload.vct)) {
     return { ok: false, reason: "vct_not_accepted" };
   }
-  if (typeof payload.exp === "number" && payload.exp * 1e3 < Date.now()) {
+  if (typeof payload.exp !== "number") return { ok: false, reason: "malformed" };
+  if (payload.exp * 1e3 < Date.now()) {
     return { ok: false, reason: "vc_expired" };
   }
   const issuerJwk = await resolveIssuerJwk(header.kid ?? "", opts);
@@ -2580,6 +2603,11 @@ async function verifyPresentation(sdJwt, opts) {
     ok: true,
     claims,
     cnf: { jwk: cnf },
+    binding: {
+      iat: kbPayload.iat,
+      nonce: kbPayload.nonce,
+      ...walletSessionKeyClaim(kbPayload.prson_wsk)
+    },
     credential: {
       vct: payload.vct,
       iss: payload.iss,
@@ -2587,6 +2615,10 @@ async function verifyPresentation(sdJwt, opts) {
       expiresAt: typeof payload.exp === "number" ? payload.exp * 1e3 : 0
     }
   };
+}
+function walletSessionKeyClaim(v) {
+  if (typeof v !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(v)) return {};
+  return { walletSessionPk: v };
 }
 var jwksCache = /* @__PURE__ */ new Map();
 async function resolveIssuerJwk(kid, opts) {
@@ -2698,6 +2730,11 @@ async function verifyAnonymousWallet(jws, opts) {
       anonymous: true
     },
     cnf: { jwk: cnf },
+    binding: {
+      iat: payload.iat,
+      nonce: payload.nonce,
+      ...walletSessionKeyClaim(payload.prson_wsk)
+    },
     credential: {
       vct: ANONYMOUS_WALLET_VCT,
       iss: typeof payload.iss === "string" ? payload.iss : opts.trustedIssuer,
@@ -2821,12 +2858,29 @@ var PrsonLoginSession = class {
     this._expiryTimer = null;
     this._closed = false;
     /**
-     * Wallet's session X25519 public key. Captured from the first
-     * inbound envelope's `walletSessionPk`. Null until then — calls
-     * to `request()` before it lands resolve with
-     * `{ ok: false, error: "no-active-session" }`.
+     * Wallet's session X25519 public key, PINNED from the verified
+     * sign-in presentation (its KB-JWT `prson_wsk` claim, signed by the
+     * cnf key). Every inbound envelope must be boxed by this key or it is
+     * dropped, and every outbound one is boxed to it. It changes only when
+     * a verified `renewal` presentation carries a new `prson_wsk`. Null
+     * when the wallet published none — calls to `request()` then resolve
+     * with `{ ok: false, error: "no-active-session" }`.
      */
     this._walletSessionPk = null;
+    /**
+     * True when the sign-in presentation didn't bind a session key (a
+     * wallet older than envelope v2). The sender of inbound envelopes
+     * can't be checked then, so envelopes that act on the page (`nav`,
+     * `value`, `mouse-update`, file transfer) are ignored; everything
+     * else still works. See SECURITY.md §4.
+     */
+    this._legacyChannel = false;
+    /** `iat` of the newest verified presentation (sign-in or renewal).
+     *  A renewal / claim-update must be strictly newer. */
+    this._lastPresentationIat = 0;
+    /** SHA-256 of every presentation this session accepted, so a replay
+     *  of an earlier one (even with a still-fresh `iat`) is refused. */
+    this._seenPresentations = /* @__PURE__ */ new Set();
     /** Pairs outbound `request` envelopes with inbound `response`s. */
     this._requestController = new RequestController();
     /**
@@ -2933,6 +2987,11 @@ var PrsonLoginSession = class {
     this._verifierContext = opts.verifierContext;
     this._claimsSnapshot = { ...opts.initialClaims ?? {} };
     this._walletSessionPk = opts.walletSessionPk ?? null;
+    this._legacyChannel = opts.legacyChannel === true;
+    if (opts.initialPresentation) {
+      this._lastPresentationIat = opts.initialPresentation.iat;
+      void presentationDigest(opts.initialPresentation.presentation).then((d) => this._seenPresentations.add(d));
+    }
     this._preferredLanguage = opts.initialPreferredLanguage ?? null;
     this._displayName = opts.initialDisplayName ?? null;
     this._avatar = opts.initialAvatar ?? null;
@@ -2961,6 +3020,19 @@ var PrsonLoginSession = class {
   /** Snapshot of the most recent verified claims (since last renew / update). */
   get claims() {
     return this._claimsSnapshot;
+  }
+  /**
+   * Who is signed in: the person's Prson ID for this site (`cnf.jwk.x`,
+   * the same value as `SignInResult.prsonId`). Show it — or a name your
+   * backend maps it to — on the page, so the person can see it's them
+   * and not someone who scanned the code first.
+   */
+  get prsonId() {
+    return this._cnf.jwk.x;
+  }
+  /** The wallet's pinned X25519 session key (base64url), or null. */
+  get walletSessionPk() {
+    return this._walletSessionPk;
   }
   /** User's preferred UI language (BCP-47 tag) or null if the
    *  wallet hasn't published one yet. */
@@ -3145,7 +3217,7 @@ var PrsonLoginSession = class {
         reason: "page_unload"
       });
       try {
-        this._transport.send(boxToWallet(this._walletSessionPk, body));
+        this._transport.send(boxToWallet(this._walletSessionPk, body, this._ephKeys));
       } catch {
       }
     };
@@ -3171,7 +3243,7 @@ var PrsonLoginSession = class {
       paused
     });
     try {
-      this._transport.send(boxToWallet(this._walletSessionPk, payload));
+      this._transport.send(boxToWallet(this._walletSessionPk, payload, this._ephKeys));
     } catch {
     }
   }
@@ -3265,7 +3337,7 @@ var PrsonLoginSession = class {
         envelope.inputType = req.inputType;
         envelope.label = req.label;
         if (req.placeholder !== void 0) envelope.placeholder = req.placeholder;
-        if (req.defaultValue !== void 0) envelope.defaultValue = req.defaultValue;
+        if (req.defaultValue !== void 0 && req.inputType !== "password") envelope.defaultValue = req.defaultValue;
         if (req.minLength !== void 0) envelope.minLength = req.minLength;
         if (req.maxLength !== void 0) envelope.maxLength = req.maxLength;
         if (req.min !== void 0) envelope.min = req.min;
@@ -3276,7 +3348,9 @@ var PrsonLoginSession = class {
         if (req.reason) envelope.reason = req.reason;
         break;
       case "input-form":
-        envelope.fields = req.fields;
+        envelope.fields = req.fields.map(
+          (f) => f.inputType === "password" && f.defaultValue !== void 0 ? { ...f, defaultValue: void 0 } : f
+        );
         if (req.submitLabel !== void 0) envelope.submitLabel = req.submitLabel;
         if (req.reason) envelope.reason = req.reason;
         break;
@@ -3286,7 +3360,7 @@ var PrsonLoginSession = class {
         break;
     }
     try {
-      const boxed = boxToWallet(recipientPk, JSON.stringify(envelope));
+      const boxed = boxToWallet(recipientPk, JSON.stringify(envelope), this._ephKeys);
       this._transport.send(boxed);
     } catch {
       if (onMouseFrame) this._mouseSubscribers.delete(requestId);
@@ -3347,7 +3421,11 @@ var PrsonLoginSession = class {
     if (this._closed) return;
     let envelope;
     try {
-      envelope = await decryptEnvelope(raw, this._ephKeys);
+      envelope = await decryptEnvelope(
+        raw,
+        this._ephKeys,
+        this._legacyChannel ? void 0 : this._walletSessionPk ?? void 0
+      );
     } catch {
       return;
     }
@@ -3399,7 +3477,7 @@ var PrsonLoginSession = class {
       domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, "")
     });
     try {
-      this._transport.send(boxToWallet(this._walletSessionPk, body));
+      this._transport.send(boxToWallet(this._walletSessionPk, body, this._ephKeys));
     } catch {
     }
   }
@@ -3424,7 +3502,7 @@ var PrsonLoginSession = class {
       domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, "")
     });
     try {
-      this._transport.send(boxToWallet(this._walletSessionPk, body));
+      this._transport.send(boxToWallet(this._walletSessionPk, body, this._ephKeys));
     } catch {
     }
     this._armOfflineTimer();
@@ -3441,7 +3519,7 @@ var PrsonLoginSession = class {
       domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, "")
     });
     try {
-      this._transport.send(boxToWallet(this._walletSessionPk, body));
+      this._transport.send(boxToWallet(this._walletSessionPk, body, this._ephKeys));
     } catch {
     }
   }
@@ -3504,7 +3582,7 @@ var PrsonLoginSession = class {
         }
         pending.attempts += 1;
         try {
-          this._transport.send(boxToWallet(this._walletSessionPk, encoded));
+          this._transport.send(boxToWallet(this._walletSessionPk, encoded, this._ephKeys));
         } catch {
         }
         pending.timer = setTimeout(() => {
@@ -3535,9 +3613,6 @@ var PrsonLoginSession = class {
    */
   async _dispatchDecryptedForTest(envelope) {
     if (this._closed) return;
-    if (typeof envelope.walletSessionPk === "string") {
-      this._walletSessionPk = envelope.walletSessionPk;
-    }
     if (typeof envelope.preferredLanguage === "string") {
       this._preferredLanguage = envelope.preferredLanguage;
     }
@@ -3563,6 +3638,7 @@ var PrsonLoginSession = class {
         if (envelope.requestId) this._mouseSubscribers.delete(envelope.requestId);
         return;
       case "mouse-update":
+        if (this._legacyChannel) return;
         if (envelope.mouse) {
           const perRequest = envelope.requestId ? this._mouseSubscribers.get(envelope.requestId) : void 0;
           const target = perRequest ?? this._ambientMouseHandler;
@@ -3576,6 +3652,7 @@ var PrsonLoginSession = class {
         return;
       case "nav":
       case "logout":
+        if (envelope.msg === "nav" && this._legacyChannel) return;
         if (this._remoteNavListener) {
           try {
             if (envelope.msg === "nav" && envelope.action) {
@@ -3593,6 +3670,7 @@ var PrsonLoginSession = class {
         if (envelope.msg === "logout") this._teardown("user_revoked");
         return;
       case "value":
+        if (this._legacyChannel) return;
         if (this._remoteNavListener && typeof envelope.value === "string") {
           try {
             this._remoteNavListener({ msg: "value", value: envelope.value });
@@ -3603,6 +3681,7 @@ var PrsonLoginSession = class {
       case "file-begin":
       case "file-chunk":
       case "file-end":
+        if (this._legacyChannel) return;
         if (this._fileEnvelopeHandler) {
           try {
             this._fileEnvelopeHandler(envelope);
@@ -3616,29 +3695,50 @@ var PrsonLoginSession = class {
   }
   async _handleRenewal(envelope) {
     if (!envelope.presentation) return;
-    const verifierOpts = {
-      ...this._verifierContext,
-      expectedNonce: extractKbNonce(envelope.presentation) ?? this._verifierContext.expectedNonceFactory()
-    };
-    const verified = await verifyPresentation(
-      envelope.presentation,
-      verifierOpts
-    );
-    if (!verified.ok) return;
-    if (verified.cnf.jwk.x !== this._cnf.jwk.x) return;
+    const verified = await this._verifyFresh(envelope.presentation);
+    if (!verified) return;
+    const rotated = verified.binding.walletSessionPk;
+    if (envelope.msg === "renewal" && rotated && !this._legacyChannel) {
+      this._walletSessionPk = rotated;
+    }
     this._expiresAt = verified.credential.expiresAt;
     this._claimsSnapshot = { ...verified.claims };
     this._armExpiryTimer();
     const fresh = {
       sdJwtVc: envelope.presentation,
       // The wallet picks a renewal's nonce, so a backend can't have issued it.
-      nonce: String(verifierOpts.expectedNonce),
+      nonce: verified.binding.nonce,
+      prsonId: verified.cnf.jwk.x,
       claims: verified.claims,
       cnf: verified.cnf,
       credential: verified.credential,
       session: this
     };
     this._dispatch({ type: "renewed", result: fresh });
+  }
+  /**
+   * Verify a renewal / claim-update presentation and enforce in-session
+   * anti-replay: same holder key, a holder-signed `iat` strictly newer
+   * than the last accepted presentation, and never a presentation this
+   * session already accepted. Returns null (drop it) otherwise.
+   */
+  async _verifyFresh(presentation) {
+    const verifierOpts = {
+      ...this._verifierContext,
+      // The wallet signs the sign-in nonce again, or one of its own; the
+      // freshness checks below are what stop a replay either way.
+      expectedNonce: extractKbNonce(presentation) ?? this._verifierContext.expectedNonceFactory()
+    };
+    const digest = await presentationDigest(presentation);
+    if (this._seenPresentations.has(digest)) return null;
+    const verified = await verifyPresentation(presentation, verifierOpts);
+    if (!verified.ok) return null;
+    if (verified.cnf.jwk.x !== this._cnf.jwk.x) return null;
+    if (verified.binding.iat <= this._lastPresentationIat) return null;
+    if (this._closed || this._seenPresentations.has(digest)) return null;
+    this._seenPresentations.add(digest);
+    this._lastPresentationIat = verified.binding.iat;
+    return verified;
   }
   /**
    * Verify the embedded presentation, then diff its claims against
@@ -3661,16 +3761,8 @@ var PrsonLoginSession = class {
    */
   async _handleClaimUpdate(envelope) {
     if (!envelope.presentation) return;
-    const verifierOpts = {
-      ...this._verifierContext,
-      expectedNonce: extractKbNonce(envelope.presentation) ?? this._verifierContext.expectedNonceFactory()
-    };
-    const verified = await verifyPresentation(
-      envelope.presentation,
-      verifierOpts
-    );
-    if (!verified.ok) return;
-    if (verified.cnf.jwk.x !== this._cnf.jwk.x) return;
+    const verified = await this._verifyFresh(envelope.presentation);
+    if (!verified) return;
     const oldClaims = this._claimsSnapshot;
     const newClaims = verified.claims;
     this._claimsSnapshot = { ...newClaims };
@@ -3768,6 +3860,13 @@ function extractKbNonce(presentation) {
     return void 0;
   }
 }
+async function presentationDigest(presentation) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(presentation));
+  const view = new Uint8Array(digest);
+  let out = "";
+  for (let i = 0; i < view.length; i++) out += view[i].toString(16).padStart(2, "0");
+  return out;
+}
 function u8ToB64(bytes) {
   let s = "";
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
@@ -3844,6 +3943,9 @@ async function connectSignaling(opts) {
   const ws = new WebSocket(opts.url, [WS_SUBPROTOCOL, opts.sigToken]);
   const msgListeners = [];
   const closeListeners = [];
+  let ice = null;
+  let closedReason = null;
+  const iceWaiters = [];
   await new Promise((resolve, reject) => {
     const onOpen = () => {
       ws.removeEventListener("open", onOpen);
@@ -3865,10 +3967,20 @@ async function connectSignaling(opts) {
     } catch {
       return;
     }
+    if (parsed && parsed.type === "ice") {
+      const servers = parsed.iceServers;
+      if (ice || !Array.isArray(servers)) return;
+      ice = servers.filter((x) => x && (typeof x.urls === "string" || Array.isArray(x.urls)));
+      for (const w of iceWaiters.splice(0)) w.resolve(ice);
+      return;
+    }
+    if (!parsed || typeof parsed.msg !== "string") return;
     for (const cb of msgListeners) cb(parsed);
   });
   ws.addEventListener("close", (evt) => {
     const reason = evt.reason || `code-${evt.code}`;
+    closedReason = reason;
+    for (const w of iceWaiters.splice(0)) w.reject(new Error(`signaling: closed before the code was claimed (${reason})`));
     for (const cb of closeListeners) cb(reason);
   });
   return {
@@ -3882,6 +3994,13 @@ async function connectSignaling(opts) {
     onClose(cb) {
       closeListeners.push(cb);
     },
+    awaitIce() {
+      if (ice) return Promise.resolve(ice);
+      if (closedReason !== null) {
+        return Promise.reject(new Error(`signaling: closed before the code was claimed (${closedReason})`));
+      }
+      return new Promise((resolve, reject) => iceWaiters.push({ resolve, reject }));
+    },
     close() {
       try {
         ws.close(1e3, "client_close");
@@ -3892,21 +4011,16 @@ async function connectSignaling(opts) {
 }
 
 // src/transport.ts
+function rtcConfigFor(iceServers) {
+  const urls = (s) => Array.isArray(s.urls) ? s.urls : [s.urls];
+  const isTurn = (u) => /^turns?:/i.test(u);
+  const turn = iceServers.map((s) => ({ ...s, urls: urls(s).filter(isTurn) })).filter((s) => s.urls.length > 0);
+  if (turn.length > 0) return { iceServers: turn, iceTransportPolicy: "relay" };
+  return { iceServers, iceTransportPolicy: "all" };
+}
+var PEER_GONE_CONFIRM_MS = 6e3;
 async function establishTransport(opts) {
-  const iceServers = [
-    // Cloudflare STUN (free, no auth) — lets the browser gather host
-    // + server-reflexive candidates so the wallet has somewhere to
-    // connect even when both sides start from behind NAT.
-    { urls: "stun:stun.cloudflare.com:3478" }
-  ];
-  if (opts.turn) {
-    iceServers.push({
-      urls: opts.turn.urls,
-      username: opts.turn.username,
-      credential: opts.turn.credential
-    });
-  }
-  const pc = new RTCPeerConnection({ iceServers });
+  const pc = new RTCPeerConnection(rtcConfigFor(opts.iceServers));
   const dc = pc.createDataChannel("prson-login", { ordered: true });
   pc.addEventListener("icecandidate", (e) => {
     if (e.candidate) opts.signaling.send({ msg: "candidate", candidate: e.candidate.toJSON() });
@@ -3920,6 +4034,10 @@ async function establishTransport(opts) {
       } catch {
       }
     } else if (m.msg === "peer-gone") {
+      if (dc.readyState === "open") {
+        confirmPeerGone();
+        return;
+      }
       fireClose("wallet_signed_out");
       try {
         dc.close();
@@ -3927,6 +4045,21 @@ async function establishTransport(opts) {
       }
     }
   });
+  let lastDcMessageAt = 0;
+  let peerGoneTimer = null;
+  function confirmPeerGone() {
+    if (peerGoneTimer) return;
+    const noticeAt = Date.now();
+    peerGoneTimer = setTimeout(() => {
+      peerGoneTimer = null;
+      if (lastDcMessageAt >= noticeAt) return;
+      fireClose("wallet_signed_out");
+      try {
+        dc.close();
+      } catch {
+      }
+    }, PEER_GONE_CONFIRM_MS);
+  }
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   opts.signaling.send({ msg: "offer", sdp: offer.sdp });
@@ -3962,6 +4095,7 @@ async function establishTransport(opts) {
   opts.signaling.onClose((reason) => fireClose(reason));
   dc.addEventListener("close", () => fireClose("network_loss"));
   dc.addEventListener("message", (evt) => {
+    lastDcMessageAt = Date.now();
     const raw = typeof evt.data === "string" ? evt.data : new TextDecoder().decode(evt.data);
     while (oneShotWaiters.length > 0) {
       const cb = oneShotWaiters.shift();
@@ -3990,6 +4124,7 @@ async function establishTransport(opts) {
       if (dc.readyState === "open") dc.send(raw);
     },
     close() {
+      if (peerGoneTimer) clearTimeout(peerGoneTimer);
       try {
         dc.close();
       } catch {
@@ -4093,6 +4228,14 @@ function renderLoginQr(url, mount, theme, context) {
       root.remove();
     }
   };
+}
+
+// src/notify.ts
+var NOTIFY_HANDLE = /^nh_[A-Za-z0-9_-]{43}$/;
+function notifyHandleFrom(envelope) {
+  if (!envelope || typeof envelope !== "object") return null;
+  const value = envelope.notifyHandle;
+  return typeof value === "string" && NOTIFY_HANDLE.test(value) ? value : null;
 }
 
 // src/select_overlay.ts
@@ -4531,6 +4674,7 @@ var OVERLAY_CSS2 = `
 function bindInput(session, element) {
   return {
     async request(opts) {
+      if (isSensitiveField(element)) return { ok: false, error: "unsupported" };
       const req = inputRequestFromElement(element, opts?.reason);
       const reply = await session.request(req, opts);
       if (reply.ok) writeValueIntoElement(element, reply.value);
@@ -4654,6 +4798,7 @@ function collectFieldElements(container) {
   ]);
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
+    if (isSensitiveField(el)) continue;
     if (el instanceof HTMLInputElement) {
       const t = (el.type || "text").toLowerCase();
       if (SKIPPED.has(t)) continue;
@@ -4668,6 +4813,14 @@ function collectFieldElements(container) {
     }
   }
   return out;
+}
+function isSensitiveField(el) {
+  const tokens = (el.getAttribute("autocomplete") ?? "").toLowerCase().split(/\s+/);
+  if (tokens.some((t) => t === "current-password" || t === "new-password" || t === "one-time-code")) return true;
+  if (typeof HTMLInputElement !== "undefined" && el instanceof HTMLInputElement) {
+    return (el.type || "text").toLowerCase() === "password";
+  }
+  return (el.getAttribute("type") ?? "").toLowerCase() === "password";
 }
 function resolveInputType(el) {
   if (el instanceof HTMLTextAreaElement) return "text";
@@ -4811,6 +4964,7 @@ function enableRemoteNavigation(session, opts) {
   let currentFocused = null;
   let disposed = false;
   function isBindable(el) {
+    if (isSensitiveField(el)) return false;
     if (el instanceof HTMLInputElement) {
       const t = (el.type || "text").toLowerCase();
       if (t === "hidden" || t === "submit" || t === "button" || t === "reset" || t === "image" || t === "checkbox" || t === "radio") return false;
@@ -4834,7 +4988,7 @@ function enableRemoteNavigation(session, opts) {
     return el.getAttribute("role") === "button";
   }
   function collectFields() {
-    if (opts?.collectFields) return opts.collectFields();
+    if (opts?.collectFields) return opts.collectFields().filter((el) => !isSensitiveField(el));
     const out = [];
     const all = root.querySelectorAll("input, textarea, select");
     for (let i = 0; i < all.length; i++) {
@@ -4922,6 +5076,11 @@ function enableRemoteNavigation(session, opts) {
   function onFocusIn(ev) {
     const t = ev.target;
     if (!(t instanceof Element)) return;
+    if (isSensitiveField(t)) {
+      if (currentFocused) void session._sendFocus(null);
+      currentFocused = null;
+      return;
+    }
     if (isBindable(t)) {
       currentFocused = t;
       void session._sendFocus(focusPayloadFor(t));
@@ -4971,7 +5130,7 @@ function enableRemoteNavigation(session, opts) {
     }
   }
   function applyValue(value) {
-    if (!currentFocused) return;
+    if (!currentFocused || isSensitiveField(currentFocused)) return;
     if (currentFocused instanceof HTMLInputElement || currentFocused instanceof HTMLTextAreaElement || currentFocused instanceof HTMLSelectElement) {
       writeValueIntoElement(currentFocused, value);
     }
@@ -5360,8 +5519,136 @@ function cssEscape(s) {
   return s.replace(/(["\\#.>+~*$^|=:()\[\] ])/g, "\\$1");
 }
 
+// src/verification.ts
+var VerificationAbortedError = class extends Error {
+  constructor(message = "The verification dialog was closed") {
+    super(message);
+    this.name = "VerificationAbortedError";
+  }
+};
+var VerificationClosedError = class extends Error {
+  constructor(status) {
+    super(`The verification is ${status}`);
+    this.status = status;
+    this.name = "VerificationClosedError";
+  }
+};
+function checkShareUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`shareUrl is not a URL: ${url}`);
+  }
+  if (parsed.protocol !== "https:") throw new Error("shareUrl must be https:// (the share_url Prson returned)");
+  return parsed.toString();
+}
+function isPhone() {
+  try {
+    return window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(max-width: 820px)").matches;
+  } catch {
+    return false;
+  }
+}
+function renderCard(mount, o) {
+  const dark = o.theme === "dark" || o.theme === "auto" && window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+  const card = document.createElement("div");
+  card.setAttribute("data-prson-verification", "1");
+  card.style.cssText = "box-sizing:border-box;max-width:360px;width:100%;padding:24px;border-radius:16px;font-family:system-ui,-apple-system,sans-serif;text-align:center;" + (dark ? "background:#14161b;color:#f2f3f5;" : "background:#fff;color:#14161b;") + "box-shadow:0 12px 40px rgba(0,0,0,0.25);";
+  if (o.title) {
+    const h = document.createElement("div");
+    h.style.cssText = "font-size:17px;font-weight:600;margin-bottom:6px;line-height:1.3;";
+    h.textContent = o.title;
+    card.append(h);
+  }
+  const hint = document.createElement("div");
+  hint.style.cssText = "font-size:14px;opacity:0.75;margin-bottom:16px;line-height:1.4;";
+  hint.textContent = o.phone ? "Open the request in the Prson app on this phone." : "Scan with your phone's camera to open it in the Prson app.";
+  card.append(hint);
+  let qr = null;
+  if (o.phone) {
+    const a = document.createElement("a");
+    a.href = o.url;
+    a.rel = "noopener";
+    a.textContent = "Open in Prson";
+    a.style.cssText = "display:inline-block;padding:12px 20px;border-radius:999px;background:#2949b8;color:#fff;font-weight:600;text-decoration:none;font-size:15px;";
+    card.append(a);
+  } else {
+    const qrMount = document.createElement("div");
+    qrMount.style.cssText = "display:flex;justify-content:center;margin:4px 0 8px;";
+    card.append(qrMount);
+    qr = renderLoginQr(o.url, qrMount, o.theme);
+    const link = document.createElement("a");
+    link.href = o.url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "On this device? Open the link";
+    link.style.cssText = "display:inline-block;margin-top:4px;font-size:13px;color:inherit;opacity:0.7;";
+    card.append(link);
+  }
+  const status = document.createElement("div");
+  status.setAttribute("role", "status");
+  status.style.cssText = "font-size:13px;opacity:0.7;margin-top:16px;";
+  status.textContent = "Waiting for an answer\u2026";
+  card.append(status);
+  mount.append(card);
+  return {
+    setStatus: (s) => {
+      status.textContent = s === "partially_fulfilled" ? "Partly answered, waiting for the rest\u2026" : "Waiting for an answer\u2026";
+    },
+    dispose: () => {
+      qr?.dispose();
+      card.remove();
+    }
+  };
+}
+async function awaitVerification(opts) {
+  const url = checkShareUrl(opts.shareUrl);
+  const interval = Math.max(1e3, opts.intervalMs ?? 3e3);
+  const until = opts.until ?? ((s) => s === "fulfilled");
+  const controller = new AbortController();
+  const abort = (reason) => controller.abort(reason);
+  opts.signal?.addEventListener("abort", () => abort(new VerificationAbortedError("Aborted")), { once: true });
+  let modal = null;
+  let mount = null;
+  if (opts.mountInto) mount = typeof opts.mountInto === "string" ? document.querySelector(opts.mountInto) : opts.mountInto;
+  if (!mount) {
+    modal = createModalQrMount({ onDismiss: () => abort(new VerificationAbortedError()) });
+    mount = modal.mount;
+  }
+  const card = renderCard(mount, { url, title: opts.title, phone: opts.layout ? opts.layout === "phone" : isPhone(), theme: opts.theme ?? "auto" });
+  const timer = opts.timeoutMs ? setTimeout(() => abort(new VerificationAbortedError("Timed out waiting for an answer")), opts.timeoutMs) : null;
+  const sleep = (ms) => new Promise((resolve, reject) => {
+    if (controller.signal.aborted) return reject(controller.signal.reason);
+    const t = setTimeout(resolve, ms);
+    controller.signal.addEventListener("abort", () => (clearTimeout(t), reject(controller.signal.reason)), { once: true });
+  });
+  try {
+    for (; ; ) {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      let status = null;
+      try {
+        status = String(await opts.checkStatus(controller.signal));
+      } catch (e) {
+        if (controller.signal.aborted) throw controller.signal.reason;
+      }
+      if (status !== null) {
+        if (until(status)) return { status };
+        if (status === "cancelled" || status === "expired") throw new VerificationClosedError(status);
+        card.setStatus(status);
+      }
+      await sleep(interval);
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    card.dispose();
+    modal?.dispose();
+  }
+}
+
 // src/index.ts
 var PROTOCOL_VERSION = "prson_vp_v1";
+var ENVELOPE_VERSION = 2;
 var TRUSTED_ISSUER = "did:web:app.prson.net";
 var KNOWN_VCTS = [
   "https://app.prson.net/credentials/verified-human/v1",
@@ -5551,10 +5838,17 @@ async function runAttempt(opts, env) {
     // See SignInOptions.mouseControl + bindMouse's ambient
     // subscriber path.
     mouseControl: opts.mouseControl === true,
+    // Website notifications: the wallet offers an unticked opt-in row.
+    // See SignInOptions.notifications.
+    ...opts.notifications === true ? { notifications: true } : {},
     // App-to-app return leg — validated here (fail fast at the
     // integrator's desk) AND in the wallet (the enforcing side).
     ...opts.returnUrl ? { returnUrl: validateReturnUrl(opts.returnUrl, domain) } : {},
-    ttlMaxMinutes
+    ttlMaxMinutes,
+    // Envelope v2: the wallet boxes every message with its session key
+    // and binds that key into the presentation; it may then insist our
+    // messages come from browserPk. Older wallets ignore the field.
+    envelopeVersion: ENVELOPE_VERSION
   };
   const draft = await guard(
     createDraft(request, {
@@ -5586,23 +5880,27 @@ async function runAttempt(opts, env) {
   attempt.pushTeardown(() => signaling.close());
   checkAborted();
   let scanned = false;
+  const markScanned = () => {
+    if (scanned) return;
+    scanned = true;
+    show({ state: "scanned" });
+  };
   signaling.onMessage((m) => {
-    if (!scanned && (m.msg === "answer" || m.msg === "peer-ready")) {
-      scanned = true;
-      show({ state: "scanned" });
-    }
+    if (m.msg === "answer" || m.msg === "peer-ready") markScanned();
   });
+  let iceServers;
+  if (draft.turn) {
+    iceServers = [{ urls: draft.turn.urls, username: draft.turn.username, credential: draft.turn.credential }];
+  } else {
+    iceServers = await guard(signaling.awaitIce());
+    checkAborted();
+    markScanned();
+  }
   const transport = await guard(
     establishTransport({
-      stunOnly: true,
       signaling,
       role: "browser",
-      // When the Worker minted TURN creds at draft time, hand them
-      // to the peer connection so the browser also has a relay
-      // candidate. Older Workers may omit `turn` from the draft
-      // response; falling back to STUN-only matches the prior
-      // behaviour.
-      turn: draft.turn
+      iceServers
     })
   );
   attempt.pushTeardown(() => transport.close());
@@ -5611,7 +5909,7 @@ async function runAttempt(opts, env) {
   const first = await guard(transport.awaitFirstMessage());
   checkAborted();
   show({ state: "verifying" });
-  const envelope = await decryptEnvelope(first, ephKeys);
+  const { envelope, senderPk } = await openEnvelope(first, ephKeys);
   if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
     throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
   }
@@ -5629,6 +5927,19 @@ async function runAttempt(opts, env) {
   if (!verified.ok) {
     throw new Error(`Presentation rejected: ${verified.reason}`);
   }
+  const boundKey = verified.binding.walletSessionPk;
+  if (boundKey) {
+    if (senderPk !== boundKey) {
+      throw new Error("Presentation rejected: envelope not sent by the wallet's signed session key");
+    }
+    if (envelope.walletSessionPk !== void 0 && envelope.walletSessionPk !== boundKey) {
+      throw new Error("Presentation rejected: walletSessionPk differs from the signed one");
+    }
+  } else if (typeof console !== "undefined") {
+    console.warn(
+      "[@prson/login-sdk] This Prson app predates sender-authenticated envelopes; remote navigation, mouse and file input are off for this session. Ask the person to update the app."
+    );
+  }
   if (verified.credential.vct !== ANONYMOUS_WALLET_VCT2) {
     const minLevel = opts.required?.minVerificationLevel ?? 1;
     const claimedLevel = typeof verified.claims.verification_level === "number" ? verified.claims.verification_level : 0;
@@ -5642,6 +5953,7 @@ async function runAttempt(opts, env) {
   if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
     throw new Error("Presentation rejected: required uniqueHumanId credential missing");
   }
+  const notifyHandle = opts.notifications === true ? notifyHandleFrom(envelope) : null;
   checkAborted();
   const hold = handle.update?.({ state: "success", domain });
   if (hold && typeof hold.then === "function") {
@@ -5651,10 +5963,12 @@ async function runAttempt(opts, env) {
   const result = {
     sdJwtVc: presentationStr,
     nonce,
+    prsonId: verified.cnf.jwk.x,
     claims: verified.claims,
     cnf: verified.cnf,
     credential: verified.credential,
     uniqueHumanId,
+    ...opts.notifications === true ? { notifications: notifyHandle ? { handle: notifyHandle } : null } : {},
     // session is filled in below — temporary placeholder cast
     // avoids a circular-self-reference in the literal.
     session: void 0
@@ -5668,9 +5982,12 @@ async function runAttempt(opts, env) {
       expectedAudience: `https://${domain}`,
       expectedNonceFactory: () => nonce,
       // renewals carry a fresh nonce; see session.ts
-      acceptedVcts: [...KNOWN_VCTS],
+      // The same set as the sign-in, so an anonymous session can renew.
+      acceptedVcts,
       trustedIssuer: TRUSTED_ISSUER
     },
+    // Renewal anti-replay baseline: a renewal must be strictly newer.
+    initialPresentation: { presentation: presentationStr, iat: verified.binding.iat },
     // Cache the verified claims so the session can diff them
     // against future `claim-update` envelopes — see ROADMAP §1.
     initialClaims: verified.claims,
@@ -5686,7 +6003,10 @@ async function runAttempt(opts, env) {
     // `walletSessionPk: null` (breaking the request channel) and
     // `preferredLanguage: null` (host can't localise on first
     // paint) until a subsequent envelope arrives.
-    walletSessionPk: envelope.walletSessionPk,
+    // Pinned from the signed presentation; for a legacy wallet, the
+    // first envelope's field (nothing better exists).
+    walletSessionPk: boundKey ?? envelope.walletSessionPk,
+    legacyChannel: !boundKey,
     initialPreferredLanguage: envelope.preferredLanguage,
     // Public-profile fields the wallet may stamp onto the first
     // envelope. They aren't part of the verified-human VC (which
@@ -5756,20 +6076,27 @@ function buildDeepLinkUrl(args) {
 export {
   ANONYMOUS_WALLET_VCT2 as ANONYMOUS_WALLET_VCT,
   DEFAULT_TTL_MINUTES,
+  ENVELOPE_VERSION,
   GET_APP_URL,
   KNOWN_VCTS,
   LoginAbortedError,
   MAX_TTL_MINUTES,
+  NOTIFY_HANDLE,
   PROTOCOL_VERSION,
   PrsonLogin,
   PrsonLoginSession,
   SIGNALING_BASE,
   SIGNALING_BASE_DEV,
   TRUSTED_ISSUER,
+  VerificationAbortedError,
+  VerificationClosedError,
+  awaitVerification,
   bindForm,
   bindInput,
   bindMouse,
   enableRemoteNavigation,
+  isSensitiveField,
+  notifyHandleFrom,
   resolveSignalingBase
 };
 //# sourceMappingURL=prson-login.js.map

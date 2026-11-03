@@ -49,8 +49,10 @@ on the fly; the browser keeps X25519 (KX) and never signs with it.
    │  · POST /session/draft   — anonymous, IP-rate-limited; returns     │
    │                            reqId + draftToken + signalingWss.      │
    │                            No TURN allocated.                       │
-   │  · POST /session/claim   — wallet-signed (Ed25519); verifies sig,   │
-   │                            promotes DO to ACTIVE, mints CF TURN.    │
+   │  · POST /session/claim   — signed by a per-login random Ed25519   │
+   │                            key; promotes DO to ACTIVE, mints CF    │
+   │                            TURN, returns `requester`, then sends   │
+   │                            the browser {type:"ice"} on its WS.     │
    │  · wss://…/login/v1/<r>  — both peers WS-connect with their HMAC    │
    │                            role token; DO fans signals.             │
    │  · Durable Object per reqId   · DRAFT → ACTIVE → closed             │
@@ -64,11 +66,11 @@ on the fly; the browser keeps X25519 (KX) and never signs with it.
              │                                          │
    ┌─────────┴───────────────────┐          ┌───────────┴────────────────┐
    │ Browser (SDK)               │          │ Mobile wallet              │
-   │  · X25519 ephemeral keypair │          │  · Ed25519 identity key    │
+   │  · X25519 session keypair   │          │  · Ed25519 identity key    │
    │  · QR renderer + verifier   │          │  · per-domain rekey HKDF   │
-   │  · RTCPeerConnection        │ ◄══ NaCl ══► RTCPeerConnection         │
-   │    (STUN only — wallet      │   box      │  + Cloudflare TURN ICE   │
-   │     allocates the relay)    │ P2P data   │    creds from /claim     │
+   │  · RTCPeerConnection        │ ◄══ NaCl ══► · X25519 session keypair │
+   │    (relay-only, TURN from   │   box      │  RTCPeerConnection         │
+   │     the relay's `ice` msg)  │ via TURN   │  (relay-only, TURN /claim) │
    └─────────────────────────────┘  channel   └────────────────────────────┘
 
    ┌─────────────────────────────────────────────────────────────────────┐
@@ -205,14 +207,19 @@ on this site — and changing devices loses access to the account. See
     computes time; the same `serverTs` rides the QR back to the wallet
     via the `t=` param (§4.1) and is reconstructed server-side at
     verify time (§step 3). NO TURN allocated yet; the relay capacity
-    is only allocated once a wallet signs §step 3.)
+    is only allocated once a wallet claims (§step 3). Older relays put
+    a `turn` in this response; the SDK still accepts that.)
 
 2. Browser:
-   - Creates RTCPeerConnection with **STUN only** (the browser side
-     does not allocate any TURN relay — see §6).
-   - Creates a data channel ("prson-login").
    - Opens WebSocket to signalingWss with draftToken in
-     Sec-WebSocket-Protocol.
+     Sec-WebSocket-Protocol, and renders the QR.
+   - Waits for the relay's `{ "type": "ice", "iceServers": [...] }`
+     (sent once a wallet has claimed; the page shows "scanned").
+   - Creates RTCPeerConnection with those TURN servers and
+     `iceTransportPolicy: "relay"` — no STUN, so none of the browser's
+     own addresses reach the phone (a dev relay without TURN gives STUN
+     only; the SDK then allows all candidates).
+   - Creates a data channel ("prson-login").
    - Generates SDP offer → sends as { msg: "offer", sdp } over the WS.
    - As ICE candidates trickle in → sends as { msg: "candidate", ... }.
    - Listens for the wallet's { msg: "answer", sdp } and
@@ -228,11 +235,14 @@ on this site — and changing devices loses access to the account. See
          req=<b64u(request)>&
          t=<serverTs>           // echoed verbatim from /session/draft
 
-3. Wallet (on Approve):
+3. Wallet (claim when the sign-in sheet opens; the rest on Approve):
    - User scans QR (or taps a same-device deep link).
-   - Wallet signs the **v2** claim tuple with its persistent identity
-     Ed25519 key. The timestamp is the **server-issued** `serverTs`
-     parsed from the QR's `t=` param — the wallet never computes time:
+   - Wallet signs the **v2** claim tuple with a **fresh random Ed25519
+     key made for this login** (never the identity key — the relay
+     accepts any key, and a stable one would let it link a person's
+     sign-ins across sites). The timestamp is the **server-issued**
+     `serverTs` parsed from the QR's `t=` param — the wallet never
+     computes time:
        sigBytes = Ed25519.sign(
          "prson-login-claim/v2\n" + reqId + "\n" + walletPkX + "\n" +
            serverTs + "\n" + domain
@@ -252,7 +262,15 @@ on this site — and changing devices loses access to the account. See
        · mints Cloudflare TURN credentials (the API token is a Worker
          secret; the wallet never sees the long-lived secret).
      Worker returns { request, walletSessionToken, signalingWss, turn,
-                       expiresAt }.
+                       expiresAt, hardExpiresAt, requester }.
+     `requester` = { country, city, region, asn, as_org, hosting,
+     browser, seen_at } describes the browser that made the code; the
+     sheet shows it and treats data-centre / other-country / new-site
+     requests as risky (SECURITY.md §3.1). A 409 means another phone
+     claimed the code first: the sheet says so and offers only Close.
+     The claim is made when the sheet opens; if it's close to expiry at
+     Approve the wallet renews it first (renew stops at the relay's
+     hard ceiling, claim + 15 min: 409 `ceiling-reached`).
    - If the verifier requested `ephemeralIdentity: true`, the wallet
      generates a fresh Ed25519 keypair for this sign-in (no HKDF) and
      uses that as the per-message holder key — no stable per-site id.
@@ -399,8 +417,13 @@ The `req` JSON includes the verifier's full requirements blob:
 ephemeralIdentity }`. The wallet's parser fails closed if `t=` is
 absent, non-numeric, or zero (v2 requires server-issued time).
 
-The legacy `prson://login/v1?...` custom-scheme form is still parsed
-for back-compat but is no longer emitted — see §3.2.
+The legacy `prson://login/v1?...` custom-scheme form is no longer
+emitted and the wallet no longer opens it (any app can register a
+custom scheme). Other `prson://` links (device, transfer, challenge,
+link) are unaffected.
+
+The SDK also puts `envelopeVersion: 2` in the request: the wallet then
+accepts data-channel envelopes only when boxed by `browserPk` (§4.2).
 
 **Why the request is duplicated** in `req` AND echoed back by the
 Worker: the wallet's `POST /session/claim` returns the canonical
@@ -413,8 +436,10 @@ domain than the stored draft. See [SECURITY.md §3](./SECURITY.md)
 for the full anti-tamper argument.
 
 The QR carries **no relay credentials** — the wallet obtains its
-TURN credentials + walletSessionToken from `/session/claim` after
-signing, so a leaked QR can't be used to burn relay capacity.
+TURN credentials + walletSessionToken from `/session/claim`, and the
+browser gets its TURN servers only after that claim. A leaked QR can
+still be claimed by whoever scans it first (SECURITY.md §3.1), which
+mints TURN for that one session; it can't be used to mint more.
 
 ### 4.2 WebRTC data-channel envelope
 
@@ -440,16 +465,24 @@ Wire format:
 
 ```
 data_channel_message = {
-  ephPk:    b64u(wallet's per-message X25519 pk, 32 bytes),
-  nonce24:  b64u(24-byte nonce),
-  ct:       b64u(secretbox ciphertext + authenticator),
+  ephPk:    b64u(SENDER's X25519 session pk, 32 bytes),   // name kept for compat
+  nonce24:  b64u(24-byte random nonce),
+  ct:       b64u(box ciphertext + authenticator),
 }
 ```
 
-Encryption: `box(walletEphSk, browserPk, plaintext)` where `walletEphSk`
-is fresh per message — the wallet uses NaCl `box` (not `box_seal`)
-so the browser also authenticates the sender, and per-message keys
-mean forward secrecy.
+Encryption (envelope v2): `box(walletSessionSk → browserPk, plaintext)`
+one way and `box(browserSk → walletSessionPk, plaintext)` the other. Both
+keys are fresh per sign-in and held in memory only. NaCl `box` between two
+static keys is mutual: the recipient knows which key sent it. The browser
+learns `walletSessionPk` from the presentation itself — the holder signs it
+as the KB-JWT claim `prson_wsk` (anonymous credential: payload `prson_wsk`)
+— pins it, and drops every envelope not boxed by it. Only a verified
+`renewal` presentation signing a new `prson_wsk` moves the pin. Forward
+secrecy is per session (the session keys die with the session), not per
+message. Wallets that predate v2 sign no `prson_wsk`: the SDK runs a legacy
+session that ignores `nav` / `value` / `mouse-update` / file envelopes. See
+SECURITY.md §4.1.
 
 ### 4.3 SDK signIn() result
 
@@ -490,7 +523,7 @@ Durable Object per `reqId`.
 | Route | Auth | Description |
 |---|---|---|
 | `POST /session/draft` | anonymous, IP-rate-limited (default 30/IP/min, in a KV namespace) + `Origin` header must match `request.domain` (§C-1) | Browser-initiated. Hashes `request` → `reqId`. Stores canonical bytes **plus a server-stamped `serverTs = nowSec`** in the DO (status `DRAFT`). Returns `{reqId, draftToken, signalingWss, draftExpiresAt, serverTs}`. **No TURN allocated.** Draft auto-expires in 180 s (3 min) if not claimed. |
-| `POST /session/claim` | Ed25519 signature over the **v2** canonical claim tuple `"prson-login-claim/v2\n" + reqId + "\n" + walletPkX + "\n" + serverTs + "\n" + domain`. The wallet does NOT supply `serverTs` in the request body — the verifying Durable Object reads it from its own stored draft state. | Wallet-initiated. The Worker route layer is a thin shim; the actual verification + state transition happens **inside the Durable Object** (atomic): DO loads stored `serverTs` + `domain`, reconstructs canonical v2 bytes, Ed25519-verifies against the supplied `walletPk`, echoes-checks the domain against the stored draft, promotes DO to `ACTIVE`, mints Cloudflare TURN creds (Worker secret-bound `CF_TURN_KEY_ID` + `CF_TURN_API_TOKEN`), returns `{request, walletSessionToken, signalingWss, turn, expiresAt}`. Moving verification inside the DO closes a TOCTOU class — the verified `serverTs` is exactly the one promoted. |
+| `POST /session/claim` | Ed25519 signature over the **v2** canonical claim tuple `"prson-login-claim/v2\n" + reqId + "\n" + walletPkX + "\n" + serverTs + "\n" + domain`. The wallet does NOT supply `serverTs` in the request body — the verifying Durable Object reads it from its own stored draft state. | Wallet-initiated. The Worker route layer is a thin shim; the actual verification + state transition happens **inside the Durable Object** (atomic): DO loads stored `serverTs` + `domain`, reconstructs canonical v2 bytes, Ed25519-verifies against the supplied `walletPk`, echoes-checks the domain against the stored draft, promotes DO to `ACTIVE`, mints Cloudflare TURN creds (Worker secret-bound `CF_TURN_KEY_ID` + `CF_TURN_API_TOKEN`), returns `{request, walletSessionToken, signalingWss, turn, expiresAt, hardExpiresAt, requester}` and sends the browser socket `{"type":"ice","iceServers":[…]}`. `walletPk` is a per-login random key. Moving verification inside the DO closes a TOCTOU class — the verified `serverTs` is exactly the one promoted. |
 | `GET wss://…/login/v1/<reqId>` | role-tagged keyring HMAC: `<kid>.<exp>.<role>.<HMAC-SHA256(kid\nreqId\nrole\nexp)>` issued by the routes above; legacy 3-segment `<exp>.<role>.<HMAC>` accepted for in-flight back-compat | WS upgrade for either peer. The Worker reads the token from `Sec-WebSocket-Protocol`, verifies against the keyring, **pins** the token's `sha256` to the role in the DO (§M-2), then forwards into the DO. |
 
 Token format (kid-prefixed; closes audit §M-1):
@@ -599,7 +632,9 @@ Resolved (decisions locked into this spec):
   SDK never touch our Firebase project.
 - **Holder cnf.jwk binding**: ✅ per-domain rekey via
   `HKDF(identityKey, "prson-login-rekey/v1", domain)`. Same user on
-  same site → stable id; different sites → unlinkable.
+  same site → stable id; different sites → different `cnf.jwk` (sites
+  can't link them by key; the relay sees the domain and a per-login
+  claim key, never a stable wallet key).
 
 Still open (deferred to v2):
 
@@ -607,8 +642,9 @@ Still open (deferred to v2):
   TURN sees that a peer is publishing for a given relay session.
   Future option: derive an ephemeral wallet-side identity per message
   and use `box_seal` to avoid revealing the per-domain key on the wire.
-  Trade-off is per-message replay protection (currently part of
-  mutual `box`); would need a per-room sender commitment.
+  Trade-off: the sender authentication envelope v2 gets from the
+  static session keys (mutual `box`) would need another per-room
+  sender commitment.
 - **Status-list endpoint** — for instant cross-revocation when a VC is
   revoked mid-session. Currently sessions lapse at TTL after revoke.
 - **Same-origin iframe embedding** — the SDK assumes top-level frame.

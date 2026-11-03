@@ -8,6 +8,10 @@ QR renderer you wire onto `window.__prsonLoginQrRenderer`.
 
 ## Install
 
+Install from npm (below), or load the browser bundle from
+`https://prson.net/vendor/prson-login/prson-login-ui.js` together with
+`https://prson.net/vendor/prson-login/prson-login.js`.
+
 Via npm:
 
 ```bash
@@ -17,8 +21,8 @@ npm install @prson/login-sdk @prson/login-sdk-ui
 Via `<script>`:
 
 ```html
-<script type="module" src="https://your.cdn/prson-login.js"></script>
-<script type="module" src="https://your.cdn/prson-login-ui.js"></script>
+<script type="module" src="https://prson.net/vendor/prson-login/prson-login.js"></script>
+<script type="module" src="https://prson.net/vendor/prson-login/prson-login-ui.js"></script>
 ```
 
 ## Use
@@ -99,6 +103,11 @@ npm install
 npm run build           # → dist/index.js  (publishable artefact)
 npm run build:example   # → ../../examples/plain-html/prson-login-ui.js
 ```
+
+`npm run build:vendor` in `login-sdk/` rebuilds every committed bundle
+(the plain-HTML demo and the minified copies served from
+`prson.net/vendor/prson-login/`); CI fails the deploy if they are stale
+(`npm run check:vendor`).
 
 Editing `src/qr-renderer.ts` or `src/styles.ts` and re-running
 `npm run build:example` picks up in the plain-HTML demo without any

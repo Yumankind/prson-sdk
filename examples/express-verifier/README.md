@@ -120,18 +120,19 @@ verifier accepts the self-signed form.
 
 A predicate (signed property "fragment") is a single bound claim about
 the user — "age >= 18", "balance >= 5000 EUR", "doc not expired". The
-mobile app mints one on-demand via the Cloud Function
-`signPropertyFragment` and hands it back to the host page through the
-same WebRTC channel as a login presentation. Three wire formats are
-supported by the same Cloud Function — pick whichever your stack
-already speaks:
+mobile app mints one on-demand via the Prson API (the `prson-api`
+Worker's `signPropertyFragment` endpoint at `api.prson.net`) and hands
+it back to the host page through the same WebRTC channel as a login
+presentation. The API signs all three wire formats — pick whichever
+your stack already speaks:
 
 - **`native`** — Prson's own shape. Flat JSON, single RSA-SHA256
   signature. Smallest on the wire.
 - **`vc+jwt`** — W3C VC Data Model 2.0 JWS. Standard JOSE, verifies
   with any library that knows RS256 + a JWKS.
-- **`vc+sd-jwt`** — IETF SD-JWT-VC. Same JWS, but the predicate value
-  ships as a selectively-disclosed disclosure suffix (`~<b64u>~`).
+- **`vc+sd-jwt`** — IETF SD-JWT VC (JWS header `typ: dc+sd-jwt`).
+  Same JWS, but the predicate value ships as a selectively-disclosed
+  disclosure suffix (`~<b64u>~`).
 
 `POST /verify-fragment` accepts all three:
 

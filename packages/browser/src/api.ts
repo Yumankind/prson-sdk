@@ -23,6 +23,8 @@ export type VerifierRequest = {
     uniqueHumanId?: boolean;
   };
   ttlMaxMinutes: number;
+  /** Data-channel envelope version the SDK speaks (2 = sender-authenticated). */
+  envelopeVersion?: number;
 };
 
 export type DraftResult = {
@@ -43,14 +45,12 @@ export type DraftResult = {
    */
   serverTs: number;
   /**
-   * Cloudflare TURN credentials for the BROWSER side of the data
-   * channel. The wallet gets its own set from `/session/claim`. With
-   * a relay candidate on both peers, ICE succeeds across every NAT
-   * variant — including localhost + Chrome's mDNS-obfuscated host
-   * candidates that iOS WebRTC can't resolve. Wire grammar matches
-   * `RTCIceServer`: `{ urls, username, credential }`. Older Workers
-   * that pre-date this field omit it; the SDK falls back to STUN
-   * only in that case.
+   * OLDER relays only: Cloudflare TURN credentials for the browser side,
+   * minted at draft time. Current relays omit this and instead send
+   * `{ "type": "ice", "iceServers": [...] }` over the WebSocket once a
+   * wallet has claimed the code, so no relay capacity is minted for a
+   * code nobody scans. Either way the browser runs relay-only (see
+   * transport.ts `rtcConfigFor`). Wire grammar matches `RTCIceServer`.
    */
   turn?: {
     urls: string | string[];

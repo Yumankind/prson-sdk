@@ -68,6 +68,10 @@ a specific `reason` code.
    the VC, they signed *this exact selection of disclosures for this
    exact `aud`/`nonce`* with the matching private key right now.
 
+The KB-JWT also carries `prson_wsk`, the wallet's X25519 session key
+for the data channel; the browser SDK pins it (see §6.5). Verifiers that
+don't know the claim ignore it.
+
 If all five pass, the browser knows:
 
 > *Someone who holds the private key corresponding to `cnf.jwk.x`
@@ -266,14 +270,31 @@ Attacker mints valid `walletSessionToken` strings.
 - They still cannot open a session the browser trusts. They have no
   notary signing key (so no valid VC) and no per-domain holder
   secret (so no valid KB-JWT).
-- They CAN open a WebRTC channel and push garbage envelopes, which
-  the browser SDK ignores (decryption fails — they don't have the
-  ephemeral X25519 keypair the browser minted in memory for this
-  signIn() call).
+- They CAN open a WebRTC channel and push envelopes. Boxing one TO the
+  browser is easy (`browserPk` is in the QR), so confidentiality alone
+  wouldn't stop it; what does is sender pinning (envelope v2): the
+  browser accepts only envelopes boxed BY the wallet session key that
+  the holder signed into the presentation (`prson_wsk`). An injected
+  `nav` / `value` / `logout`, or a `walletSessionPk` swap that would
+  reroute the page's focused-field values, is dropped. (Sessions with a
+  wallet that predates v2 can't check the sender; the SDK ignores the
+  page-acting envelopes there.)
 - M-1 keyring rotation invalidates the leaked secret on a roll-over;
   M-2 role-pinning at the DO refuses a second valid token for the
   same role (so a stolen valid token competing with the legitimate
   peer fails the pin check).
+
+### 6.5b Someone else scans the code first (QRLjacking)
+
+A genuine QR, shown somewhere else (a phishing page relaying a real
+site's code, a shared screen), lets whoever scans it first sign the
+browser in. Nothing above detects that: every signature is genuine.
+Mitigations, not a fix (SECURITY.md §3.1): the wallet shows where the
+code was made and asks "Is this code on `<domain>` in your browser's
+address bar?" for data-centre / other-country / new-site requests; a
+409 on claim warns that someone else scanned it; the SDK never sends
+password / one-time-code values over the channel; sites should show who
+signed in. A proximity check is future work.
 
 ### 6.6 Compromised notary key
 
@@ -333,8 +354,13 @@ narrow the attack surface before the cryptography ever runs:
 - **`iceTransportPolicy: "relay"` on the wallet** (audit M-4) so
   the wallet's local + NAT-mapped IPs never appear in the SDP
   exchanged through the Worker.
-- **TURN-only on both peers** by default; no candidate leaks even
-  on a friendly NAT.
+- **TURN-only on both peers**: the wallet since M-4, the browser since
+  envelope v2 (it waits for the relay's `ice` message after the claim
+  and uses `iceTransportPolicy: "relay"` without STUN); no candidate
+  leaks even on a friendly NAT, and no TURN is minted before a claim.
+- **Per-login claim key**: `/session/claim` is signed by a random
+  Ed25519 key made for that login, so the relay never sees a stable
+  wallet key (it does see the domain and network addresses).
 - **DRAFT auto-expiry** (3 min) and short **session TTL** (currently
   2 min for testing, ~15 min production target) bound the window any
   captured artefact has to be useful.

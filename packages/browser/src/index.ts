@@ -9,7 +9,7 @@
  *   ├── ./transport.ts      — RTCPeerConnection + data channel
  *   ├── ./crypto.ts         — X25519 ephemeral keypair + NaCl box decrypt
  *   ├── ./verify.ts         — verify issuer JWS + KB-JWT in the browser
- *   ├── ./qr.ts             — render the prson://login/v1?... QR
+ *   ├── ./qr.ts             — render the https://app.prson.net/login/v1?... QR
  *   └── ./api.ts            — typed createLoginSession + resolveLoginSession
  *
  * See ../../README.md for integration. See ../../../ARCHITECTURE.md
@@ -21,7 +21,7 @@ import {
   type Renewal,
 } from "./session.js";
 import { createDraft } from "./api.js";
-import { generateEphemeralKeypair, decryptEnvelope } from "./crypto.js";
+import { generateEphemeralKeypair, openEnvelope } from "./crypto.js";
 import { connectSignaling } from "./signaling.js";
 import { establishTransport } from "./transport.js";
 import {
@@ -261,6 +261,17 @@ export type SignInResult = {
   sdJwtVc: string;
   /** The nonce the presentation is bound to (yours when you passed `nonce`). */
   nonce: string;
+  /**
+   * The person's Prson ID for your site: stable across sign-ins, different on
+   * every other site. Check the presentation on your server and use the
+   * verifier's `prsonId` there; this copy is for your page. (`cnf.jwk.x`.)
+   *
+   * Show who is signed in (this ID, or the account/name your backend maps
+   * it to) right after sign-in, also from the `signed_in` event: whoever
+   * scans the code first signs in, so the person at the screen must be able
+   * to see it's them.
+   */
+  prsonId: string;
   claims: Record<string, unknown>;
   cnf: { jwk: CnfJwk };
   credential: {
@@ -296,6 +307,13 @@ export type { ExpiryReason } from "./session.js";
 
 // Constants exported for verifier-side consumers + diagnostics.
 export const PROTOCOL_VERSION = "prson_vp_v1";
+/**
+ * Data-channel envelope version this SDK speaks, announced to the wallet
+ * in the request (`envelopeVersion`). 2 = both sides box with their
+ * session keys (sender-authenticated), and the wallet binds its session
+ * key into the signed presentation (`prson_wsk`). See SECURITY.md §4.
+ */
+export const ENVELOPE_VERSION = 2;
 export const TRUSTED_ISSUER = "did:web:app.prson.net";
 export const KNOWN_VCTS = [
   "https://app.prson.net/credentials/verified-human/v1",
@@ -635,12 +653,15 @@ async function runAttempt(
     // integrator's desk) AND in the wallet (the enforcing side).
     ...(opts.returnUrl ? { returnUrl: validateReturnUrl(opts.returnUrl, domain) } : {}),
     ttlMaxMinutes,
+    // Envelope v2: the wallet boxes every message with its session key
+    // and binds that key into the presentation; it may then insist our
+    // messages come from browserPk. Older wallets ignore the field.
+    envelopeVersion: ENVELOPE_VERSION,
   };
 
   // 3. Register the draft directly with the Cloudflare Worker.
-  //    Anonymous + IP rate-limited. NO TURN allocation, NO Firebase
-  //    in the path — the Worker is the single API surface and waits
-  //    for the wallet to claim before allocating real capacity.
+  //    Anonymous + IP rate-limited. No TURN allocation (current relays):
+  //    relay capacity is minted only after a wallet claims the code.
   const draft: DraftResult = await guard(
     createDraft(request, {
       signalingBase: resolveSignalingBase(opts),
@@ -679,33 +700,38 @@ async function runAttempt(
   );
   attempt.pushTeardown(() => signaling.close());
   checkAborted();
-  // The wallet's first message means it claimed the code: the person
-  // approved on the phone, which is now connecting.
+  // The relay's `ice` (a wallet claimed the code) or the wallet's first
+  // message: the person scanned and is approving on the phone. If they
+  // didn't scan it, someone else did — the page says so.
   let scanned = false;
+  const markScanned = () => {
+    if (scanned) return;
+    scanned = true;
+    show({ state: "scanned" });
+  };
   signaling.onMessage((m) => {
-    if (!scanned && (m.msg === "answer" || m.msg === "peer-ready")) {
-      scanned = true;
-      show({ state: "scanned" });
-    }
+    if (m.msg === "answer" || m.msg === "peer-ready") markScanned();
   });
 
-  // 6. Bring up the RTCPeerConnection + data channel. The browser
-  //    side uses STUN only — relay capacity is allocated only after
-  //    the wallet signs /session/claim, and the wallet is the peer
-  //    that allocates the TURN relay. The browser reaches the
-  //    wallet's relayed candidates as a remote address, no client-
-  //    side TURN credentials needed.
+  // 6. Bring up the RTCPeerConnection + data channel, relay-only: the
+  //    browser gathers only TURN candidates, so its own addresses never
+  //    reach the phone (the wallet is relay-only too). Current relays
+  //    send the TURN servers over the socket once a wallet has claimed
+  //    the code (`{type:"ice"}`), so nothing is allocated for a QR
+  //    nobody scans; older relays put them in the draft response.
+  let iceServers: RTCIceServer[];
+  if (draft.turn) {
+    iceServers = [{ urls: draft.turn.urls, username: draft.turn.username, credential: draft.turn.credential }];
+  } else {
+    iceServers = await guard(signaling.awaitIce());
+    checkAborted();
+    markScanned();
+  }
   const transport = await guard(
     establishTransport({
-      stunOnly: true,
       signaling,
       role: "browser",
-      // When the Worker minted TURN creds at draft time, hand them
-      // to the peer connection so the browser also has a relay
-      // candidate. Older Workers may omit `turn` from the draft
-      // response; falling back to STUN-only matches the prior
-      // behaviour.
-      turn: draft.turn,
+      iceServers,
     }),
   );
   // From here on, `transport` owns the signaling channel — its
@@ -720,7 +746,7 @@ async function runAttempt(
   const first = await guard(transport.awaitFirstMessage());
   checkAborted();
   show({ state: "verifying" });
-  const envelope = await decryptEnvelope(first, ephKeys);
+  const { envelope, senderPk } = await openEnvelope(first, ephKeys);
   if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
     throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
   }
@@ -750,6 +776,28 @@ async function runAttempt(
   });
   if (!verified.ok) {
     throw new Error(`Presentation rejected: ${verified.reason}`);
+  }
+
+  // Envelope v2: the holder signed its session key into the
+  // presentation (`prson_wsk`). The envelope must have been boxed by
+  // that very key — then nobody else (a relay, someone who saw the QR)
+  // can talk to this page as the wallet, or swap the key the page
+  // sends to. A wallet that predates it gets a legacy session: it
+  // works, but page-acting messages are ignored (see session.ts).
+  const boundKey = verified.binding.walletSessionPk;
+  if (boundKey) {
+    if (senderPk !== boundKey) {
+      throw new Error("Presentation rejected: envelope not sent by the wallet's signed session key");
+    }
+    if (envelope.walletSessionPk !== undefined && envelope.walletSessionPk !== boundKey) {
+      throw new Error("Presentation rejected: walletSessionPk differs from the signed one");
+    }
+  } else if (typeof console !== "undefined") {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[@prson/login-sdk] This Prson app predates sender-authenticated envelopes;" +
+        " remote navigation, mouse and file input are off for this session. Ask the person to update the app.",
+    );
   }
 
   // Enforce the level floor against the VERIFIED claims (the wallet
@@ -806,6 +854,7 @@ async function runAttempt(
   const result: SignInResult = {
     sdJwtVc: presentationStr,
     nonce,
+    prsonId: verified.cnf.jwk.x,
     claims: verified.claims,
     cnf: verified.cnf,
     credential: verified.credential,
@@ -824,9 +873,12 @@ async function runAttempt(
     verifierContext: {
       expectedAudience: `https://${domain}`,
       expectedNonceFactory: () => nonce, // renewals carry a fresh nonce; see session.ts
-      acceptedVcts: [...KNOWN_VCTS],
+      // The same set as the sign-in, so an anonymous session can renew.
+      acceptedVcts,
       trustedIssuer: TRUSTED_ISSUER,
     },
+    // Renewal anti-replay baseline: a renewal must be strictly newer.
+    initialPresentation: { presentation: presentationStr, iat: verified.binding.iat },
     // Cache the verified claims so the session can diff them
     // against future `claim-update` envelopes — see ROADMAP §1.
     initialClaims: verified.claims,
@@ -842,7 +894,10 @@ async function runAttempt(
     // `walletSessionPk: null` (breaking the request channel) and
     // `preferredLanguage: null` (host can't localise on first
     // paint) until a subsequent envelope arrives.
-    walletSessionPk: envelope.walletSessionPk,
+    // Pinned from the signed presentation; for a legacy wallet, the
+    // first envelope's field (nothing better exists).
+    walletSessionPk: boundKey ?? envelope.walletSessionPk,
+    legacyChannel: !boundKey,
     initialPreferredLanguage: envelope.preferredLanguage,
     // Public-profile fields the wallet may stamp onto the first
     // envelope. They aren't part of the verified-human VC (which
@@ -893,6 +948,7 @@ export {
   bindForm,
   bindMouse,
   enableRemoteNavigation,
+  isSensitiveField,
   type BindController,
   type BindMouseOptions,
   type RemoteNavController,
@@ -964,8 +1020,8 @@ function resolveMount(into: string | HTMLElement | undefined): HTMLElement | nul
  * are signed against the wallet's signing-cert hash + our TLS cert.
  * A malicious app cannot register a competing handler.
  *
- * The wallet's `LoginDeepLink.tryParse` already accepts both forms,
- * so this change is one-sided.
+ * The wallet accepts only this form for sign-in; it no longer opens
+ * `prson://login/v1` links at all.
  */
 function buildDeepLinkUrl(args: {
   reqId: string;

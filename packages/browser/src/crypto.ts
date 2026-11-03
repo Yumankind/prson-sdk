@@ -7,7 +7,20 @@
  *     to.
  *
  *   • decryptEnvelope            — open the wallet's NaCl `box` ciphertext
- *     and parse the resulting JSON.
+ *     and parse the resulting JSON. Once the wallet's session key is
+ *     pinned (see session.ts), only envelopes boxed BY that key open.
+ *
+ *   • boxToWallet                — box a JSON envelope to the wallet's
+ *     session key, sent by this browser's session key.
+ *
+ * Envelope v2 (both directions): NaCl `box` between the two session
+ * keys — the browser's per-sign-in X25519 key (`browserPk`, in the QR)
+ * and the wallet's per-session X25519 key (`walletSessionPk`, bound
+ * into the signed presentation as the KB-JWT `prson_wsk` claim). The
+ * wire field `ephPk` keeps its name for compatibility but now carries
+ * the SENDER's session key, so the recipient can check who sent it:
+ * a box only opens with the matching sender key, which makes it mutual
+ * authentication, not just confidentiality.
  *
  * Uses `@stablelib/nacl` for the box / open primitives — a reviewed
  * pure-JS implementation that runs in every browser without WebCrypto
@@ -42,7 +55,9 @@ export async function generateEphemeralKeypair(): Promise<EphemeralKeys> {
 
 /** Wire shape (matches what the wallet emits — see ARCHITECTURE.md §4.2). */
 export type EncryptedEnvelope = {
-  /** Wallet's per-message X25519 pk, base64url. */
+  /** The sender's X25519 session pk, base64url. Envelope v2: always the
+   *  sender's session key (`walletSessionPk` from the wallet, `browserPk`
+   *  from the browser). Older wallets put a fresh per-message key here. */
   ephPk: string;
   /** 24-byte nonce, base64url. */
   nonce24: string;
@@ -195,6 +210,12 @@ export type DecryptedEnvelope = {
    * outbound `request` envelopes can NaCl-box to it. Without this
    * the browser→wallet direction has no destination key and the
    * request channel can't open.
+   *
+   * Advisory only: the key the SDK pins is the one the signed
+   * presentation binds (KB-JWT `prson_wsk`, or the anonymous
+   * credential's `prson_wsk`). This field must agree with it, and a
+   * value on any later envelope is ignored — a rotation is accepted
+   * only from a verified renewal presentation carrying the new key.
    */
   walletSessionPk?: string;
 
@@ -377,10 +398,28 @@ export type DecryptedEnvelope = {
   value?: string | null;
 };
 
+/**
+ * Open a wallet envelope. With [expectedSenderPkB64u] (the pinned
+ * `walletSessionPk`), only an envelope whose `ephPk` is that key AND
+ * whose box opens with it is accepted: anything else (another key, a
+ * forged `ephPk`) throws. Without it, any sender is accepted — used for
+ * the first envelope, whose sender is checked against the verified
+ * presentation afterwards (index.ts), and for old wallets.
+ */
 export async function decryptEnvelope(
   raw: string,
   keys: EphemeralKeys,
+  expectedSenderPkB64u?: string,
 ): Promise<DecryptedEnvelope> {
+  return (await openEnvelope(raw, keys, expectedSenderPkB64u)).envelope;
+}
+
+/** [decryptEnvelope], also returning the sender key the box opened with. */
+export async function openEnvelope(
+  raw: string,
+  keys: EphemeralKeys,
+  expectedSenderPkB64u?: string,
+): Promise<{ envelope: DecryptedEnvelope; senderPk: string }> {
   let parsed: EncryptedEnvelope;
   try {
     parsed = JSON.parse(raw) as EncryptedEnvelope;
@@ -395,15 +434,33 @@ export async function decryptEnvelope(
   const ct = b64uDecode(addPad(parsed.ct));
   if (ephPk.length !== 32) throw new Error("decryptEnvelope: bad ephPk length");
   if (nonce.length !== 24) throw new Error("decryptEnvelope: bad nonce length");
+  let senderPk = ephPk;
+  if (expectedSenderPkB64u !== undefined) {
+    const expected = b64uDecode(addPad(expectedSenderPkB64u));
+    if (expected.length !== 32 || !bytesEqual(expected, ephPk)) {
+      throw new Error("decryptEnvelope: not sent by the pinned wallet key");
+    }
+    senderPk = expected;
+  }
   // NaCl `openBox` returns null on bad ciphertext / wrong key — never
-  // throws. We must check + raise ourselves.
-  const pt = openBox(ephPk, keys.secretKey, nonce, ct);
+  // throws. We must check + raise ourselves. A box only opens with the
+  // sender key it was made with, so a pinned sender is authenticated.
+  const pt = openBox(senderPk, keys.secretKey, nonce, ct);
   if (!pt) throw new Error("decryptEnvelope: authentication failed (wrong key or tampered ciphertext)");
+  let envelope: DecryptedEnvelope;
   try {
-    return JSON.parse(new TextDecoder().decode(pt)) as DecryptedEnvelope;
+    envelope = JSON.parse(new TextDecoder().decode(pt)) as DecryptedEnvelope;
   } catch {
     throw new Error("decryptEnvelope: decrypted but not JSON");
   }
+  return { envelope, senderPk: stripPad(b64uEncode(senderPk)) };
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
+  return diff === 0;
 }
 
 function stripPad(s: string): string {
@@ -418,31 +475,35 @@ function addPad(s: string): string {
 /**
  * Box a JSON-serialisable [plaintext] to the wallet's session X25519
  * public key. Mirror of the wallet's `LoginEnvelope.encryptToBrowser`
- * primitive (NaCl `box`, XSalsa20-Poly1305, fresh per-message
- * ephemeral keypair + 24-byte nonce) — the wallet decrypts with its
- * stored session secret. Returns the same JSON-encoded envelope
- * shape the browser already RECEIVES from the wallet:
+ * primitive (NaCl `box`, XSalsa20-Poly1305, random 24-byte nonce) —
+ * the wallet decrypts with its stored session secret. Returns the same
+ * JSON-encoded envelope shape the browser already RECEIVES from the
+ * wallet:
  *
  *     { ephPk: <base64url>, nonce24: <base64url>, ct: <base64url> }
  *
- * The fresh per-message X25519 keypair gives per-message forward
- * secrecy: a snapshot of the wallet's session secret only decrypts
- * messages already-on-the-wire, not future ones.
+ * Envelope v2: with [sender] (this sign-in's browser keys — the
+ * `browserPk` the QR carried), the box is made BY that key, so `ephPk`
+ * is the browser's session key and the wallet can check the envelope
+ * came from the browser that showed the code. Without [sender] (legacy),
+ * a fresh per-message keypair is used.
  *
- * [walletSessionPkB64u] is what the wallet stamped into the initial
- * `presentation` envelope's `walletSessionPk` field. The browser SDK
- * stores it on the session at sign-in time and re-uses for every
- * outbound boxed message.
+ * Both session keys are themselves fresh for each sign-in and live only
+ * in memory, so a leaked key exposes that one session, never another.
+ *
+ * [walletSessionPkB64u] is the wallet's session key, pinned from the
+ * verified sign-in presentation (KB-JWT `prson_wsk`).
  */
 export function boxToWallet(
   walletSessionPkB64u: string,
   plaintext: string,
+  sender?: Pick<EphemeralKeys, "secretKey" | "publicKey">,
 ): string {
   const recipientPk = b64uDecode(addPad(walletSessionPkB64u));
   if (recipientPk.length !== 32) {
     throw new Error("boxToWallet: bad walletSessionPk length");
   }
-  const ephemeral = generateKeyPair();
+  const ephemeral = sender ?? generateKeyPair();
   const nonce = randomBytes(24);
   const pt = new TextEncoder().encode(plaintext);
   // `@stablelib/nacl` box signature is

@@ -34,6 +34,18 @@ terminal (CLI)            user's phone (wallet)        your backend
                           └───────────────────┘
 ```
 
+## Install
+
+```bash
+npm install @prson/login-cli
+```
+
+Node 20 or later. This package is Node-only and has no browser bundle.
+
+```bash
+npm install @prson/login-cli
+```
+
 ## Why this is safe for a terminal
 
 A CLI has no browser Origin, so the web login's origin-pinning can't

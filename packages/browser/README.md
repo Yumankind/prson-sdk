@@ -10,6 +10,9 @@
 
 ## Install
 
+Install from npm (below), or load the browser bundle from
+`https://prson.net/vendor/prson-login/prson-login.js` (see *CDN* below).
+
 ### Bundled
 
 ```bash
@@ -24,9 +27,14 @@ import { PrsonLogin } from "@prson/login-sdk";
 
 ```html
 <script type="module">
-  import { PrsonLogin } from "https://cdn.prson.net/login-sdk/0.x/index.js";
+  import { PrsonLogin } from "https://prson.net/vendor/prson-login/prson-login.js";
+  // Optional: the styled QR card (registers itself; no exports needed).
+  import "https://prson.net/vendor/prson-login/prson-login-ui.js";
 </script>
 ```
+
+The bundle is an unversioned ES module built from this repository's
+`main`; pin your own copy if you need a fixed version.
 
 ## The full API surface, in one block
 
@@ -93,10 +101,14 @@ type SignInResult = {
   /** Compact SD-JWT-VC presentation (issuer JWS + disclosures + KB-JWT). */
   sdJwtVc: string;
 
+  /** The person's Prson ID for your site: stable across sign-ins, different
+   *  on every other site. Use it as the user id (it is `cnf.jwk.x`). */
+  prsonId: string;
+
   /** Verified + decoded disclosed claims, ready to consume. */
   claims: Record<string, unknown>;
 
-  /** Holder Ed25519 public JWK from cnf.jwk — your stable per-user id. */
+  /** Holder Ed25519 public JWK from cnf.jwk (the key behind `prsonId`). */
   cnf: { jwk: { kty: "OKP"; crv: "Ed25519"; x: string } };
 
   /** Credential metadata. */
@@ -163,14 +175,19 @@ class PrsonLogin {
       ui: { mountQrInto: "#prson-login-qr" },
     });
 
-    // Treat result.cnf.jwk as the user identifier (it's stable across
-    // sessions on this site). Drop it into your session cookie or
-    // forward the full result.sdJwtVc to your backend and re-verify
-    // there using @prson/login-verifier.
+    // result.prsonId is the person's ID on your site (stable across
+    // sessions, different on every other site). Forward the full
+    // result.sdJwtVc to your backend and re-verify it there with
+    // @prson/login-verifier, which gives you the same prsonId.
     await fetch("/api/login", {
       method: "POST",
       body: JSON.stringify({ presentation: result.sdJwtVc }),
     });
+
+    // Show who is signed in, right away (the ID, or the account name
+    // your backend maps it to). Whoever scans the code first signs in,
+    // so the person at this screen must be able to see it's them.
+    document.querySelector("#who").textContent = `Signed in as ${result.prsonId.slice(0, 8)}…`;
 
     result.session.onRenewed(fresh => {
       // Push the fresh credential to your backend on each renewal so
@@ -190,7 +207,7 @@ class PrsonLogin {
 
 ```html
 <script type="module">
-  import { PrsonLogin } from "https://cdn.prson.net/login-sdk/0.x/index.js";
+  import { PrsonLogin } from "https://prson.net/vendor/prson-login/prson-login.js";
 
   const r = await PrsonLogin.signIn({
     required: { minVerificationLevel: 5 },
@@ -217,9 +234,31 @@ class PrsonLogin {
   Cloudflare-Worker draft that's good for **60 seconds** to be
   claimed by a wallet. If the user idles past the draft expiry, the
   SDK calls `POST /session/draft` again and re-renders the QR.
+- **Show who signed in.** A QR can be scanned by anyone who sees it
+  (or relayed by a phishing page), and the first phone to claim it signs
+  the browser in. Right after `signIn()` resolves — or from the
+  `signed_in` event / `session.prsonId` — show the signed-in identity on
+  the page (the Prson ID, or the account your backend maps it to), and
+  let the person sign out if it isn't them. The page also shows
+  "scanned" as soon as any phone claims the code.
+- **Secrets stay on the page.** The live channel never carries password
+  or one-time-code values (`type="password"`, or `autocomplete`
+  `current-password` / `new-password` / `one-time-code`): `bindInput`
+  answers `unsupported`, `bindForm` and `enableRemoteNavigation` skip
+  those fields, and an `input` request never sends a password's current
+  value.
+- **Authenticated channel.** Every data-channel envelope must come from
+  the wallet session key the signed presentation names (KB-JWT
+  `prson_wsk`); anything else is dropped. With a Prson app too old to
+  sign that key, sign-in still works but remote navigation, mouse and
+  file input are off for the session (a console warning says so).
+- **Relay-only WebRTC.** The browser waits for the relay's TURN servers
+  (sent once a phone has claimed the code) and uses only relay
+  candidates, so its IP addresses never reach the phone.
 - **Renewals.** The SDK *receives* renewals but never *requests* them
   — the wallet is in charge. Your backend just needs to accept a new
-  presentation on each `onRenewed`.
+  presentation on each `onRenewed`. Within a session a renewal must be
+  newer (`iat`) than the last one accepted and is never accepted twice.
 - **Session storage.** The SDK doesn't persist anything to
   localStorage / cookies by default. The host page decides how to
   encode the cnf.jwk identifier (server-side session cookie is the
@@ -251,8 +290,7 @@ app.post("/api/login", async (req, res) => {
   });
   if (!result.ok) return res.status(401).send(result.reason);
 
-  const subject = result.cnf.jwk.x; // 32-byte base64url Ed25519 pk — stable user id
-  req.session.userId = subject;
+  req.session.userId = result.prsonId; // stable per-site id
   res.json({ claims: result.claims });
 });
 ```
@@ -297,6 +335,15 @@ verdict, and the signed file's first bytes are exactly your upload.
 ## Build status
 
 - **Spec**: stable (this folder).
-- **Implementation**: stub only — `src/index.ts` exports the type
-  surface above but throws on call. Phase 2 of the rollout fills it
-  in. See [`../../README.md` § build order](../../README.md).
+- **Implementation**: working. `src/index.ts` implements the API above:
+  `PrsonLogin.signIn` and the live `PrsonLoginSession`, the request
+  channel (`bindInput`, `bindForm`, `bindMouse`,
+  `enableRemoteNavigation`), presentation and status-list checks,
+  website notifications (`NOTIFY_HANDLE`, `notifyHandleFrom`) and
+  verifications (`awaitVerification`). One exception:
+  `PrsonLogin.restore()` always resolves `null`, because the SDK keeps
+  no state across page loads (your server's session is the source of
+  truth). Tests: `npm test`.
+- **Distribution**: npm (`@prson/login-sdk`) and the browser bundle at
+  `https://prson.net/vendor/prson-login/`. See
+  [`../../CHANGELOG.md`](../../CHANGELOG.md).

@@ -9,14 +9,18 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "README.md"
+    "!dist/**/*.test.*",
+    "!dist/test",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc && esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=dist/index.js --sourcemap",
     "build:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login-ui.js --sourcemap",
     "watch:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login-ui.js --sourcemap --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/describe.test.js"
+    "test": "tsc && node --test dist/describe.test.js",
+    "prepublishOnly": "npm test && npm run build"
   },
   "dependencies": {
     "qrcode": "^1.5.4"
@@ -46,5 +50,15 @@
     "url": "https://github.com/Yumankind/prson-network",
     "directory": "login-sdk/packages/browser-ui"
   },
-  "license": "TBD"
+  "license": "Apache-2.0",
+  "author": "Yumankind OÜ <support@prson.net>",
+  "homepage": "https://prson.net/developers",
+  "bugs": {
+    "url": "https://github.com/Yumankind/prson-network/issues",
+    "email": "security@yumankind.com"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
 }

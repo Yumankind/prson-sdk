@@ -2,7 +2,7 @@
   "name": "prson-login-sdk-workspace",
   "version": "0.0.0",
   "private": true,
-  "description": "npm-workspaces root for the login SDK. Holds no published code; exists so a single `npm install` at this level installs deps for both `packages/browser` and `packages/browser-ui`, and `npm run build:example` rebuilds both bundles into the plain-HTML demo.",
+  "description": "npm-workspaces root for the login SDK. Holds no published code; exists so a single `npm install` at this level installs deps for both `packages/browser` and `packages/browser-ui`, and `npm run build:example` rebuilds both bundles into the plain-HTML demo. `npm run build:vendor` rebuilds every committed browser bundle (the plain-HTML demo and prson-website/public/vendor/prson-login/); `npm run check:vendor` fails if any of them is stale (CI runs it).",
   "workspaces": [
     "packages/browser",
     "packages/browser-ui",
@@ -12,6 +12,8 @@
   "scripts": {
     "build": "npm run build -ws --if-present",
     "build:example": "npm run build:example -ws --if-present",
+    "build:vendor": "node scripts/vendor-bundles.mjs",
+    "check:vendor": "node scripts/vendor-bundles.mjs --check",
     "typecheck": "npm run typecheck -ws --if-present",
     "watch:example": "npm-run-all --parallel watch:example:*",
     "watch:example:sdk": "npm run watch:example -w @prson/login-sdk",

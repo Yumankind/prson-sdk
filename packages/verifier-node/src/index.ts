@@ -87,6 +87,12 @@ export type VerifyResult =
   | { ok: false; reason: VerifyFailureReason; detail?: string }
   | {
       ok: true;
+      /**
+       * The person's Prson ID for your site: stable across sign-ins, different
+       * on every other site, so sites can't link people. Use it as the user id
+       * in your database. (It is the wallet's per-site key, `cnf.jwk.x`.)
+       */
+      prsonId: string;
       claims: Record<string, unknown>;
       cnf: { jwk: { kty: "OKP"; crv: "Ed25519"; x: string } };
       credential: {
@@ -279,6 +285,7 @@ export async function verifyPresentation(
 
   return {
     ok: true,
+    prsonId: cnf.x,
     claims,
     cnf: { jwk: { kty: "OKP", crv: "Ed25519", x: cnf.x } },
     credential: {

@@ -229,12 +229,32 @@ export class PrsonLoginSession {
   private _closed = false;
 
   /**
-   * Wallet's session X25519 public key. Captured from the first
-   * inbound envelope's `walletSessionPk`. Null until then — calls
-   * to `request()` before it lands resolve with
-   * `{ ok: false, error: "no-active-session" }`.
+   * Wallet's session X25519 public key, PINNED from the verified
+   * sign-in presentation (its KB-JWT `prson_wsk` claim, signed by the
+   * cnf key). Every inbound envelope must be boxed by this key or it is
+   * dropped, and every outbound one is boxed to it. It changes only when
+   * a verified `renewal` presentation carries a new `prson_wsk`. Null
+   * when the wallet published none — calls to `request()` then resolve
+   * with `{ ok: false, error: "no-active-session" }`.
    */
   private _walletSessionPk: string | null = null;
+
+  /**
+   * True when the sign-in presentation didn't bind a session key (a
+   * wallet older than envelope v2). The sender of inbound envelopes
+   * can't be checked then, so envelopes that act on the page (`nav`,
+   * `value`, `mouse-update`, file transfer) are ignored; everything
+   * else still works. See SECURITY.md §4.
+   */
+  private _legacyChannel = false;
+
+  /** `iat` of the newest verified presentation (sign-in or renewal).
+   *  A renewal / claim-update must be strictly newer. */
+  private _lastPresentationIat = 0;
+
+  /** SHA-256 of every presentation this session accepted, so a replay
+   *  of an earlier one (even with a still-fresh `iat`) is refused. */
+  private _seenPresentations: Set<string> = new Set();
 
   /** Pairs outbound `request` envelopes with inbound `response`s. */
   private _requestController = new RequestController();
@@ -385,6 +405,18 @@ export class PrsonLoginSession {
      */
     walletSessionPk?: string;
     /**
+     * True when the sign-in presentation didn't bind [walletSessionPk]
+     * (wallet older than envelope v2): inbound senders can't be checked,
+     * so page-acting envelopes are ignored. Default false.
+     */
+    legacyChannel?: boolean;
+    /**
+     * The verified sign-in presentation and its holder-signed `iat`:
+     * the baseline for renewal anti-replay (a renewal must carry a
+     * strictly newer `iat` and must not repeat an accepted presentation).
+     */
+    initialPresentation?: { presentation: string; iat: number };
+    /**
      * Initial `preferredLanguage` value from the wallet's first
      * envelope. The session's own `_handleMessage` only sees
      * envelopes that arrive AFTER signIn() has consumed the
@@ -414,6 +446,11 @@ export class PrsonLoginSession {
     this._verifierContext = opts.verifierContext;
     this._claimsSnapshot = { ...(opts.initialClaims ?? {}) };
     this._walletSessionPk = opts.walletSessionPk ?? null;
+    this._legacyChannel = opts.legacyChannel === true;
+    if (opts.initialPresentation) {
+      this._lastPresentationIat = opts.initialPresentation.iat;
+      void presentationDigest(opts.initialPresentation.presentation).then((d) => this._seenPresentations.add(d));
+    }
     this._preferredLanguage = opts.initialPreferredLanguage ?? null;
     this._displayName = opts.initialDisplayName ?? null;
     this._avatar = opts.initialAvatar ?? null;
@@ -462,6 +499,21 @@ export class PrsonLoginSession {
   /** Snapshot of the most recent verified claims (since last renew / update). */
   get claims(): Readonly<Record<string, unknown>> {
     return this._claimsSnapshot;
+  }
+
+  /**
+   * Who is signed in: the person's Prson ID for this site (`cnf.jwk.x`,
+   * the same value as `SignInResult.prsonId`). Show it — or a name your
+   * backend maps it to — on the page, so the person can see it's them
+   * and not someone who scanned the code first.
+   */
+  get prsonId(): string {
+    return this._cnf.jwk.x;
+  }
+
+  /** The wallet's pinned X25519 session key (base64url), or null. */
+  get walletSessionPk(): string | null {
+    return this._walletSessionPk;
   }
 
   /** User's preferred UI language (BCP-47 tag) or null if the
@@ -717,7 +769,7 @@ export class PrsonLoginSession {
         reason: "page_unload",
       });
       try {
-        this._transport.send(boxToWallet(this._walletSessionPk, body));
+        this._transport.send(boxToWallet(this._walletSessionPk, body, this._ephKeys));
       } catch {
         /* swallow — the channel is on its way out anyway */
       }
@@ -745,7 +797,7 @@ export class PrsonLoginSession {
       paused,
     });
     try {
-      this._transport.send(boxToWallet(this._walletSessionPk, payload));
+      this._transport.send(boxToWallet(this._walletSessionPk, payload, this._ephKeys));
     } catch {
       /* swallow — channel down */
     }
@@ -874,7 +926,8 @@ export class PrsonLoginSession {
         envelope.inputType = req.inputType;
         envelope.label = req.label;
         if (req.placeholder !== undefined) envelope.placeholder = req.placeholder;
-        if (req.defaultValue !== undefined) envelope.defaultValue = req.defaultValue;
+        // A password's current value never goes to the phone.
+        if (req.defaultValue !== undefined && req.inputType !== "password") envelope.defaultValue = req.defaultValue;
         if (req.minLength !== undefined) envelope.minLength = req.minLength;
         if (req.maxLength !== undefined) envelope.maxLength = req.maxLength;
         if (req.min !== undefined) envelope.min = req.min;
@@ -885,7 +938,9 @@ export class PrsonLoginSession {
         if (req.reason) envelope.reason = req.reason;
         break;
       case "input-form":
-        envelope.fields = req.fields;
+        envelope.fields = req.fields.map((f) =>
+          f.inputType === "password" && f.defaultValue !== undefined ? { ...f, defaultValue: undefined } : f,
+        );
         if (req.submitLabel !== undefined) envelope.submitLabel = req.submitLabel;
         if (req.reason) envelope.reason = req.reason;
         break;
@@ -896,7 +951,7 @@ export class PrsonLoginSession {
     }
 
     try {
-      const boxed = boxToWallet(recipientPk, JSON.stringify(envelope));
+      const boxed = boxToWallet(recipientPk, JSON.stringify(envelope), this._ephKeys);
       this._transport.send(boxed);
     } catch {
       // Network down, channel closed, encoding bug — surface as
@@ -995,10 +1050,17 @@ export class PrsonLoginSession {
     if (this._closed) return;
     let envelope: DecryptedEnvelope;
     try {
-      envelope = await decryptEnvelope(raw, this._ephKeys);
+      // Only the pinned wallet key may talk to us. A legacy session (no
+      // key bound in the presentation) can't check the sender, so it
+      // accepts any box and ignores page-acting messages instead.
+      envelope = await decryptEnvelope(
+        raw,
+        this._ephKeys,
+        this._legacyChannel ? undefined : (this._walletSessionPk ?? undefined),
+      );
     } catch {
-      // Garbage on the wire — ignore. The Worker may also fan out
-      // peer-close signals here; those don't decrypt and that's fine.
+      // Garbage on the wire, or a box from a key other than the pinned
+      // wallet key (an injected envelope) — ignore it.
       return;
     }
 
@@ -1058,7 +1120,7 @@ export class PrsonLoginSession {
       domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
     });
     try {
-      this._transport.send(boxToWallet(this._walletSessionPk, body));
+      this._transport.send(boxToWallet(this._walletSessionPk, body, this._ephKeys));
     } catch {
       /* channel down — wallet will time out its retry budget */
     }
@@ -1086,7 +1148,7 @@ export class PrsonLoginSession {
       domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
     });
     try {
-      this._transport.send(boxToWallet(this._walletSessionPk, body));
+      this._transport.send(boxToWallet(this._walletSessionPk, body, this._ephKeys));
     } catch {
       /* swallow */
     }
@@ -1105,7 +1167,7 @@ export class PrsonLoginSession {
       domain: this._verifierContext.expectedAudience.replace(/^https?:\/\//, ""),
     });
     try {
-      this._transport.send(boxToWallet(this._walletSessionPk, body));
+      this._transport.send(boxToWallet(this._walletSessionPk, body, this._ephKeys));
     } catch {
       /* swallow */
     }
@@ -1175,7 +1237,7 @@ export class PrsonLoginSession {
         }
         pending.attempts += 1;
         try {
-          this._transport.send(boxToWallet(this._walletSessionPk!, encoded));
+          this._transport.send(boxToWallet(this._walletSessionPk!, encoded, this._ephKeys));
         } catch {
           /* channel down — keep retrying; offline timer will fire */
         }
@@ -1210,12 +1272,9 @@ export class PrsonLoginSession {
    */
   async _dispatchDecryptedForTest(envelope: DecryptedEnvelope): Promise<void> {
     if (this._closed) return;
-    // Wallet may rotate its session pk on a renewal. We always read
-    // the latest one from any decrypted inbound envelope so the
-    // browser→wallet channel stays unblocked even after rotation.
-    if (typeof envelope.walletSessionPk === "string") {
-      this._walletSessionPk = envelope.walletSessionPk;
-    }
+    // `walletSessionPk` on an envelope is NOT trusted: the key is pinned
+    // from the signed presentation and only a verified renewal can
+    // rotate it (see _handleRenewal).
     // Same treatment for the user's preferred language — the wallet
     // re-stamps this on every envelope so a mid-session locale
     // change propagates without an explicit event.
@@ -1252,6 +1311,8 @@ export class PrsonLoginSession {
         if (envelope.requestId) this._mouseSubscribers.delete(envelope.requestId);
         return;
       case "mouse-update":
+        // An unauthenticated sender must not drive the page.
+        if (this._legacyChannel) return;
         // Wallet is streaming pointer events. Two routing paths:
         //
         //   1. **Per-request** — there's a pending `requestMouse`
@@ -1280,6 +1341,7 @@ export class PrsonLoginSession {
         return;
       case "nav":
       case "logout":
+        if (envelope.msg === "nav" && this._legacyChannel) return;
         // Remote-navigation commands from the wallet's persistent
         // banner. Without an installed listener (i.e. the host
         // didn't call `enableRemoteNavigation`), `nav` is silently
@@ -1306,6 +1368,7 @@ export class PrsonLoginSession {
         if (envelope.msg === "logout") this._teardown("user_revoked");
         return;
       case "value":
+        if (this._legacyChannel) return;
         // Wallet edited the value of the focused field. The remote-
         // nav helper is the only consumer; without it the edit is
         // silently dropped (the host page never asked for remote
@@ -1324,6 +1387,7 @@ export class PrsonLoginSession {
       case "file-begin":
       case "file-chunk":
       case "file-end":
+        if (this._legacyChannel) return;
         // File-transfer envelopes flow through the remote-nav
         // helper's file receiver — bytes are reassembled into a
         // `File` object that the focused `<input type="file">`
@@ -1349,35 +1413,54 @@ export class PrsonLoginSession {
 
   private async _handleRenewal(envelope: DecryptedEnvelope) {
     if (!envelope.presentation) return;
-    // Renewal: re-verify against a fresh KB nonce. The wallet
-    // generates its own monotonically-increasing nonce per renewal
-    // and writes it into the KB-JWT; we accept any nonce within the
-    // session as long as the rest of the proof verifies.
-    const verifierOpts: VerifyOptions = {
-      ...this._verifierContext,
-      expectedNonce:
-        extractKbNonce(envelope.presentation) ??
-        this._verifierContext.expectedNonceFactory(),
-    };
-    const verified = await verifyPresentation(
-      envelope.presentation,
-      verifierOpts,
-    );
-    if (!verified.ok) return;
-    if (verified.cnf.jwk.x !== this._cnf.jwk.x) return; // wallet swapped under us; ignore
+    const verified = await this._verifyFresh(envelope.presentation);
+    if (!verified) return;
+    // Key rotation: only a verified renewal presentation can move the
+    // pinned wallet key, and only to the key it signs (`prson_wsk`).
+    // The next envelope must then come from the new key.
+    const rotated = verified.binding.walletSessionPk;
+    if (envelope.msg === "renewal" && rotated && !this._legacyChannel) {
+      this._walletSessionPk = rotated;
+    }
     this._expiresAt = verified.credential.expiresAt;
     this._claimsSnapshot = { ...verified.claims };
     this._armExpiryTimer();
     const fresh: SignInResult = {
       sdJwtVc: envelope.presentation,
       // The wallet picks a renewal's nonce, so a backend can't have issued it.
-      nonce: String(verifierOpts.expectedNonce),
+      nonce: verified.binding.nonce,
+      prsonId: verified.cnf.jwk.x,
       claims: verified.claims,
       cnf: verified.cnf,
       credential: verified.credential,
       session: this,
     };
     this._dispatch({ type: "renewed", result: fresh });
+  }
+
+  /**
+   * Verify a renewal / claim-update presentation and enforce in-session
+   * anti-replay: same holder key, a holder-signed `iat` strictly newer
+   * than the last accepted presentation, and never a presentation this
+   * session already accepted. Returns null (drop it) otherwise.
+   */
+  private async _verifyFresh(presentation: string) {
+    const verifierOpts: VerifyOptions = {
+      ...this._verifierContext,
+      // The wallet signs the sign-in nonce again, or one of its own; the
+      // freshness checks below are what stop a replay either way.
+      expectedNonce: extractKbNonce(presentation) ?? this._verifierContext.expectedNonceFactory(),
+    };
+    const digest = await presentationDigest(presentation);
+    if (this._seenPresentations.has(digest)) return null;
+    const verified = await verifyPresentation(presentation, verifierOpts);
+    if (!verified.ok) return null;
+    if (verified.cnf.jwk.x !== this._cnf.jwk.x) return null; // wallet swapped under us; ignore
+    if (verified.binding.iat <= this._lastPresentationIat) return null;
+    if (this._closed || this._seenPresentations.has(digest)) return null;
+    this._seenPresentations.add(digest);
+    this._lastPresentationIat = verified.binding.iat;
+    return verified;
   }
 
   /**
@@ -1401,18 +1484,8 @@ export class PrsonLoginSession {
    */
   private async _handleClaimUpdate(envelope: DecryptedEnvelope) {
     if (!envelope.presentation) return;
-    const verifierOpts: VerifyOptions = {
-      ...this._verifierContext,
-      expectedNonce:
-        extractKbNonce(envelope.presentation) ??
-        this._verifierContext.expectedNonceFactory(),
-    };
-    const verified = await verifyPresentation(
-      envelope.presentation,
-      verifierOpts,
-    );
-    if (!verified.ok) return;
-    if (verified.cnf.jwk.x !== this._cnf.jwk.x) return;
+    const verified = await this._verifyFresh(envelope.presentation);
+    if (!verified) return;
 
     const oldClaims = this._claimsSnapshot;
     const newClaims = verified.claims;
@@ -1531,6 +1604,8 @@ type VerifierContext = Omit<VerifyOptions, "expectedNonce"> & {
  * across the session.
  */
 function extractKbNonce(presentation: string): string | undefined {
+  // SD-JWT: the KB-JWT is the last `~` part. Anonymous credential: one
+  // plain JWS, whose payload carries the nonce itself.
   const parts = presentation.split("~");
   const last = parts[parts.length - 1];
   if (!last || !last.includes(".")) return undefined;
@@ -1544,6 +1619,15 @@ function extractKbNonce(presentation: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** SHA-256 (hex) of a presentation string — the replay-set key. */
+async function presentationDigest(presentation: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(presentation));
+  const view = new Uint8Array(digest);
+  let out = "";
+  for (let i = 0; i < view.length; i++) out += view[i]!.toString(16).padStart(2, "0");
+  return out;
 }
 
 /**

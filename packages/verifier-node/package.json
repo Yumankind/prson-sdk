@@ -8,22 +8,26 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "README.md"
+    "!dist/**/*.test.*",
+    "!dist/test",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/status.test.js && node --experimental-strip-types --no-warnings --test test/*.test.ts"
+    "test": "tsc && node --test dist/status.test.js && node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "prepublishOnly": "npm test && npm run build"
   },
   "dependencies": {
-    "jose": "^5.2.0"
+    "jose": "^6.2.12"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "sd-jwt-vc",
@@ -37,5 +41,15 @@
     "url": "https://github.com/Yumankind/prson-network",
     "directory": "login-sdk/packages/verifier-node"
   },
-  "license": "TBD"
+  "license": "Apache-2.0",
+  "author": "Yumankind OÜ <support@prson.net>",
+  "homepage": "https://prson.net/developers",
+  "bugs": {
+    "url": "https://github.com/Yumankind/prson-network/issues",
+    "email": "security@yumankind.com"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
 }

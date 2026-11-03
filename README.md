@@ -22,6 +22,7 @@ const result = await PrsonLogin.signIn({
 });
 
 console.log(result.sdJwtVc);          // standard SD-JWT-VC presentation
+console.log(result.prsonId);           // the person's Prson ID on your site (use as user id)
 console.log(result.claims);            // decoded disclosed claims (sanity-check copy)
 console.log(result.cnf.jwk);           // holder's Ed25519 public key (verify KB-JWT yourself)
 console.log(result.session.expiresAt); // ms epoch — renew before this
@@ -325,9 +326,8 @@ sending a `revoke` envelope over the WebRTC data channel.
 
 ## License
 
-TBD by Prson. The verifier package is intended to be permissive
-(MIT-class) so it ships into third-party backends without friction.
-The browser SDK same.
+Apache License 2.0 (see [`LICENSE`](LICENSE)); each package ships its
+own copy. Copyright Yumankind OÜ.
 
 ## Where to go next
 

@@ -67,16 +67,79 @@ A1 can still display `legit-bank.com` in their browser URL bar
 not a protocol problem — same risk profile as every "Sign in with X"
 button.
 
+### 3.1 Relayed codes and first-claimer-wins (QRLjacking) — mitigated, not solved
+
+The checks above stop a *tampered* code. They don't stop a *genuine* one
+shown in the wrong place. A phisher can open `legit-bank.com` on their own
+machine, take the real QR it shows, and display it on `phisher.evil`. The
+victim scans it, sees `legit-bank.com` (correctly) and approves — and the
+session lands in the phisher's browser. Likewise anyone who can see a QR
+(shoulder-surfing, screen share) can scan it first: the relay gives the
+session to whoever claims it first.
+
+There is no cryptographic fix for this in a QR flow (the phone can't see
+which browser shows the code). What we do:
+
+- **The wallet claims the code as soon as the sheet opens** and the relay
+  answers with where the browser that made the code is
+  (`requester: { country, city, region, asn, as_org, hosting, browser,
+  seen_at }`). The sheet shows it under the site ("Requested from Chrome on
+  macOS, Lisbon, Portugal").
+- **Risky requests get a different sheet**: when the code came from a data
+  centre (`hosting`), from another country than the phone's region (OS
+  setting; skipped when unknown), or the site is new to this phone, the
+  warning is raised, "Don't sign in" becomes the main button, and signing in
+  asks first: *"Is this code on `<domain>` in your browser's address bar?"* —
+  "No" stops and explains.
+- **A 409 from the relay** ("already claimed") makes the sheet say "Someone
+  else already scanned this code. Don't continue; reload the page on your
+  computer." and offers only Close.
+- **The page shows who signed in.** The browser shows "scanned" as soon as
+  any phone claims the code, and sites should show the signed-in identity
+  (`SignInResult.prsonId` / the `signed_in` event) right away, so a stranger's
+  sign-in is visible.
+- **Secrets stay on the page.** The SDK never sends password or one-time-code
+  field values over the live channel (`type=password`, `autocomplete`
+  `current-password` / `new-password` / `one-time-code`): `bindInput`
+  refuses them, `bindForm` and remote navigation skip them.
+
+Residual risk: a careful phisher on a residential network in the victim's
+country, against a site the victim has used before, still gets the plain
+sheet; an inattentive user who answers "Yes" still signs the phisher in.
+Future work: a proximity check (e.g. the phone and the browser proving
+they're near each other — BLE, ultrasound, or a short code typed on the
+page) would close it.
+
 ## 4. Encryption-at-rest-in-transit
 
-### 4.1 NaCl `box` for the data-channel payload
+### 4.1 NaCl `box` for the data-channel payload (envelope v2)
+
+Both sides hold one X25519 key for the session, fresh for each sign-in and
+kept only in memory:
+
+- `browserSk/browserPk` — made by the SDK at `signIn()`; `browserPk` is in
+  the QR.
+- `walletSessionSk/walletSessionPk` — made by the wallet for the session;
+  `walletSessionPk` is **signed into the presentation** by the holder key:
+  the KB-JWT claim `prson_wsk` (or the anonymous credential's payload
+  `prson_wsk`).
 
 ```
-walletEphSk, walletEphPk = X25519.keypair()        // per message
-sharedSecret = X25519(walletEphSk, browserPk)
-key          = HSalsa20(sharedSecret, ZEROS)       // RFC 7693 KDF
-ct           = XSalsa20-Poly1305(key, nonce24, plaintext)
+wallet → browser:  ct = box(walletSessionSk → browserPk, nonce24, plaintext)
+browser → wallet:  ct = box(browserSk → walletSessionPk, nonce24, plaintext)
+wire:              { ephPk: <sender's session pk>, nonce24, ct }   // field name kept
+nonce24            random per message (XSalsa20's 192-bit nonce makes that safe)
 ```
+
+The browser decrypts the first envelope, verifies its presentation, and
+requires the envelope's sender to be the signed `prson_wsk`. From then on it
+**pins** that key: an envelope that isn't boxed by it is dropped. A
+`walletSessionPk` field on an envelope is never trusted; the pinned key
+changes only when a verified `renewal` presentation (same holder key,
+strictly newer `iat`) signs a new `prson_wsk` — that renewal is boxed by
+the old key, later envelopes by the new one. A wallet whose request blob
+says `envelopeVersion: 2` likewise accepts only envelopes boxed by
+`browserPk`.
 
 Properties:
 
@@ -84,9 +147,16 @@ Properties:
 |---|---|
 | **Confidentiality** (A2) | XSalsa20 stream cipher under a 256-bit key. |
 | **Integrity** (A2) | Poly1305 authenticator over the ciphertext. |
-| **Per-message forward secrecy** | `walletEphSk` is regenerated for every data-channel write. |
-| **Sender authentication** (A2 injection) | Browser does X25519 with `walletEphPk` from the same message; an attacker can't substitute a different sender without the receiver detecting (NaCl `box` is mutual). |
-| **Long-term forward secrecy** (A6) | The browser's `ephSk` is discarded on page unload and never persisted. Even if a future attacker compromises the *user's wallet*, they can't decrypt yesterday's session because the receiver key is gone. |
+| **Sender authentication** (A2 injection) | NaCl `box` between two static session keys is mutual: only the holder of `walletSessionSk` can make a box that opens with `walletSessionPk`, and the browser learns which key to expect from the holder-signed presentation, not from the wire. A relay (or anyone who saw the QR and so knows `browserPk`) can't inject `nav` / `value` / `mouse-update` / `logout` / `revoke`, or swap the key the page sends focused-field values to. Browser → wallet is authenticated the same way with `browserPk`. |
+| **Forward secrecy** (A6) | Per session, not per message: both session secrets live only in memory for one sign-in and are discarded at the end (page unload / session close). A leaked session key exposes that one session, never an earlier or a later one. |
+
+**Older builds.** An SDK that predates v2 boxes with a fresh key per
+message (the wallet opens it; it can't check the sender). A wallet that
+predates v2 boxes with a fresh key per message and signs no `prson_wsk`:
+the current SDK still signs the person in but runs a *legacy* session —
+inbound senders can't be checked, so `nav`, `value`, `mouse-update` and
+file-transfer envelopes are ignored and a console warning asks for an
+app update.
 
 ### 4.2 What's NOT encrypted
 
@@ -96,8 +166,9 @@ The Cloudflare Worker Durable Object can see:
   pairs and codec metadata — never the application payload).
 - The fact that two peers connected to the room.
 
-Cloudflare TURN (only when used as a relay; most connections are
-direct P2P after ICE completes):
+Cloudflare TURN (always: both peers are relay-only — the wallet since
+M-4, the browser since envelope v2 — so neither side's IP addresses reach
+the other):
 - The relayed bytes (which are NaCl-boxed ciphertext).
 - The total bytes + duration.
 
@@ -108,9 +179,13 @@ on top of that. Two layers of encryption, the inner one with a key
 the relay infrastructure never sees.
 
 The **per-domain rekey** (ARCHITECTURE.md §2.1) means the holder's
-identity is unlinkable across sites — the same wallet signing into
-two different domains looks like two different users to any
-observer comparing `cnf.jwk` values.
+`cnf.jwk` differs on every site — two sites comparing `cnf.jwk` values
+can't tell they have the same person. That is not unlinkability against
+every observer: the relay sees each sign-in's domain, the browser's and
+the phone's network addresses (TURN), and timing. What it does **not** see
+is any stable wallet key: `/session/claim` is signed by a fresh random
+Ed25519 key per login (the relay accepts any key), and nothing else the
+wallet sends the relay is stable across logins.
 
 ## 5. Replay & freshness
 
@@ -118,8 +193,8 @@ observer comparing `cnf.jwk` values.
 |---|---|
 | Replay a captured presentation **to the same verifier** | The KB-JWT's `nonce` is verifier-chosen; the SDK rejects any presentation whose nonce ≠ the in-flight request's nonce. |
 | Replay a captured presentation **to a different verifier** | The KB-JWT's `aud` is bound to the verifier's `https://<domain>`. A different `aud` → verifier rejects. |
-| Replay across **time** | KB-JWT `iat` is bounded to current ± 30 s by the SDK. The credential itself has `exp` ≤ 15 min. |
-| Replay across **renewals** | Each renewal mints a new KB-JWT with a new `nonce` and `iat`; the SDK rejects monotonic-decreasing `iat`. |
+| Replay across **time** | KB-JWT `iat` must be within ± 60 s of the verifier's clock (browser SDK `maxKbAgeSeconds` and verifier-node `maxKbJwtAgeSeconds`, both default 60). The credential itself has `exp` ≤ 15 min. |
+| Replay across **renewals** | Within a session the SDK accepts a `renewal` / `claim-update` only if it verifies against the same holder key, its `iat` is **strictly greater** than the last accepted presentation's (the sign-in's, at first), and the presentation (SHA-256) was never accepted before. The renewal's nonce is the wallet's (today the sign-in nonce again), so a backend can't treat a renewal as fresh proof for its own nonce. |
 
 ## 6. Session revocation
 
@@ -149,7 +224,7 @@ Lifting these out of the spec so they're a checklist:
    - `aud === "https://<your-domain>"`
    - `nonce === <the nonce you generated>`
    - `sd_hash === b64u(sha256(<presentation prefix without KB-JWT>))`
-   - `iat` within the last 60 s.
+   - `iat` within ± 60 s of now (the reference verifiers' default).
 5. **Check `exp`** on the issuer JWS payload — reject if expired.
 
 The reference verifier in `packages/verifier-node/` does all five.
@@ -201,15 +276,22 @@ When this ships, we should commission a focused audit covering:
       verify cleanly, reject on expired `exp` or mismatched role,
       and the HMAC secret has rotation playbook.
 - [ ] Wallet's Ed25519 claim signature is verified on the canonical
-      tuple `"prson-login-claim/v1\n" + reqId + "\n" + walletPkX +
-      "\n" + ts + "\n" + domain` — version prefix protects against
-      cross-protocol replay.
+      tuple `"prson-login-claim/v2\n" + reqId + "\n" + walletPkX +
+      "\n" + serverTs + "\n" + domain` — version prefix protects against
+      cross-protocol replay; `walletPkX` is a per-login random key.
 - [ ] `/session/claim` echoes `domain` back through the DO and
       rejects with `401 domain-mismatch` when the wallet signed for
       a different domain than the browser drafted.
-- [ ] No TURN credentials are issued before /session/claim succeeds
-      (verified by reading the Worker's `mintCloudflareTurnCreds`
-      call site and confirming it's only inside `handleClaim`).
+- [ ] No TURN credentials are issued before /session/claim succeeds:
+      the draft response carries none, and the browser gets its TURN
+      servers over the socket (`{"type":"ice"}`) only after a claim.
+      A leaked QR still lets a stranger claim it (and so mint TURN
+      for that one session) — see §3.1; drafts are IP rate-limited.
+- [ ] The browser drops data-channel envelopes not boxed by the pinned
+      `prson_wsk` key, and pins it only from a verified presentation.
+- [ ] `peer-gone` / `error` on the signaling socket never tear down a
+      live data channel by themselves (the SDK waits for the channel to
+      go silent).
 - [ ] IP rate-limit on /session/draft prevents anonymous draft-spam
       from exhausting Durable Object capacity; KV bucket auto-expires
       after 65 s.

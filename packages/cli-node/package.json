@@ -8,12 +8,16 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "README.md"
+    "!dist/**/*.test.*",
+    "!dist/test",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --test dist/test/*.test.js"
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "prepublishOnly": "npm test && npm run build"
   },
   "dependencies": {
     "qrcode-terminal": "^0.12.0"
@@ -23,7 +27,7 @@
     "@types/node": "^20.0.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "prson",
@@ -38,5 +42,15 @@
     "url": "https://github.com/Yumankind/prson-network",
     "directory": "login-sdk/packages/cli-node"
   },
-  "license": "TBD"
+  "license": "Apache-2.0",
+  "author": "Yumankind OÜ <support@prson.net>",
+  "homepage": "https://prson.net/developers",
+  "bugs": {
+    "url": "https://github.com/Yumankind/prson-network/issues",
+    "email": "security@yumankind.com"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
 }

@@ -26,38 +26,39 @@ export interface Transport {
   close(): void;
 }
 
+/**
+ * RTCPeerConnection config for the browser side. With TURN available
+ * the browser is relay-only (`iceTransportPolicy: "relay"`, no STUN):
+ * it gathers only relay candidates, so none of its own addresses (LAN,
+ * public) reach the phone — the wallet has done the same since M-4.
+ * A dev relay without TURN credentials hands out STUN only; relay-only
+ * would find no candidates, so that case falls back to `"all"`.
+ */
+export function rtcConfigFor(iceServers: RTCIceServer[]): RTCConfiguration {
+  const urls = (s: RTCIceServer) => (Array.isArray(s.urls) ? s.urls : [s.urls]);
+  const isTurn = (u: string) => /^turns?:/i.test(u);
+  const turn = iceServers
+    .map((s) => ({ ...s, urls: urls(s).filter(isTurn) }))
+    .filter((s) => s.urls.length > 0);
+  if (turn.length > 0) return { iceServers: turn, iceTransportPolicy: "relay" };
+  return { iceServers, iceTransportPolicy: "all" };
+}
+
+/** How long a live data channel must stay silent after a `peer-gone`
+ *  before we believe it. The wallet pings every 2 s. */
+const PEER_GONE_CONFIRM_MS = 6000;
+
 export async function establishTransport(opts: {
-  /** Browser uses STUN by default; when [turn] is supplied the
-   *  Worker also minted a TURN allocation for the browser so ICE can
-   *  succeed across symmetric NATs and Chrome's mDNS-obfuscated host
-   *  candidates that iOS WebRTC can't resolve. See ../../SECURITY.md §6. */
-  stunOnly: true;
   signaling: SignalingConnection;
   role: "browser";
-  /** Optional TURN creds from `/session/draft`. When present, the
-   *  browser gathers a relay candidate of its own — necessary on
-   *  localhost + Chrome where host candidates are .local mDNS names
-   *  iOS WebRTC can't resolve, and on any symmetric NAT. */
-  turn?: {
-    urls: string | string[];
-    username: string;
-    credential: string;
-  };
+  /**
+   * ICE servers from the relay: the `ice` message it sends once a wallet
+   * claimed the code, or (older relays) the draft response's `turn`.
+   * See [rtcConfigFor] and ../../SECURITY.md §6.
+   */
+  iceServers: RTCIceServer[];
 }): Promise<Transport> {
-  const iceServers: RTCIceServer[] = [
-    // Cloudflare STUN (free, no auth) — lets the browser gather host
-    // + server-reflexive candidates so the wallet has somewhere to
-    // connect even when both sides start from behind NAT.
-    { urls: "stun:stun.cloudflare.com:3478" },
-  ];
-  if (opts.turn) {
-    iceServers.push({
-      urls: opts.turn.urls,
-      username: opts.turn.username,
-      credential: opts.turn.credential,
-    });
-  }
-  const pc = new RTCPeerConnection({ iceServers });
+  const pc = new RTCPeerConnection(rtcConfigFor(opts.iceServers));
 
   // Browser is the initiator → opens the data channel before the
   // offer. Negotiated=false so the wallet sees `ondatachannel`.
@@ -80,6 +81,16 @@ export async function establishTransport(opts: {
         // covered the gathered ones.
       }
     } else if (m.msg === "peer-gone") {
+      // `peer-gone` is the relay's word that the wallet's socket went
+      // away. It travels the same socket as the wallet's own messages,
+      // so it isn't proof: once the data channel is up, the channel
+      // itself decides — if the wallet stays silent (it pings every
+      // 2 s), it's gone; if it keeps talking, the notice is ignored.
+      // `error` frames are never acted on.
+      if (dc.readyState === "open") {
+        confirmPeerGone();
+        return;
+      }
       // Wallet vanished — close the data channel so the host knows.
       // Fire the explicit teardown FIRST with a wallet-side reason
       // so the SDK maps it to `wallet_signed_out` (the dc close
@@ -88,6 +99,19 @@ export async function establishTransport(opts: {
       try { dc.close(); } catch { /* */ }
     }
   });
+
+  let lastDcMessageAt = 0;
+  let peerGoneTimer: ReturnType<typeof setTimeout> | null = null;
+  function confirmPeerGone() {
+    if (peerGoneTimer) return;
+    const noticeAt = Date.now();
+    peerGoneTimer = setTimeout(() => {
+      peerGoneTimer = null;
+      if (lastDcMessageAt >= noticeAt) return; // still talking: not gone
+      fireClose("wallet_signed_out");
+      try { dc.close(); } catch { /* */ }
+    }, PEER_GONE_CONFIRM_MS);
+  }
 
   // Generate + post the SDP offer.
   const offer = await pc.createOffer();
@@ -133,6 +157,7 @@ export async function establishTransport(opts: {
   opts.signaling.onClose((reason) => fireClose(reason));
   dc.addEventListener("close", () => fireClose("network_loss"));
   dc.addEventListener("message", (evt) => {
+    lastDcMessageAt = Date.now();
     const raw = typeof evt.data === "string"
       ? evt.data
       : new TextDecoder().decode(evt.data as ArrayBuffer);
@@ -168,6 +193,7 @@ export async function establishTransport(opts: {
       if (dc.readyState === "open") dc.send(raw);
     },
     close() {
+      if (peerGoneTimer) clearTimeout(peerGoneTimer);
       try { dc.close(); } catch { /* */ }
       try { pc.close(); } catch { /* */ }
       opts.signaling.close();

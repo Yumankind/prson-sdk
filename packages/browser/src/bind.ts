@@ -88,6 +88,10 @@ export function bindInput(
 ): BindController {
   return {
     async request(opts) {
+      // Passwords and one-time codes never cross the live channel, in
+      // either direction: whoever holds the phone end may not be the
+      // person at this screen (see isSensitiveField).
+      if (isSensitiveField(element)) return { ok: false, error: "unsupported" } as LoginResponse;
       const req = inputRequestFromElement(element, opts?.reason);
       const reply = await session.request(req, opts);
       if (reply.ok) writeValueIntoElement(element, reply.value);
@@ -262,6 +266,7 @@ function collectFieldElements(
   ]);
   for (let i = 0; i < all.length; i++) {
     const el = all[i]!;
+    if (isSensitiveField(el)) continue; // passwords / one-time codes stay on this page
     if (el instanceof HTMLInputElement) {
       const t = (el.type || "text").toLowerCase();
       if (SKIPPED.has(t)) continue;
@@ -276,6 +281,23 @@ function collectFieldElements(
     }
   }
   return out;
+}
+
+/**
+ * Fields whose value must never travel over the live channel: password
+ * inputs and anything marked `autocomplete` current-password /
+ * new-password / one-time-code. Anyone who scans a sign-in code first
+ * holds the phone end of the channel, so the SDK neither mirrors these
+ * values to the phone nor lets the phone fill them: bindInput refuses,
+ * bindForm and remote navigation skip them.
+ */
+export function isSensitiveField(el: Element): boolean {
+  const tokens = (el.getAttribute("autocomplete") ?? "").toLowerCase().split(/\s+/);
+  if (tokens.some((t) => t === "current-password" || t === "new-password" || t === "one-time-code")) return true;
+  if (typeof HTMLInputElement !== "undefined" && el instanceof HTMLInputElement) {
+    return (el.type || "text").toLowerCase() === "password";
+  }
+  return (el.getAttribute("type") ?? "").toLowerCase() === "password";
 }
 
 function resolveInputType(
@@ -542,6 +564,8 @@ export function enableRemoteNavigation(
   function isBindable(
     el: Element,
   ): el is HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement {
+    // Passwords and one-time codes are never mirrored to the phone.
+    if (isSensitiveField(el)) return false;
     if (el instanceof HTMLInputElement) {
       const t = (el.type || "text").toLowerCase();
       if (
@@ -584,7 +608,7 @@ export function enableRemoteNavigation(
   function collectFields(): Array<
     HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
   > {
-    if (opts?.collectFields) return opts.collectFields();
+    if (opts?.collectFields) return opts.collectFields().filter((el) => !isSensitiveField(el));
     const out: Array<
       HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
     > = [];
@@ -729,6 +753,13 @@ export function enableRemoteNavigation(
   function onFocusIn(ev: Event) {
     const t = ev.target;
     if (!(t instanceof Element)) return;
+    if (isSensitiveField(t)) {
+      // Focus moved to a password / one-time code: clear the phone's
+      // mirror, and don't let a `value` from the phone land here.
+      if (currentFocused) void session._sendFocus(null);
+      currentFocused = null;
+      return;
+    }
     if (isBindable(t)) {
       currentFocused = t;
       void session._sendFocus(focusPayloadFor(t));
@@ -804,7 +835,7 @@ export function enableRemoteNavigation(
   }
 
   function applyValue(value: string) {
-    if (!currentFocused) return;
+    if (!currentFocused || isSensitiveField(currentFocused)) return;
     // Value pushes only make sense for input-like fields. If a
     // button is focused (no editable value) just drop the push.
     if (
