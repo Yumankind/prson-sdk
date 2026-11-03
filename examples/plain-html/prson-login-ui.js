@@ -2104,289 +2104,760 @@ var require_browser = __commonJS({
 
 // src/qr-renderer.ts
 var import_qrcode = __toESM(require_browser(), 1);
+
+// src/button.ts
+var P_STEM = "M46.2623 100.265C43.9277 100.265 41.9617 99.5892 40.3643 98.2375C38.8898 96.8859 38.1526 95.1657 38.1526 93.0768V70.5907C38.1526 66.0444 37.1082 62.7882 35.0193 60.8222C33.0533 58.8562 30.5958 57.8732 27.6468 57.8732C24.5749 57.8732 21.9946 58.8562 19.9057 60.8222C17.9397 62.7882 16.711 65.0614 16.2195 67.6417V92.3396C16.2195 94.4284 15.4208 96.2101 13.8234 97.6846C12.3489 99.0362 10.5058 99.712 8.29404 99.712C5.95942 99.712 3.99343 99.0362 2.39606 97.6846C0.798686 96.333 0 94.6127 0 92.5239V51.238C0 49.272 0.737248 47.6132 2.21174 46.2615C3.80912 44.787 5.83655 44.0498 8.29404 44.0498C10.26 44.0498 11.9188 44.6027 13.2705 45.7086C14.6221 46.6916 15.5437 47.9818 16.0352 49.5792C19.3528 45.2785 24.3906 43.1282 31.1487 43.1282C38.0297 43.1282 43.6205 45.1557 47.9211 49.2105C52.2218 53.2654 54.3721 59.7163 54.3721 68.5633V93.4454C54.3721 95.4114 53.5734 97.0702 51.976 98.4219C50.5015 99.6506 48.597 100.265 46.2623 100.265Z";
+var P_DOT = "M26.7637 0.900391C29.8673 0.900391 32.6569 1.60533 35.1299 3.01758C37.6743 4.35994 39.6881 6.26878 41.1719 8.74121C42.6585 11.1465 43.3994 13.9742 43.3994 17.2197C43.3994 20.3955 42.6579 23.2567 41.1738 25.8008C39.6892 28.2744 37.6757 30.2181 35.1328 31.6309C32.6582 33.043 29.8683 33.75 26.7637 33.75C23.9181 33.75 21.2882 33.1284 18.875 31.8867L18.3945 31.6309C15.8521 30.2184 13.8036 28.2754 12.25 25.8037C10.764 23.2567 10.0235 20.3954 10.0234 17.2197C10.0234 13.9742 10.7643 11.1466 12.25 8.74121L12.5469 8.2832C14.0617 6.03176 16.012 4.27606 18.3965 3.01758C20.9392 1.60538 23.729 0.900409 26.7637 0.900391ZM26.7637 9.63086C24.682 9.63089 22.9161 10.3241 21.4609 11.71C20.0799 13.0921 19.3857 14.9255 19.3857 17.2197C19.3858 19.4431 20.0804 21.3133 21.4658 22.8379C22.9209 24.2919 24.6846 25.0185 26.7637 25.0186C28.915 25.0186 30.6429 24.2913 31.9561 22.8398L32.208 22.5498C33.4264 21.0797 34.0361 19.3046 34.0361 17.2197C34.0361 14.9244 33.3414 13.0904 31.959 11.708L31.7061 11.4551C30.4267 10.2404 28.7819 9.63086 26.7637 9.63086Z";
+function prsonMarkSvg(opts = {}) {
+  const size = opts.size ?? 24;
+  const square = opts.square ?? "#FBBF24";
+  const glyph = opts.glyph ?? "#0A0A0A";
+  return `<svg class="prson-mark" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="6" fill="${square}"/><g transform="translate(7.2 3.15) scale(0.175)" fill="${glyph}"><path d="${P_STEM}"/><path d="${P_DOT}"/></g></svg>`;
+}
+var MARK_COLOURS = {
+  amber: { square: "#0A0A0A", glyph: "#FBBF24" },
+  dark: { square: "#FBBF24", glyph: "#0A0A0A" },
+  light: { square: "#FBBF24", glyph: "#0A0A0A" },
+  outline: { square: "#FBBF24", glyph: "#0A0A0A" }
+};
+var VARIANTS = ["amber", "dark", "light", "outline"];
+function variantOf(v) {
+  return VARIANTS.includes(v) ? v : "amber";
+}
+function decorate(btn, o) {
+  const variant = variantOf(o.variant);
+  btn.className = [
+    "prson-signin-btn",
+    `prson-signin-btn--${variant}`,
+    o.size === "lg" ? "prson-signin-btn--lg" : "",
+    o.fullWidth ? "prson-signin-btn--block" : ""
+  ].filter(Boolean).join(" ");
+  btn.innerHTML = prsonMarkSvg({ size: o.size === "lg" ? 26 : 22, ...MARK_COLOURS[variant] });
+  const label = document.createElement("span");
+  label.className = "prson-signin-btn__label";
+  label.textContent = o.label ?? "Sign in with Prson";
+  btn.append(label);
+}
+function createSignInButton(opts = {}) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  decorate(btn, opts);
+  if (opts.onClick) btn.addEventListener("click", opts.onClick);
+  return btn;
+}
+function defineSignInButtonElement(tag = "prson-signin-button") {
+  if (typeof window === "undefined" || !("customElements" in window) || customElements.get(tag)) return;
+  class PrsonSignInButtonElement extends HTMLElement {
+    constructor() {
+      super(...arguments);
+      this.btn = null;
+    }
+    static get observedAttributes() {
+      return ["variant", "size", "label", "full-width", "disabled", "busy"];
+    }
+    connectedCallback() {
+      if (!this.btn) {
+        this.btn = document.createElement("button");
+        this.btn.type = "button";
+        this.append(this.btn);
+      }
+      this.render();
+    }
+    attributeChangedCallback() {
+      if (this.btn) this.render();
+    }
+    render() {
+      const btn = this.btn;
+      decorate(btn, {
+        variant: variantOf(this.getAttribute("variant")),
+        size: this.getAttribute("size") === "lg" ? "lg" : "md",
+        label: this.getAttribute("label") ?? void 0,
+        fullWidth: this.hasAttribute("full-width")
+      });
+      if (this.hasAttribute("full-width")) this.style.display = "block";
+      btn.disabled = this.hasAttribute("disabled");
+      const busy = this.hasAttribute("busy");
+      if (busy) btn.setAttribute("aria-busy", "true");
+      else btn.removeAttribute("aria-busy");
+      btn.classList.toggle("prson-signin-btn--busy", busy);
+    }
+  }
+  customElements.define(tag, PrsonSignInButtonElement);
+}
+
+// src/describe.ts
+function b64uDecode(s) {
+  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - s.length % 4);
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+function param(url, name) {
+  try {
+    return new URL(url).searchParams.get(name);
+  } catch {
+    const m = url.match(new RegExp(`[?&]${name}=([^&#]*)`));
+    const cap = m?.[1];
+    return cap ? decodeURIComponent(cap) : null;
+  }
+}
+var CLAIMS = {
+  given_name: { icon: "user", label: "Your name" },
+  family_name: { icon: "user", label: "Your name" },
+  name: { icon: "user", label: "Your name" },
+  full_name: { icon: "user", label: "Your name" },
+  birthdate: { icon: "calendar", label: "Date of birth" },
+  birth_date: { icon: "calendar", label: "Date of birth" },
+  age: { icon: "calendar", label: "Your age" },
+  email: { icon: "mail", label: "Email address" },
+  phone: { icon: "phone", label: "Phone number" },
+  phone_number: { icon: "phone", label: "Phone number" },
+  address: { icon: "home", label: "Address" },
+  nationality: { icon: "flag", label: "Nationality" },
+  nationalities: { icon: "flag", label: "Nationality" },
+  document_number: { icon: "id", label: "Document number" },
+  document_type: { icon: "id", label: "Document type" },
+  picture: { icon: "user", label: "Photo" }
+};
+var PREDICATES = {
+  phone_verified: { icon: "phone", label: "A verified phone number", detail: "Not the number itself" },
+  email_verified: { icon: "mail", label: "A verified email", detail: "Not the address itself" },
+  address_verified: { icon: "home", label: "A verified address", detail: "Not the address itself" },
+  bank_verified: { icon: "check", label: "A verified bank account", detail: "Not the account itself" }
+};
+function humanize(s) {
+  const t = s.replace(/[_-]+/g, " ").trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : s;
+}
+function predicateItem(p) {
+  const known = PREDICATES[p];
+  if (known) return known;
+  const age = p.match(/^age_(gte|gt|over|lt|under)_(\d{1,3})$/);
+  if (age) {
+    const n = Number(age[2]);
+    const label = age[1] === "gte" || age[1] === "over" ? `${n} or older` : age[1] === "gt" ? `Older than ${n}` : `Under ${n}`;
+    return { icon: "calendar", label, detail: "Not your date of birth" };
+  }
+  return { icon: "check", label: humanize(p), detail: "Yes or no only" };
+}
+function describeShares(req) {
+  const r = req.required ?? {};
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const add = (i) => {
+    if (seen.has(i.label)) return;
+    seen.add(i.label);
+    out.push(i);
+  };
+  if (r.identityType === "organization") add({ icon: "building", label: "An organisation identity" });
+  const level = r.minVerificationLevel ?? 1;
+  if (r.uniqueHumanId) {
+    add({ icon: "shield", label: "Verified unique person", detail: "Passport or ID checked \xB7 not trackable across sites" });
+  } else if (level >= 4) {
+    add({ icon: "shield", label: "Verified human", detail: "Passport or ID checked" });
+  } else if (level >= 1) {
+    add({ icon: "shield", label: "Verified human" });
+  } else {
+    add({ icon: "shield", label: "Your Prson identity", detail: "Verified or not" });
+  }
+  for (const p of r.predicates ?? []) add(predicateItem(p));
+  for (const c of r.requiredClaims ?? []) add(CLAIMS[c] ?? { icon: "check", label: humanize(c) });
+  add(
+    req.ephemeralIdentity ? { icon: "key", label: "A one-time key", detail: "Nothing links your visits" } : { icon: "key", label: "A sign-in key just for this site" }
+  );
+  return out;
+}
+function describeCode(url) {
+  let req = {};
+  const raw = param(url, "req");
+  if (raw) {
+    try {
+      req = JSON.parse(b64uDecode(raw));
+    } catch {
+      req = {};
+    }
+  }
+  const t = param(url, "t");
+  const serverTs = t && /^\d+$/.test(t) ? parseInt(t, 10) : null;
+  return {
+    domain: param(url, "d") ?? req.domain ?? "",
+    serverTs,
+    shares: describeShares(req),
+    anonymousAllowed: req.allowAnonymous === true
+  };
+}
+function monogram(domain) {
+  const host = domain.replace(/:\d+$/, "").toLowerCase();
+  const parts = host.split(".").filter(Boolean);
+  const name = parts.length >= 3 ? parts[parts.length - 2] : parts[0];
+  const ch = (name ?? host).match(/[a-z0-9]/i)?.[0] ?? "?";
+  return ch.toUpperCase();
+}
+
+// src/qr-renderer.ts
 var DRAFT_TTL_SECONDS = 180;
 var COUNTDOWN_WARN_SECONDS = 30;
-function extractServerTs(url) {
-  try {
-    try {
-      const parsed = new URL(url);
-      const t = parsed.searchParams.get("t");
-      if (t) return parseInt(t, 10);
-    } catch {
-    }
-    const m = url.match(/[?&]t=([0-9]+)/);
-    const cap = m?.[1];
-    return cap ? parseInt(cap, 10) : null;
-  } catch {
-    return null;
-  }
+var svg = (body, cls = "") => `<svg${cls ? ` class="${cls}"` : ""} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${body}</svg>`;
+var ICONS = {
+  shield: svg('<path d="M12 3l8 4v5c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V7l8-4z"/><path d="M9 12l2 2 4-4"/>'),
+  user: svg('<circle cx="12" cy="8" r="4"/><path d="M6 21v-1a6 6 0 0 1 12 0v1"/>'),
+  calendar: svg('<rect x="4" y="5" width="16" height="16" rx="2"/><path d="M16 3v4M8 3v4M4 11h16"/>'),
+  id: svg('<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2"/><path d="M15 9h2M15 13h2M7 16h4"/>'),
+  mail: svg('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>'),
+  phone: svg('<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/>'),
+  device: svg('<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/>'),
+  home: svg('<path d="M5 12H3l9-9 9 9h-2"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>'),
+  building: svg('<path d="M3 21h18M5 21V7l8-4v18M19 21V11l-6-4M9 9v.01M9 12v.01M9 15v.01"/>'),
+  key: svg('<circle cx="8" cy="15" r="4"/><path d="M10.85 12.15L19 4M18 5l2 2M15 8l2 2"/>'),
+  flag: svg('<path d="M5 5a5 5 0 0 1 7 0 5 5 0 0 0 7 0v9a5 5 0 0 1-7 0 5 5 0 0 0-7 0V5z"/><path d="M5 21v-7"/>'),
+  check: svg('<path d="M5 12l5 5L20 7"/>'),
+  close: svg('<path d="M18 6L6 18M6 6l12 12"/>'),
+  lock: svg('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
+  clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>'),
+  alert: svg('<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>'),
+  refresh: svg('<path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"/>')
+};
+var SPINNER = svg('<path d="M12 3a9 9 0 1 0 9 9" />', "prson-spinner");
+var CHECK = `<svg class="prson-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`;
+var MONO_TINTS = ["#FEF3C7", "#E0F2FE", "#DCFCE7", "#EDE9FE", "#FCE7F3", "#E2E8F0", "#FFEDD5"];
+function tintFor(domain) {
+  let h = 0;
+  for (let i = 0; i < domain.length; i++) h = h * 31 + domain.charCodeAt(i) >>> 0;
+  return MONO_TINTS[h % MONO_TINTS.length];
 }
 function fmtSeconds(seconds) {
   const s = Math.max(0, seconds);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return m + ":" + String(r).padStart(2, "0");
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 }
-function renderQrCard(url, mount, _theme) {
-  Array.from(mount.querySelectorAll(".prson-qr-card")).forEach((orphan) => {
-    orphan.remove();
-  });
-  const card = document.createElement("div");
-  card.className = "prson-qr-card";
+function prefersReducedMotion() {
+  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+function isPhone() {
+  const ua = navigator.userAgent || "";
+  if (/iPhone|iPod|Android.+Mobile|Windows Phone|Mobile Safari/i.test(ua)) return true;
+  return typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(max-width: 820px)").matches;
+}
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== void 0) e.innerHTML = html;
+  return e;
+}
+function renderQrCard(url, mount, theme, context) {
+  Array.from(mount.querySelectorAll(".prson-card, .prson-qr-card")).forEach((orphan) => orphan.remove());
+  const info = describeCode(url);
+  const domain = context?.domain || info.domain || window.location.host;
+  const mode = context?.mode ?? "inline";
+  const titleId = context?.titleId ?? `prson-login-title-${Math.random().toString(36).slice(2, 10)}`;
+  const getAppUrl = context?.getAppUrl ?? "https://app.prson.net/";
+  const phone = isPhone();
+  const sheet = mode === "modal" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 480px)").matches;
+  const card = el("section", "prson-card");
   card.setAttribute("data-prson-login-ui", "1");
-  const head = document.createElement("div");
-  head.className = "prson-qr-card-head";
-  const title = document.createElement("div");
-  title.className = "prson-qr-card-title";
-  title.textContent = "Scan with your Prson wallet";
-  const subtitle = document.createElement("div");
-  subtitle.className = "prson-qr-card-subtitle";
-  subtitle.textContent = "Open the app and point your camera at this code.";
-  head.append(title, subtitle);
-  const frame = document.createElement("div");
-  frame.className = "prson-qr-frame";
+  card.dataset.theme = theme === "light" || theme === "dark" ? theme : "auto";
+  card.dataset.mode = mode;
+  card.dataset.device = phone ? "phone" : "desktop";
+  card.dataset.state = "waiting";
+  if (sheet) card.dataset.sheet = "1";
+  card.setAttribute("aria-labelledby", titleId);
+  card.classList.add("prson-qr-card");
+  const head = el("div", "prson-head");
+  const brand = el("span", "prson-brand", prsonMarkSvg({ size: 22 }));
+  brand.append(document.createTextNode("Sign in with Prson"));
+  head.append(brand);
+  if (mode === "modal" && context?.cancel) {
+    const close = el("button", "prson-close", ICONS.close);
+    close.type = "button";
+    close.setAttribute("aria-label", "Close");
+    close.addEventListener("click", () => context.cancel?.());
+    head.append(close);
+  }
+  const site = el("div", "prson-site");
+  const mono = el("div", "prson-monogram");
+  mono.textContent = monogram(domain);
+  mono.style.setProperty("--prson-mono-bg", tintFor(domain));
+  mono.setAttribute("aria-hidden", "true");
+  const siteText = el("div", "prson-site-text");
+  const eyebrow = el("p", "prson-eyebrow");
+  eyebrow.textContent = "Sign in to";
+  const title = el("h2", "prson-domain");
+  title.id = titleId;
+  title.textContent = domain;
+  title.setAttribute("aria-label", `Sign in to ${domain}`);
+  siteText.append(eyebrow, title);
+  site.append(mono, siteText);
+  const stage = el("div", "prson-stage");
+  const frame = el("div", "prson-frame");
+  const ring = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  ring.setAttribute("class", "prson-ring");
+  ring.setAttribute("viewBox", "0 0 272 272");
+  ring.setAttribute("aria-hidden", "true");
+  ring.innerHTML = '<rect class="prson-ring-track" x="2" y="2" width="268" height="268" rx="24" pathLength="100"/><rect class="prson-ring-fill" x="2" y="2" width="268" height="268" rx="24" pathLength="100"/>';
+  const ringFill = ring.querySelector(".prson-ring-fill");
+  const code = el("div", "prson-code");
+  code.setAttribute("role", "img");
+  code.setAttribute("aria-label", `Sign-in code for ${domain}. Scan it with the Prson app.`);
   import_qrcode.default.toString(
     url,
-    {
-      type: "svg",
-      errorCorrectionLevel: "M",
-      margin: 1,
-      color: { dark: "#000000", light: "#FFFFFF" }
-    },
+    { type: "svg", errorCorrectionLevel: "H", margin: 0, color: { dark: "#0A0A0A", light: "#FFFFFF" } },
     (err, svgString) => {
       if (err) {
-        frame.textContent = "QR render failed";
+        code.textContent = "The code couldn't be drawn. Use Get a new code.";
         return;
       }
-      frame.innerHTML = svgString;
+      code.innerHTML = svgString.replace("<svg ", '<svg class="prson-qr" aria-hidden="true" focusable="false" ');
+      const logo = el("span", "prson-code-logo", prsonMarkSvg({ size: 36 }));
+      code.append(logo);
     }
   );
-  const countdown = document.createElement("div");
-  countdown.className = "prson-qr-countdown";
-  const countdownLabel = document.createElement("div");
-  countdownLabel.className = "prson-qr-countdown-label";
-  const track = document.createElement("div");
-  track.className = "prson-qr-countdown-track";
-  const fill = document.createElement("div");
-  fill.className = "prson-qr-countdown-fill";
-  track.append(fill);
-  countdown.append(countdownLabel, track);
-  const foot = document.createElement("div");
-  foot.className = "prson-qr-foot";
-  const tapPrefix = document.createTextNode("Or ");
-  const tapLink = document.createElement("a");
-  tapLink.href = url;
-  tapLink.textContent = "tap here";
-  const tapSuffix = document.createTextNode(
-    " if you're on the same device."
-  );
-  foot.append(tapPrefix, tapLink, tapSuffix);
-  card.append(head, frame, countdown, foot);
+  frame.append(ring, code);
+  const open = el("div", "prson-open");
+  const openBtn = el("a", "prson-btn prson-btn--big", prsonMarkSvg({ size: 26, square: "#0A0A0A", glyph: "#FBBF24" }));
+  openBtn.href = url;
+  openBtn.append(document.createTextNode("Open Prson"));
+  const showCode = el("button", "prson-linkish");
+  showCode.type = "button";
+  showCode.textContent = "Scan with another phone instead";
+  showCode.setAttribute("aria-expanded", "false");
+  showCode.addEventListener("click", () => {
+    const on = card.dataset.showCode !== "1";
+    card.dataset.showCode = on ? "1" : "";
+    showCode.setAttribute("aria-expanded", String(on));
+    showCode.textContent = on ? "Hide the code" : "Scan with another phone instead";
+  });
+  open.append(openBtn, showCode);
+  const overlay = el("div", "prson-overlay");
+  const overlayIcon = el("div", "prson-overlay-icon");
+  const overlayTitle = el("p", "prson-overlay-title");
+  const overlayText = el("p", "prson-overlay-text");
+  overlay.append(overlayIcon, overlayTitle, overlayText);
+  (phone ? open : frame).append(overlay);
+  const timer = el("p", "prson-timer");
+  stage.append(frame, open);
+  if (!phone) stage.append(el("p", "prson-hint", "Open <b>Prson</b> on your phone and scan this code."));
+  stage.append(timer);
+  const share = el("div", "prson-share");
+  const shareTitle = el("p", "prson-share-title");
+  shareTitle.textContent = `${domain} will get`;
+  const list = el("ul");
+  list.setAttribute("aria-label", `What ${domain} will get`);
+  for (const item of info.shares) {
+    const li = el("li", "", ICONS[item.icon]);
+    const text = el("span");
+    text.textContent = item.label;
+    if (item.detail) {
+      const small = el("small");
+      small.textContent = item.detail;
+      text.append(small);
+    }
+    li.append(text);
+    list.append(li);
+  }
+  share.append(shareTitle, list);
+  if (info.anonymousAllowed) {
+    const note = el("p", "prson-share-note");
+    note.textContent = "You can also choose to sign in anonymously in the app.";
+    share.append(note);
+  }
+  const guard = el("p", "prson-guard", ICONS.lock);
+  const guardText = el("span");
+  guardText.append(document.createTextNode("Only scan codes shown on "));
+  const guardDomain = el("b");
+  guardDomain.textContent = domain;
+  guardText.append(guardDomain, document.createTextNode(". Never scan one someone sent you."));
+  guard.append(guardText);
+  const foot = el("p", "prson-foot");
+  foot.append(document.createTextNode("Don't have Prson? "));
+  const get = el("a");
+  get.href = getAppUrl;
+  get.target = "_blank";
+  get.rel = "noopener";
+  get.textContent = "Get the app";
+  foot.append(get);
+  const live = el("div", "prson-sr");
+  live.setAttribute("aria-live", "polite");
+  live.setAttribute("role", "status");
+  card.append(head, site, stage, share, guard, foot, live);
   mount.append(card);
-  const serverTs = extractServerTs(url);
-  const deadlineMs = serverTs ? serverTs * 1e3 + DRAFT_TTL_SECONDS * 1e3 : Date.now() + DRAFT_TTL_SECONDS * 1e3;
+  const announce = (text) => {
+    live.textContent = "";
+    setTimeout(() => live.textContent = text, 50);
+  };
+  announce(phone ? `Sign in to ${domain}. Open Prson to continue.` : `Sign in to ${domain}. Scan the code with the Prson app.`);
+  const nowS = Date.now() / 1e3;
+  const startS = info.serverTs && Math.abs(nowS - info.serverTs) < 60 ? info.serverTs : nowS;
+  const deadlineMs = (startS + DRAFT_TTL_SECONDS) * 1e3;
   let tickHandle = null;
   let expired = false;
+  let warned = false;
+  let settled = false;
+  const timers = [];
+  function action(label, icon, onClick) {
+    const b = el("button", "prson-btn", icon);
+    b.type = "button";
+    b.append(document.createTextNode(label));
+    b.addEventListener("click", onClick);
+    return b;
+  }
+  function requestRefresh() {
+    card.dispatchEvent(new CustomEvent("prson-login-refresh-requested", { bubbles: true }));
+    context?.refresh?.();
+  }
+  function setOverlay(icon, titleText, text, button, pulse = false) {
+    overlayIcon.innerHTML = icon;
+    overlayIcon.classList.toggle("prson-pulse", pulse);
+    overlayTitle.textContent = titleText;
+    overlayText.textContent = text;
+    overlay.querySelector(".prson-btn")?.remove();
+    if (button) {
+      overlay.append(button);
+      if (mount.contains(document.activeElement) || mode === "modal") setTimeout(() => button.focus(), 30);
+    }
+  }
   function tick() {
+    if (settled) return;
     const remainingMs = deadlineMs - Date.now();
     const remaining = Math.max(0, Math.ceil(remainingMs / 1e3));
-    countdownLabel.textContent = remaining > 0 ? "Expires in " + fmtSeconds(remaining) : "QR code expired";
-    const ratio = Math.max(
-      0,
-      Math.min(1, remainingMs / (DRAFT_TTL_SECONDS * 1e3))
-    );
-    fill.style.transform = "scaleX(" + ratio + ")";
-    if (remaining <= 0 && !expired) {
+    const ratio = Math.max(0, Math.min(1, remainingMs / (DRAFT_TTL_SECONDS * 1e3)));
+    ringFill.style.strokeDashoffset = String(100 - ratio * 100);
+    if (remaining > 0) {
+      timer.innerHTML = `Code expires in <b>${fmtSeconds(remaining)}</b>`;
+      card.dataset.urgency = remaining <= COUNTDOWN_WARN_SECONDS ? "warn" : "";
+      if (remaining <= COUNTDOWN_WARN_SECONDS && !warned) {
+        warned = true;
+        announce("30 seconds left on this code.");
+      }
+    } else if (!expired && card.dataset.state === "waiting") {
       expired = true;
-      countdown.dataset.state = "expired";
-      card.dataset.expired = "1";
-      foot.replaceChildren();
-      const note = document.createElement("div");
-      note.textContent = "This code is no longer valid.";
-      const refresh = document.createElement("button");
-      refresh.className = "prson-qr-refresh";
-      refresh.type = "button";
-      refresh.textContent = "Generate a new code";
-      refresh.addEventListener("click", () => {
-        const evt = new CustomEvent("prson-login-refresh-requested", {
-          bubbles: true
-        });
-        card.dispatchEvent(evt);
-      });
-      foot.append(note, refresh);
-    } else if (remaining <= COUNTDOWN_WARN_SECONDS && remaining > 0) {
-      countdown.dataset.state = "warn";
-    } else if (remaining > COUNTDOWN_WARN_SECONDS) {
-      countdown.dataset.state = "";
+      card.dataset.state = "expired";
+      timer.textContent = "";
+      setOverlay(ICONS.clock, "This code expired", "Codes last 3 minutes, so a copied one is useless.", action("Get a new code", ICONS.refresh, requestRefresh));
+      announce("The code expired. Get a new code to continue.");
     }
   }
   tick();
   tickHandle = window.setInterval(tick, 1e3);
   return {
     dispose() {
-      if (tickHandle != null) {
-        window.clearInterval(tickHandle);
-        tickHandle = null;
-      }
+      if (tickHandle != null) window.clearInterval(tickHandle);
+      tickHandle = null;
+      timers.forEach((t) => window.clearTimeout(t));
       card.remove();
+    },
+    update(s) {
+      if (!card.isConnected) return;
+      card.dataset.state = s.state;
+      switch (s.state) {
+        case "waiting":
+          return;
+        case "scanned":
+          setOverlay(ICONS.device, "Phone connected", "Finishing on your phone\u2026", void 0, true);
+          announce("Phone connected. Finishing on your phone.");
+          return;
+        case "approving":
+          setOverlay(SPINNER, "Receiving your proof", "Your phone is sending a signed, encrypted proof.");
+          return;
+        case "verifying":
+          setOverlay(SPINNER, "Checking the proof", "Almost there.");
+          announce("Checking the proof.");
+          return;
+        case "success": {
+          settled = true;
+          setOverlay(CHECK, "Signed in", `You're signed in to ${s.domain || domain}.`);
+          announce(`You're signed in to ${s.domain || domain}.`);
+          const hold = prefersReducedMotion() ? 450 : 1e3;
+          return new Promise((resolve) => timers.push(window.setTimeout(resolve, hold)));
+        }
+        case "error":
+          settled = true;
+          timer.textContent = "";
+          setOverlay(ICONS.alert, "Sign-in didn't finish", s.message, action("Try again", ICONS.refresh, requestRefresh));
+          announce(`Sign-in didn't finish. ${s.message}`);
+          return;
+      }
     }
   };
 }
 
 // src/styles.ts
+var DARK_VARS = `
+    --prson-bg: #18181B;
+    --prson-fg: #FAFAFA;
+    --prson-muted: #A1A1AA;
+    --prson-soft: #232327;
+    --prson-line: rgba(255, 255, 255, 0.10);
+    --prson-line-strong: rgba(255, 255, 255, 0.20);
+    --prson-accent-text: #FBBF24;
+    --prson-focus: #FBBF24;
+    --prson-danger: #FCA5A5;
+    --prson-danger-soft: rgba(248, 113, 113, 0.14);
+    --prson-ring-track: rgba(255, 255, 255, 0.12);
+    --prson-shadow: 0 24px 64px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);`;
 var PRSON_LOGIN_UI_CSS = `
 [data-prson-login-ui] {
-  --prson-ui-bg: #fafafa;
-  --prson-ui-fg: #111;
-  --prson-ui-muted: #6b7280;
-  --prson-ui-card: #ffffff;
-  --prson-ui-border: rgba(0, 0, 0, 0.08);
-  --prson-ui-shadow: 0 8px 24px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.05);
-  --prson-ui-accent: #111;
-  --prson-ui-radius: 16px;
+  --prson-bg: #FFFFFF;
+  --prson-fg: #0A0A0A;
+  --prson-muted: #52525B;
+  --prson-soft: #FAFAF9;
+  --prson-line: rgba(10, 10, 10, 0.08);
+  --prson-line-strong: rgba(10, 10, 10, 0.16);
+  --prson-amber: #FBBF24;
+  --prson-amber-hover: #F59E0B;
+  --prson-accent-text: #B45309;
+  --prson-focus: #0A0A0A;
+  --prson-danger: #B91C1C;
+  --prson-danger-soft: #FEF2F2;
+  --prson-ring-track: rgba(10, 10, 10, 0.08);
+  --prson-shadow: 0 24px 64px rgba(10, 10, 10, 0.18), 0 2px 6px rgba(10, 10, 10, 0.06);
+  --prson-radius: 24px;
+  --prson-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  --prson-spring: cubic-bezier(0.16, 1, 0.3, 1);
+}
+[data-prson-login-ui][data-theme="dark"] {${DARK_VARS}
 }
 @media (prefers-color-scheme: dark) {
-  [data-prson-login-ui] {
-    --prson-ui-bg: #0b0b0c;
-    --prson-ui-fg: #f5f5f7;
-    --prson-ui-muted: #9ca3af;
-    --prson-ui-card: #18181b;
-    --prson-ui-border: rgba(255, 255, 255, 0.08);
-    --prson-ui-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
-    --prson-ui-accent: #f5f5f7;
+  [data-prson-login-ui][data-theme="auto"] {${DARK_VARS}
   }
 }
 
-.prson-qr-card {
-  background: var(--prson-ui-card);
-  border: 1px solid var(--prson-ui-border);
-  border-radius: var(--prson-ui-radius);
-  box-shadow: var(--prson-ui-shadow);
-  padding: 24px;
-  margin-top: 28px;
-  width: 320px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 16px;
-  color: var(--prson-ui-fg);
-  font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
-  animation: prson-fade-up 220ms ease-out;
-}
-@keyframes prson-fade-up {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: none; }
-}
-.prson-qr-card-head {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  text-align: center;
-}
-.prson-qr-card-title {
-  font-weight: 600;
-  font-size: 15px;
-  letter-spacing: -0.2px;
-}
-.prson-qr-card-subtitle {
-  font-size: 12.5px;
-  color: var(--prson-ui-muted);
-  line-height: 1.45;
-}
-.prson-qr-frame {
+/* \u2500\u2500 The card \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+.prson-card {
+  box-sizing: border-box;
   position: relative;
-  padding: 14px;
-  border-radius: 12px;
-  background: #ffffff; /* always-white for camera contrast */
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.04);
-  transition: opacity 0.2s ease;
+  width: 400px;
+  max-width: 100%;
+  padding: 20px 24px 20px;
+  background: var(--prson-bg);
+  color: var(--prson-fg);
+  border: 1px solid var(--prson-line);
+  border-radius: var(--prson-radius);
+  box-shadow: var(--prson-shadow);
+  font-family: var(--prson-font);
+  font-size: 14px;
+  line-height: 1.45;
+  text-align: left;
+  -webkit-font-smoothing: antialiased;
+  animation: prson-enter 320ms var(--prson-spring);
 }
-.prson-qr-frame svg {
-  display: block;
-  width: 240px;
-  height: 240px;
+.prson-card *, .prson-card *::before, .prson-card *::after { box-sizing: border-box; }
+.prson-card[data-mode="inline"] { margin-top: 24px; box-shadow: 0 8px 24px rgba(10, 10, 10, 0.06), 0 1px 3px rgba(10, 10, 10, 0.05); }
+.prson-card[data-sheet="1"] {
+  width: 100%;
+  border-radius: var(--prson-radius) var(--prson-radius) 0 0;
+  border-bottom: 0;
+  padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  animation-name: prson-sheet;
 }
-.prson-qr-foot {
-  font-size: 11.5px;
-  color: var(--prson-ui-muted);
-  line-height: 1.4;
-  text-align: center;
-  max-width: 260px;
+@keyframes prson-enter { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes prson-sheet { from { transform: translateY(100%); } to { transform: none; } }
+
+.prson-card button, .prson-card a { font-family: inherit; }
+.prson-card :focus-visible { outline: 3px solid var(--prson-focus); outline-offset: 2px; border-radius: 10px; }
+
+.prson-head { display: flex; align-items: center; gap: 8px; min-height: 44px; margin: -4px -8px 4px 0; }
+.prson-brand { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--prson-muted); letter-spacing: -0.1px; }
+.prson-brand .prson-mark { display: block; }
+.prson-close {
+  margin-left: auto; width: 44px; height: 44px; display: inline-grid; place-items: center;
+  border: 0; border-radius: 12px; background: transparent; color: var(--prson-muted); cursor: pointer;
 }
-.prson-qr-foot a {
-  color: var(--prson-ui-fg);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+.prson-close:hover { background: var(--prson-soft); color: var(--prson-fg); }
+.prson-close svg { width: 20px; height: 20px; }
+
+.prson-site { display: flex; align-items: center; gap: 14px; margin: 4px 0 18px; min-width: 0; }
+.prson-monogram {
+  flex: none; width: 48px; height: 48px; border-radius: 14px; display: grid; place-items: center;
+  font-size: 22px; font-weight: 700; letter-spacing: -0.5px; color: #0A0A0A;
+  background: var(--prson-mono-bg, #FEF3C7);
+  box-shadow: inset 0 0 0 1px rgba(10, 10, 10, 0.06);
+}
+.prson-site-text { min-width: 0; }
+.prson-eyebrow { margin: 0; font-size: 13px; color: var(--prson-muted); }
+.prson-domain {
+  margin: 0; font-size: 24px; line-height: 1.15; font-weight: 700; letter-spacing: -0.6px;
+  color: var(--prson-fg); overflow-wrap: anywhere;
 }
 
-.prson-qr-countdown {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
+/* \u2500\u2500 The code, its frame and the countdown ring \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+.prson-stage { position: relative; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.prson-frame { position: relative; width: 272px; height: 272px; max-width: 100%; aspect-ratio: 1; }
+.prson-ring { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.prson-ring rect { fill: none; stroke-width: 4; }
+.prson-ring .prson-ring-track { stroke: var(--prson-ring-track); }
+.prson-ring .prson-ring-fill {
+  stroke: var(--prson-amber); stroke-linecap: round;
+  stroke-dasharray: 100 100; transition: stroke-dashoffset 1s linear, stroke 300ms ease;
 }
-.prson-qr-countdown-label {
-  font-size: 11.5px;
-  color: var(--prson-ui-muted);
-  letter-spacing: 0.2px;
-  font-variant-numeric: tabular-nums;
+.prson-card[data-urgency="warn"] .prson-ring-fill { stroke: #D97706; }
+.prson-code {
+  position: absolute; inset: 10px; border-radius: 18px; background: #FFFFFF; /* always white: cameras need contrast */
+  display: grid; place-items: center; padding: 12px;
+  box-shadow: inset 0 0 0 1px rgba(10, 10, 10, 0.06);
+  transition: filter 300ms ease, opacity 300ms ease;
 }
-.prson-qr-countdown-track {
-  width: 100%;
-  height: 3px;
-  background: var(--prson-ui-border);
-  border-radius: 2px;
-  overflow: hidden;
+.prson-code svg.prson-qr { display: block; width: 100%; height: 100%; }
+.prson-code-logo {
+  position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px;
+  border-radius: 12px; background: #FFFFFF; display: grid; place-items: center;
 }
-.prson-qr-countdown-fill {
-  height: 100%;
-  background: var(--prson-ui-accent);
-  width: 100%;
-  transform-origin: left center;
-  transition: transform 1s linear, background-color 0.3s ease;
-}
-.prson-qr-countdown[data-state="warn"] .prson-qr-countdown-fill { background: #e07b00; }
-.prson-qr-countdown[data-state="warn"] .prson-qr-countdown-label { color: #e07b00; }
-.prson-qr-countdown[data-state="expired"] .prson-qr-countdown-fill { background: #b02a2a; }
-.prson-qr-countdown[data-state="expired"] .prson-qr-countdown-label { color: #b02a2a; }
+.prson-code-logo .prson-mark { width: 36px; height: 36px; }
+.prson-card[data-state]:not([data-state="waiting"]) .prson-code { filter: blur(3px); opacity: 0.25; }
+.prson-card[data-state="waiting"] .prson-code { filter: none; opacity: 1; }
 
-.prson-qr-card[data-expired="1"] .prson-qr-frame {
-  opacity: 0.35;
-  filter: grayscale(1);
+.prson-overlay {
+  position: absolute; inset: 10px; border-radius: 18px; display: none;
+  flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 18px; text-align: center;
+  background: var(--prson-bg);
+  background: color-mix(in srgb, var(--prson-bg) 82%, transparent);
+  animation: prson-fade 220ms ease;
 }
-.prson-qr-refresh {
-  font-size: 13px;
-  font-weight: 500;
-  padding: 8px 16px;
-  border-radius: 8px;
-  border: 1px solid var(--prson-ui-border);
-  background: var(--prson-ui-card);
-  color: var(--prson-ui-fg);
-  cursor: pointer;
-  margin-top: 2px;
-  font-family: inherit;
+.prson-card:not([data-state="waiting"]) .prson-overlay { display: flex; }
+@keyframes prson-fade { from { opacity: 0; } to { opacity: 1; } }
+.prson-overlay-icon { width: 56px; height: 56px; display: grid; place-items: center; border-radius: 50%; margin-bottom: 6px; background: var(--prson-soft); color: var(--prson-fg); }
+.prson-overlay-icon svg { width: 28px; height: 28px; }
+.prson-overlay-title { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.3px; color: var(--prson-fg); }
+.prson-overlay-text { margin: 0; font-size: 13.5px; color: var(--prson-muted); max-width: 230px; }
+.prson-overlay .prson-btn { margin-top: 10px; }
+.prson-card[data-state="error"] .prson-overlay-icon { background: var(--prson-danger-soft); color: var(--prson-danger); }
+
+.prson-spinner { width: 28px; height: 28px; animation: prson-spin 900ms linear infinite; }
+@keyframes prson-spin { to { transform: rotate(360deg); } }
+.prson-pulse { animation: prson-pulse 1.6s ease-in-out infinite; }
+@keyframes prson-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.45); } 50% { box-shadow: 0 0 0 10px rgba(251, 191, 36, 0); } }
+
+/* Success: an amber disc pops in and the check draws itself. */
+.prson-card[data-state="success"] .prson-overlay-icon { background: var(--prson-amber); color: #0A0A0A; width: 72px; height: 72px; animation: prson-pop 420ms var(--prson-spring); }
+.prson-card[data-state="success"] .prson-overlay-icon svg { width: 36px; height: 36px; }
+.prson-check path { stroke-dasharray: 24; stroke-dashoffset: 24; animation: prson-draw 380ms 160ms ease-out forwards; }
+@keyframes prson-pop { 0% { transform: scale(0.4); opacity: 0; } 60% { transform: scale(1.08); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes prson-draw { to { stroke-dashoffset: 0; } }
+.prson-card[data-state="success"] .prson-ring-fill { stroke: var(--prson-amber); stroke-dashoffset: 0 !important; }
+
+.prson-timer { margin: 0; min-height: 20px; font-size: 13px; color: var(--prson-muted); font-variant-numeric: tabular-nums; }
+.prson-timer b { color: var(--prson-fg); font-weight: 600; }
+.prson-card[data-urgency="warn"] .prson-timer b { color: var(--prson-accent-text); }
+.prson-card[data-state="success"] .prson-timer, .prson-card[data-state="error"] .prson-timer { visibility: hidden; }
+.prson-hint { margin: 0; font-size: 13px; color: var(--prson-muted); text-align: center; }
+.prson-card:not([data-state="waiting"]) .prson-hint { visibility: hidden; }
+.prson-hint b { color: var(--prson-fg); font-weight: 600; }
+
+/* \u2500\u2500 Phones: one big "Open Prson" button \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+.prson-open { position: relative; display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 10px; width: 100%; }
+.prson-card[data-device="phone"] .prson-frame { display: none; }
+.prson-card[data-device="phone"][data-show-code="1"] .prson-frame { display: block; }
+.prson-card[data-device="desktop"] .prson-open { display: none; }
+.prson-card[data-device="phone"] .prson-overlay { inset: 0; }
+.prson-card[data-device="phone"]:not([data-state="waiting"]) .prson-open { min-height: 236px; }
+.prson-card[data-device="phone"]:not([data-state="waiting"]) .prson-open > :not(.prson-overlay) { visibility: hidden; }
+.prson-linkish {
+  min-height: 44px; border: 0; background: transparent; color: var(--prson-fg); cursor: pointer;
+  font-size: 14px; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; padding: 0 8px;
 }
-.prson-qr-refresh:hover { background: var(--prson-ui-bg); }
+
+/* \u2500\u2500 Buttons inside the card \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+.prson-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  min-height: 48px; padding: 0 20px; border-radius: 14px; border: 0; cursor: pointer;
+  font-size: 15px; font-weight: 600; letter-spacing: -0.1px; text-decoration: none;
+  background: var(--prson-amber); color: #0A0A0A;
+  transition: background-color 150ms ease, transform 80ms ease;
+}
+.prson-btn:hover { background: var(--prson-amber-hover); }
+.prson-btn:active { transform: translateY(1px); }
+.prson-btn--big { min-height: 56px; font-size: 16px; border-radius: 16px; }
+.prson-btn .prson-mark { flex: none; }
+.prson-btn { white-space: nowrap; }
+.prson-btn svg:not(.prson-mark) { flex: none; width: 20px; height: 20px; }
+
+/* \u2500\u2500 What the site gets \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+.prson-share { margin: 18px 0 0; padding: 14px 16px; border-radius: 16px; background: var(--prson-soft); border: 1px solid var(--prson-line); }
+.prson-share-title { margin: 0 0 8px; font-size: 12.5px; font-weight: 600; color: var(--prson-muted); letter-spacing: 0.1px; }
+.prson-share ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.prson-share li { display: flex; align-items: flex-start; gap: 10px; font-size: 14px; color: var(--prson-fg); }
+.prson-share li svg { flex: none; width: 18px; height: 18px; margin-top: 1px; color: var(--prson-fg); opacity: 0.8; }
+.prson-share li small { display: block; font-size: 12.5px; color: var(--prson-muted); }
+.prson-share-note { margin: 10px 0 0; font-size: 12.5px; color: var(--prson-muted); }
+
+/* \u2500\u2500 Anti-relay cue and footer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+.prson-guard { display: flex; gap: 8px; align-items: flex-start; margin: 14px 2px 0; font-size: 12.5px; color: var(--prson-muted); }
+.prson-guard svg { flex: none; width: 16px; height: 16px; margin-top: 1px; }
+.prson-guard b { color: var(--prson-fg); font-weight: 600; overflow-wrap: anywhere; }
+.prson-foot { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--prson-line); font-size: 13px; color: var(--prson-muted); text-align: center; }
+.prson-foot a { color: var(--prson-fg); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; display: inline-block; padding: 12px 4px; margin: -12px 0; }
+
+.prson-sr { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+@media (max-width: 380px) {
+  .prson-card { padding: 16px 16px 18px; }
+  .prson-frame { width: 248px; height: 248px; }
+  .prson-domain { font-size: 21px; }
+}
+
+/* \u2500\u2500 "Sign in with Prson" button (host page) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+.prson-signin-btn {
+  box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  min-height: 44px; padding: 0 18px 0 12px; border-radius: 12px; cursor: pointer;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  font-size: 15px; font-weight: 600; line-height: 1; letter-spacing: -0.1px; white-space: nowrap;
+  border: 1px solid transparent; text-decoration: none; -webkit-font-smoothing: antialiased;
+  transition: background-color 150ms ease, border-color 150ms ease, transform 80ms ease;
+}
+.prson-signin-btn .prson-mark { flex: none; display: block; }
+.prson-signin-btn:focus-visible { outline: 3px solid #0A0A0A; outline-offset: 2px; }
+.prson-signin-btn:active:not(:disabled) { transform: translateY(1px); }
+.prson-signin-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.prson-signin-btn--lg { min-height: 52px; padding: 0 22px 0 14px; font-size: 16px; border-radius: 14px; }
+.prson-signin-btn--block { display: flex; width: 100%; }
+.prson-signin-btn--amber { background: #FBBF24; color: #0A0A0A; }
+.prson-signin-btn--amber:hover:not(:disabled) { background: #F59E0B; }
+.prson-signin-btn--dark { background: #0A0A0A; color: #FFFFFF; }
+.prson-signin-btn--dark:hover:not(:disabled) { background: #27272A; }
+.prson-signin-btn--dark:focus-visible { outline-color: #D97706; }
+.prson-signin-btn--light { background: #FFFFFF; color: #0A0A0A; border-color: rgba(10, 10, 10, 0.16); }
+.prson-signin-btn--light:hover:not(:disabled) { background: #FAFAF9; border-color: rgba(10, 10, 10, 0.28); }
+.prson-signin-btn--light:focus-visible { outline-color: #FBBF24; }
+.prson-signin-btn--outline { background: transparent; color: inherit; border: 1.5px solid currentColor; }
+.prson-signin-btn--outline:hover:not(:disabled) { background: rgba(127, 127, 127, 0.10); }
+.prson-signin-btn--outline:focus-visible { outline-color: currentColor; }
+.prson-signin-btn--busy { cursor: progress; }
+.prson-signin-btn--busy .prson-mark { animation: prson-busy 1s ease-in-out infinite; }
+@keyframes prson-busy { 50% { opacity: 0.35; } }
+prson-signin-button { display: inline-block; }
+
+@media (prefers-reduced-motion: reduce) {
+  .prson-card, .prson-card *, .prson-signin-btn, .prson-signin-btn * {
+    animation: none !important;
+    transition: none !important;
+  }
+  .prson-check path { stroke-dashoffset: 0; }
+  .prson-signin-btn:active:not(:disabled), .prson-btn:active { transform: none; }
+}
 `;
 function injectStylesOnce() {
   if (typeof document === "undefined") return;
   if (document.querySelector("style[data-prson-login-ui]")) return;
-  const el = document.createElement("style");
-  el.setAttribute("data-prson-login-ui", "1");
-  el.textContent = PRSON_LOGIN_UI_CSS;
-  document.head.append(el);
+  const el2 = document.createElement("style");
+  el2.setAttribute("data-prson-login-ui", "1");
+  el2.textContent = PRSON_LOGIN_UI_CSS;
+  document.head.append(el2);
 }
 
 // src/index.ts
 if (typeof window !== "undefined") {
   injectStylesOnce();
   window.__prsonLoginQrRenderer = renderQrCard;
+  defineSignInButtonElement();
 }
 export {
   PRSON_LOGIN_UI_CSS,
+  createSignInButton,
+  defineSignInButtonElement,
+  describeCode,
+  describeShares,
   injectStylesOnce,
+  monogram,
+  prsonMarkSvg,
   renderQrCard
 };
 //# sourceMappingURL=prson-login-ui.js.map

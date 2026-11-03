@@ -52,14 +52,31 @@
  *     });
  */
 
-import { renderQrCard, type LoginQrHandle, type Theme } from "./qr-renderer.js";
+import {
+  renderQrCard,
+  type LoginQrContext,
+  type LoginQrHandle,
+  type LoginUiState,
+  type Theme,
+} from "./qr-renderer.js";
 import { injectStylesOnce } from "./styles.js";
+import { defineSignInButtonElement } from "./button.js";
 
 // Re-export the manual entry-points so callers who want to opt out
 // of the auto-registration can still use the renderer themselves.
 export { renderQrCard };
-export type { LoginQrHandle, Theme };
+export type { LoginQrContext, LoginQrHandle, LoginUiState, Theme };
 export { PRSON_LOGIN_UI_CSS, injectStylesOnce } from "./styles.js";
+// The "Sign in with Prson" button (see button.ts and ../../README.md).
+export {
+  createSignInButton,
+  defineSignInButtonElement,
+  prsonMarkSvg,
+  type SignInButtonOptions,
+  type SignInButtonSize,
+  type SignInButtonVariant,
+} from "./button.js";
+export { describeCode, describeShares, monogram, type CodeDescription, type ShareItem } from "./describe.js";
 
 // ─── Side-effect registration ───────────────────────────────────────
 //
@@ -79,7 +96,10 @@ if (typeof window !== "undefined") {
         url: string,
         mount: HTMLElement,
         theme: Theme,
+        context?: LoginQrContext,
       ) => LoginQrHandle;
     }
   ).__prsonLoginQrRenderer = renderQrCard;
+  // <prson-signin-button>
+  defineSignInButtonElement();
 }

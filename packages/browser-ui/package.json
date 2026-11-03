@@ -15,7 +15,8 @@
     "build": "tsc && esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=dist/index.js --sourcemap",
     "build:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login-ui.js --sourcemap",
     "watch:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login-ui.js --sourcemap --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test dist/describe.test.js"
   },
   "dependencies": {
     "qrcode": "^1.5.4"

@@ -24,7 +24,13 @@ import { createDraft } from "./api.js";
 import { generateEphemeralKeypair, decryptEnvelope } from "./crypto.js";
 import { connectSignaling } from "./signaling.js";
 import { establishTransport } from "./transport.js";
-import { renderLoginQr, createModalQrMount } from "./qr.js";
+import {
+  renderLoginQr,
+  createModalQrMount,
+  type LoginQrContext,
+  type LoginQrHandle,
+} from "./qr.js";
+import type { DraftResult } from "./api.js";
 import { verifyPresentation } from "./verify.js";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -42,8 +48,14 @@ export type SignInOptions = {
    * and delete it, so a captured presentation can't be replayed to your
    * backend. Omitted: the SDK makes one in the browser, which only protects
    * the in-browser check — not enough for a backend that trusts the result.
+   *
+   * May also be a function returning one (sync or async). The SDK then
+   * calls it once per code it shows, so a refreshed code (after expiry or
+   * an error) gets a fresh backend nonce without your page calling
+   * `signIn()` again. `SignInResult.nonce` says which one the presentation
+   * is bound to.
    */
-  nonce?: string;
+  nonce?: string | (() => string | Promise<string>);
 
   /**
    * Which Prson backend environment to sign in against. `"dev"` points
@@ -167,8 +179,15 @@ export type SignInOptions = {
 
   ttlMinutes?: number;
   ui?: {
+    /**
+     * Render the code inline in this element instead of the SDK's own
+     * dialog. The dialog is the default and the recommended experience.
+     */
     mountQrInto?: string | HTMLElement;
+    /** `"auto"` (default) follows `prefers-color-scheme`. The code itself is always dark on white. */
     theme?: "light" | "dark" | "auto";
+    /** Where "Don't have Prson? Get it" points. Default https://app.prson.net/. */
+    getAppUrl?: string;
   };
   defer?: boolean;
 
@@ -331,23 +350,39 @@ interface InflightSignIn {
    * Run the registered teardowns in LIFO order and mark
    * `aborted = true`. Resolves after every teardown has settled.
    */
-  abort(): Promise<void>;
+  abort(message?: string): Promise<void>;
   /** Push a teardown thunk; runs once on `abort()` or normal exit. */
   pushTeardown(t: () => void | Promise<void>): void;
+  /**
+   * Rejects with `LoginAbortedError` the moment `abort()` is called. The
+   * flow races its waits against it, so a closed dialog or a newer
+   * `signIn()` settles this one at once instead of leaving it waiting
+   * for a wallet that will never come.
+   */
+  whenAborted: Promise<never>;
 }
 
 let _inflight: InflightSignIn | null = null;
 
 function makeInflight(): InflightSignIn {
   const teardowns: Array<() => void | Promise<void>> = [];
+  let rejectAborted: (e: Error) => void = () => {};
+  const whenAborted = new Promise<never>((_, reject) => {
+    rejectAborted = reject;
+  });
+  whenAborted.catch(() => {
+    /* only an error for whoever races it */
+  });
   const self: InflightSignIn = {
     aborted: false,
+    whenAborted,
     pushTeardown(t) {
       teardowns.push(t);
     },
-    async abort() {
+    async abort(message?: string) {
       if (self.aborted) return;
       self.aborted = true;
+      rejectAborted(new LoginAbortedError(message));
       // LIFO so we close the most-recently-acquired resource first
       // — typically the transport / RTCPeerConnection — and unwind
       // backwards through signaling, QR, draft state.
@@ -373,6 +408,12 @@ export class PrsonLogin {
    * Drive a full sign-in. The promise resolves once the wallet has
    * delivered a verified SD-JWT-VC; the returned session lives until
    * one of the four `ExpiryReason` triggers.
+   *
+   * Without `ui.mountQrInto` the SDK shows its own dialog and handles
+   * everything in it: an expired code or a failure offers a fresh code
+   * (a new draft, and a new nonce when `nonce` is a function) while this
+   * promise keeps waiting; closing the dialog rejects with
+   * `LoginAbortedError` (or with the error on screen, if one was shown).
    */
   static async signIn(opts: SignInOptions = {}): Promise<SignInResult> {
     // ─── concurrency guard ──────────────────────────────────────
@@ -386,289 +427,86 @@ export class PrsonLogin {
     const me = makeInflight();
     _inflight = me;
 
-    /** Throw `LoginAbortedError` if a newer signIn() has displaced us. */
-    const checkAborted = () => {
-      if (me.aborted) throw new LoginAbortedError();
-    };
-
     try {
-    const domain = opts.domain ?? window.location.origin.replace(/^https?:\/\//, "");
-    const ttlMaxMinutes = Math.min(
-      Math.max(opts.ttlMinutes ?? DEFAULT_TTL_MINUTES, 1),
-      MAX_TTL_MINUTES,
-    );
+      const domain = opts.domain ?? window.location.origin.replace(/^https?:\/\//, "");
+      const theme = opts.ui?.theme ?? "auto";
+      const titleId = `prson-login-title-${b64u(crypto.getRandomValues(new Uint8Array(6)))}`;
+      const explicitMount = resolveMount(opts.ui?.mountQrInto);
 
-    // 1. Generate the ephemeral X25519 keypair the wallet will encrypt
-    //    its envelope to. Stays in memory only — never written to
-    //    storage, never crosses any network boundary.
-    const ephKeys = await generateEphemeralKeypair();
-    checkAborted();
+      // No mount supplied → the SDK's own dialog, opened when the first
+      // code is ready (no empty scrim while the draft is made). Esc /
+      // click-outside / its close button abort the in-flight signIn so
+      // `await signIn(...)` rejects with `LoginAbortedError`. Zero-config
+      // for the partner.
+      const dialog: { current: { mount: HTMLElement; dispose: () => void } | null } = { current: null };
+      const getMount = (): HTMLElement => {
+        if (explicitMount) return explicitMount;
+        if (!dialog.current) {
+          const m = createModalQrMount({ titleId, onDismiss: () => void me.abort("sign-in closed") });
+          dialog.current = m;
+          me.pushTeardown(() => m.dispose());
+        }
+        return dialog.current.mount;
+      };
 
-    // 2. Build the verifier request blob. The reqId is content-bound
-    //    so the wallet sees the same canonical bytes the Worker stored
-    //    (anti-tamper, see SECURITY.md §3).
-    if (opts.nonce !== undefined && !/^[A-Za-z0-9_-]{22,128}$/.test(opts.nonce)) {
-      throw new Error("nonce must be 22-128 base64url characters (at least 16 random bytes)");
-    }
-    const nonce = opts.nonce ?? b64u(crypto.getRandomValues(new Uint8Array(32)));
-    const request = {
-      domain,
-      nonce,
-      browserPk: ephKeys.publicKeyB64u,
-      required: opts.required ?? {},
-      // Carried into the wallet's drawer so an "Anonymous" option is
-      // offered. The SDK side enforces acceptance below at verify time;
-      // the wallet enforces drawer UX based on this flag.
-      allowAnonymous: opts.allowAnonymous === true,
-      // Sponsorship offer (advisory on the wire — the server enforces
-      // the stored grant's domain/caps/budget at charge time).
-      ...(opts.sponsorship?.grantId ? { sponsorship: { grantId: opts.sponsorship.grantId } } : {}),
-      // If set, instructs the wallet to mint a fresh random Ed25519
-      // keypair for this single sign-in (no deterministic per-domain
-      // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
-      ephemeralIdentity: opts.ephemeralIdentity === true,
-      // QR-mode remote navigation — wallet surfaces Prev / Next /
-      // Submit / Logout / Mouse on a persistent banner. See
-      // SignInOptions.remoteNavigation + bind.ts:enableRemoteNavigation.
-      remoteNavigation: opts.remoteNavigation === true,
-      // Pre-grant mouse control — wallet enables the Touchpad /
-      // Magic wand buttons on the banner drawer from session start.
-      // See SignInOptions.mouseControl + bindMouse's ambient
-      // subscriber path.
-      mouseControl: opts.mouseControl === true,
-      // App-to-app return leg — validated here (fail fast at the
-      // integrator's desk) AND in the wallet (the enforcing side).
-      ...(opts.returnUrl ? { returnUrl: validateReturnUrl(opts.returnUrl, domain) } : {}),
-      ttlMaxMinutes,
-    };
+      // One attempt per code shown; a refresh (expiry, "Try again")
+      // starts the next.
+      for (;;) {
+        const attempt = makeInflight();
+        me.pushTeardown(() => attempt.abort());
+        let requestRestart: () => void = () => {};
+        const restart = new Promise<"restart">((resolve) => {
+          requestRestart = () => resolve("restart");
+        });
+        const context: LoginQrContext = {
+          mode: explicitMount ? "inline" : "modal",
+          domain,
+          titleId,
+          getAppUrl: opts.ui?.getAppUrl ?? GET_APP_URL,
+          // A no-op once this sign-in is over or the host re-called
+          // signIn() from the `prson-login-refresh-requested` event.
+          refresh: () => {
+            if (!me.aborted && !attempt.aborted && _inflight === me) requestRestart();
+          },
+          cancel: () => void me.abort("sign-in closed"),
+        };
+        const ui: AttemptUi = { handle: null };
+        const run = runAttempt(opts, { domain, getMount, theme, context, attempt, me, ui });
+        run.catch(() => {
+          /* raced below; an abandoned attempt may fail later, quietly */
+        });
 
-    // 3. Register the draft directly with the Cloudflare Worker.
-    //    Anonymous + IP rate-limited. NO TURN allocation, NO Firebase
-    //    in the path — the Worker is the single API surface and waits
-    //    for the wallet to claim before allocating real capacity.
-    const draft = await createDraft(request, {
-      signalingBase: resolveSignalingBase(opts),
-    });
-    checkAborted();
-
-    // 4. Render the QR encoding the deep-link URL the wallet scans /
-    //    the mobile browser taps.
-    const qrUrl = buildDeepLinkUrl({
-      reqId: draft.reqId,
-      browserPk: ephKeys.publicKeyB64u,
-      nonce,
-      domain,
-      request,
-      serverTs: draft.serverTs,
-    });
-    const explicitMount = resolveMount(opts.ui?.mountQrInto);
-    let qrHandle: ReturnType<typeof renderLoginQr> | null = null;
-    let modalHandle: { mount: HTMLElement; dispose: () => void } | null = null;
-    if (explicitMount) {
-      // Host gave us a mount — render inline (no scrim, host owns
-      // surrounding chrome).
-      qrHandle = renderLoginQr(qrUrl, explicitMount, opts.ui?.theme ?? "auto");
-    } else {
-      // No mount supplied → default to a centred modal with a dark
-      // scrim. Esc / click-outside aborts the in-flight signIn so
-      // `await signIn(...)` rejects with `LoginAbortedError`. This
-      // gives the partner a zero-config sign-in experience.
-      modalHandle = createModalQrMount({
-        onDismiss: () => {
-          // `me.abort()` is async but `onDismiss` is a click /
-          // keyboard handler — fire-and-forget. The in-flight
-          // teardown chain runs the QR + scrim dispose so the
-          // overlay drops immediately. The next `await` in the
-          // signIn flow then throws `LoginAbortedError`.
-          void me.abort();
-        },
-      });
-      qrHandle = renderLoginQr(
-        qrUrl,
-        modalHandle.mount,
-        opts.ui?.theme ?? "auto",
-      );
-    }
-    // Register QR teardown FIRST so an abort during signaling/connect
-    // immediately removes the on-screen artefact even before the
-    // network resources close.
-    if (qrHandle) me.pushTeardown(() => qrHandle!.dispose());
-    if (modalHandle) me.pushTeardown(() => modalHandle!.dispose());
-
-    // 5. Open the WS to the Cloudflare Worker. The DO is in DRAFT until
-    //    a wallet's /session/claim flips it to ACTIVE; we'll still
-    //    receive cached SDP/ICE from the wallet at that point.
-    const signaling = await connectSignaling({
-      url: draft.signalingWss,
-      role: "browser",
-      sigToken: draft.draftToken,
-    });
-    me.pushTeardown(() => signaling.close());
-    checkAborted();
-
-    // 6. Bring up the RTCPeerConnection + data channel. The browser
-    //    side uses STUN only — relay capacity is allocated only after
-    //    the wallet signs /session/claim, and the wallet is the peer
-    //    that allocates the TURN relay. The browser reaches the
-    //    wallet's relayed candidates as a remote address, no client-
-    //    side TURN credentials needed.
-    const transport = await establishTransport({
-      stunOnly: true,
-      signaling,
-      role: "browser",
-      // When the Worker minted TURN creds at draft time, hand them
-      // to the peer connection so the browser also has a relay
-      // candidate. Older Workers may omit `turn` from the draft
-      // response; falling back to STUN-only matches the prior
-      // behaviour.
-      turn: draft.turn,
-    });
-    // From here on, `transport` owns the signaling channel — its
-    // close() will close the WS too. Replace the prior signaling
-    // teardown so we don't double-close.
-    me.pushTeardown(() => transport.close());
-    checkAborted();
-
-    // 7. Wait for the wallet's encrypted envelope on the data channel.
-    //    The wallet emits exactly one `prson_vp_v1 / msg=presentation`
-    //    on initial sign-in; renewals come later via the session handle.
-    const first = await transport.awaitFirstMessage();
-    checkAborted();
-    const envelope = await decryptEnvelope(first, ephKeys);
-    if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
-      throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
-    }
-    // After the post-ROADMAP-§1 envelope grammar made `presentation`
-    // optional (so it can be absent on `display-update` /
-    // `credential-revoked`), the narrowed `msg === "presentation"`
-    // branch still has it as `string | undefined` to TypeScript.
-    // Defensive runtime check + local rebind for type narrowing.
-    const presentationStr = envelope.presentation;
-    if (!presentationStr) {
-      throw new Error("Initial presentation envelope had no presentation field");
-    }
-
-    // 8. Verify the presentation cryptographically before we hand it
-    //    to the host application. The five rules in SECURITY.md §7
-    //    are enforced here. When allowAnonymous is set, we also accept
-    //    the self-signed anonymous-wallet VCT (different verification
-    //    path: cnf.jwk == issuer, no notary signature to check).
-    const acceptedVcts = opts.allowAnonymous
-      ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT]
-      : [...KNOWN_VCTS];
-    const verified = await verifyPresentation(presentationStr, {
-      expectedAudience: `https://${domain}`,
-      expectedNonce: nonce,
-      acceptedVcts,
-      trustedIssuer: TRUSTED_ISSUER,
-    });
-    if (!verified.ok) {
-      throw new Error(`Presentation rejected: ${verified.reason}`);
-    }
-
-    // Enforce the level floor against the VERIFIED claims (the wallet
-    // already gates UX-side, but the host's policy must not depend on
-    // the wallet's good behaviour). Anonymous-wallet credentials carry
-    // no level claim and are governed by `allowAnonymous` alone.
-    // Default floor is 1 — a `verified_human: false` (level-0)
-    // credential is only accepted when the host explicitly set
-    // `required.minVerificationLevel: 0`.
-    if (verified.credential.vct !== ANONYMOUS_WALLET_VCT) {
-      const minLevel = opts.required?.minVerificationLevel ?? 1;
-      const claimedLevel =
-        typeof verified.claims.verification_level === "number"
-          ? verified.claims.verification_level
-          : 0;
-      if (claimedLevel < minLevel) {
-        throw new Error(
-          `Presentation rejected: verification_level ${claimedLevel} below required ${minLevel}`,
-        );
+        try {
+          const out = await Promise.race([run, restart, me.whenAborted]);
+          if (out === "restart") {
+            await attempt.abort();
+            continue;
+          }
+          // Success: the code (and dialog) go; the transport stays for the session.
+          ui.handle?.dispose();
+          dialog.current?.dispose();
+          return out;
+        } catch (err) {
+          if (err instanceof LoginAbortedError) throw err;
+          // Show what went wrong where the person is looking.
+          ui.handle?.update?.({ state: "error", message: friendlyError(err) });
+          if (!dialog.current || !ui.handle?.update) {
+            // Inline (the host owns the page and keeps the card, as 0.1
+            // did), a renderer that can't show errors, or a failure
+            // before any code was shown: reject now.
+            if (dialog.current) await me.abort();
+            throw err;
+          }
+          // In the dialog: wait for "Try again" (a new attempt) or close
+          // (reject with this error rather than a bare "aborted").
+          try {
+            await Promise.race([restart, me.whenAborted]);
+          } catch {
+            throw err;
+          }
+          await attempt.abort();
+        }
       }
-    }
-
-    // 9. Tear down the QR now that the sign-in is complete. The
-    //    transport stays open for renewals; the session handle owns
-    //    it from here on. We DON'T fire `transport.close()` — that
-    //    teardown stays registered until the `finally` block clears
-    //    the inflight slot, which happens AFTER this point but
-    //    BEFORE the session uses the transport (so an abort racing
-    //    a successful sign-in still wins until we resolve).
-    //
-    // Dispose order: QR card FIRST (removes card from DOM), then
-    // the modal scrim (removes the dark-overlay div). If we did the
-    // scrim first the card would briefly orphan in document.body
-    // before the next paint.
-    qrHandle?.dispose();
-    modalHandle?.dispose();
-
-    // The host needs both the SignInResult (returned synchronously
-    // below) AND a `signed_in` event on the typed event stream (so
-    // `onAny` listeners get a uniform lifecycle log). We build the
-    // result first, hand it to the session as the initial-signed-in
-    // payload (the session fires `signed_in` via microtask), and
-    // return the same object.
-    // Unique-human id (when required): the wallet attaches it to the
-    // initial envelope; we gate on presence here and pass it through
-    // OPAQUE — cryptographic verification belongs on the host's server
-    // (verifier-node `verifyUniqueHumanId`), since a browser-side check
-    // could be bypassed by the page's own code anyway.
-    const uniqueHumanId =
-      (envelope as { uniqueHumanId?: SignInResult["uniqueHumanId"] }).uniqueHumanId ?? null;
-    if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
-      throw new Error("Presentation rejected: required uniqueHumanId credential missing");
-    }
-
-    const result: SignInResult = {
-      sdJwtVc: presentationStr,
-      nonce,
-      claims: verified.claims,
-      cnf: verified.cnf,
-      credential: verified.credential,
-      uniqueHumanId,
-      // session is filled in below — temporary placeholder cast
-      // avoids a circular-self-reference in the literal.
-      session: undefined as unknown as PrsonLoginSession,
-    };
-
-    const session = new PrsonLoginSession({
-      cnf: verified.cnf,
-      credential: verified.credential,
-      transport,
-      ephKeys,
-      verifierContext: {
-        expectedAudience: `https://${domain}`,
-        expectedNonceFactory: () => nonce, // renewals carry a fresh nonce; see session.ts
-        acceptedVcts: [...KNOWN_VCTS],
-        trustedIssuer: TRUSTED_ISSUER,
-      },
-      // Cache the verified claims so the session can diff them
-      // against future `claim-update` envelopes — see ROADMAP §1.
-      initialClaims: verified.claims,
-      // Fire `signed_in` on the typed event stream. Microtask-
-      // deferred inside the constructor, so listeners attached
-      // synchronously after this `signIn()` resolves still
-      // receive it.
-      initialSignedInResult: result,
-      // Forward `walletSessionPk` + `preferredLanguage` from the
-      // FIRST envelope (which `signIn()` consumed before the session
-      // existed) so they're available immediately on the session
-      // handle. Without this seed the session would have
-      // `walletSessionPk: null` (breaking the request channel) and
-      // `preferredLanguage: null` (host can't localise on first
-      // paint) until a subsequent envelope arrives.
-      walletSessionPk: envelope.walletSessionPk,
-      initialPreferredLanguage: envelope.preferredLanguage,
-      // Public-profile fields the wallet may stamp onto the first
-      // envelope. They aren't part of the verified-human VC (which
-      // carries verification facts only), so without seeding here
-      // the host's `session.displayName` would stay null until a
-      // later `display-update` envelope.
-      initialDisplayName: envelope.displayName,
-      initialAvatar: envelope.avatar,
-    });
-    result.session = session;
-
-    return result;
     } finally {
       // Release the slot ONLY if we still own it. If a newer signIn()
       // displaced us mid-flight, `_inflight` already points at
@@ -692,8 +530,318 @@ export class PrsonLogin {
   }
 }
 
+/** Where "Don't have Prson? Get it" points unless `ui.getAppUrl` says otherwise. */
+export const GET_APP_URL = "https://app.prson.net/";
+
+type AttemptUi = { handle: LoginQrHandle | null };
+
+/**
+ * One code on screen, from the draft to a verified presentation. Every
+ * wait is raced against both this attempt's and the whole sign-in's
+ * abort, so a refresh or a closed dialog ends it at once.
+ */
+async function runAttempt(
+  opts: SignInOptions,
+  env: {
+    domain: string;
+    getMount: () => HTMLElement;
+    theme: "light" | "dark" | "auto";
+    context: LoginQrContext;
+    attempt: InflightSignIn;
+    me: InflightSignIn;
+    ui: AttemptUi;
+  },
+): Promise<SignInResult> {
+  const { domain, attempt, me } = env;
+  const guard = <T>(p: Promise<T>): Promise<T> => Promise.race([p, attempt.whenAborted, me.whenAborted]);
+  /** Throw `LoginAbortedError` if a newer signIn() (or a refresh) has displaced us. */
+  const checkAborted = () => {
+    if (me.aborted || attempt.aborted) throw new LoginAbortedError();
+  };
+
+  const ttlMaxMinutes = Math.min(
+    Math.max(opts.ttlMinutes ?? DEFAULT_TTL_MINUTES, 1),
+    MAX_TTL_MINUTES,
+  );
+
+  // 1. Generate the ephemeral X25519 keypair the wallet will encrypt
+  //    its envelope to. Stays in memory only — never written to
+  //    storage, never crosses any network boundary.
+  const ephKeys = await guard(generateEphemeralKeypair());
+  checkAborted();
+
+  // 2. Build the verifier request blob. The reqId is content-bound
+  //    so the wallet sees the same canonical bytes the Worker stored
+  //    (anti-tamper, see SECURITY.md §3).
+  const given = typeof opts.nonce === "function" ? await guard(Promise.resolve(opts.nonce())) : opts.nonce;
+  checkAborted();
+  if (given !== undefined && (typeof given !== "string" || !/^[A-Za-z0-9_-]{22,128}$/.test(given))) {
+    throw new Error("nonce must be 22-128 base64url characters (at least 16 random bytes)");
+  }
+  const nonce = given ?? b64u(crypto.getRandomValues(new Uint8Array(32)));
+  const request = {
+    domain,
+    nonce,
+    browserPk: ephKeys.publicKeyB64u,
+    required: opts.required ?? {},
+    // Carried into the wallet's drawer so an "Anonymous" option is
+    // offered. The SDK side enforces acceptance below at verify time;
+    // the wallet enforces drawer UX based on this flag.
+    allowAnonymous: opts.allowAnonymous === true,
+    // Sponsorship offer (advisory on the wire — the server enforces
+    // the stored grant's domain/caps/budget at charge time).
+    ...(opts.sponsorship?.grantId ? { sponsorship: { grantId: opts.sponsorship.grantId } } : {}),
+    // If set, instructs the wallet to mint a fresh random Ed25519
+    // keypair for this single sign-in (no deterministic per-domain
+    // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
+    ephemeralIdentity: opts.ephemeralIdentity === true,
+    // QR-mode remote navigation — wallet surfaces Prev / Next /
+    // Submit / Logout / Mouse on a persistent banner. See
+    // SignInOptions.remoteNavigation + bind.ts:enableRemoteNavigation.
+    remoteNavigation: opts.remoteNavigation === true,
+    // Pre-grant mouse control — wallet enables the Touchpad /
+    // Magic wand buttons on the banner drawer from session start.
+    // See SignInOptions.mouseControl + bindMouse's ambient
+    // subscriber path.
+    mouseControl: opts.mouseControl === true,
+    // App-to-app return leg — validated here (fail fast at the
+    // integrator's desk) AND in the wallet (the enforcing side).
+    ...(opts.returnUrl ? { returnUrl: validateReturnUrl(opts.returnUrl, domain) } : {}),
+    ttlMaxMinutes,
+  };
+
+  // 3. Register the draft directly with the Cloudflare Worker.
+  //    Anonymous + IP rate-limited. NO TURN allocation, NO Firebase
+  //    in the path — the Worker is the single API surface and waits
+  //    for the wallet to claim before allocating real capacity.
+  const draft: DraftResult = await guard(
+    createDraft(request, {
+      signalingBase: resolveSignalingBase(opts),
+    }),
+  );
+  checkAborted();
+
+  // 4. Render the QR encoding the deep-link URL the wallet scans /
+  //    the mobile browser taps. Register its teardown FIRST so an
+  //    abort during signaling/connect immediately removes the
+  //    on-screen artefact even before the network resources close.
+  const qrUrl = buildDeepLinkUrl({
+    reqId: draft.reqId,
+    browserPk: ephKeys.publicKeyB64u,
+    nonce,
+    domain,
+    request,
+    serverTs: draft.serverTs,
+  });
+  const handle = renderLoginQr(qrUrl, env.getMount(), env.theme, env.context);
+  env.ui.handle = handle;
+  attempt.pushTeardown(() => handle.dispose());
+  const show = (s: Parameters<NonNullable<LoginQrHandle["update"]>>[0]) => {
+    if (!attempt.aborted && !me.aborted) void handle.update?.(s);
+  };
+
+  // 5. Open the WS to the Cloudflare Worker. The DO is in DRAFT until
+  //    a wallet's /session/claim flips it to ACTIVE; we'll still
+  //    receive cached SDP/ICE from the wallet at that point.
+  const signaling = await guard(
+    connectSignaling({
+      url: draft.signalingWss,
+      role: "browser",
+      sigToken: draft.draftToken,
+    }),
+  );
+  attempt.pushTeardown(() => signaling.close());
+  checkAborted();
+  // The wallet's first message means it claimed the code: the person
+  // approved on the phone, which is now connecting.
+  let scanned = false;
+  signaling.onMessage((m) => {
+    if (!scanned && (m.msg === "answer" || m.msg === "peer-ready")) {
+      scanned = true;
+      show({ state: "scanned" });
+    }
+  });
+
+  // 6. Bring up the RTCPeerConnection + data channel. The browser
+  //    side uses STUN only — relay capacity is allocated only after
+  //    the wallet signs /session/claim, and the wallet is the peer
+  //    that allocates the TURN relay. The browser reaches the
+  //    wallet's relayed candidates as a remote address, no client-
+  //    side TURN credentials needed.
+  const transport = await guard(
+    establishTransport({
+      stunOnly: true,
+      signaling,
+      role: "browser",
+      // When the Worker minted TURN creds at draft time, hand them
+      // to the peer connection so the browser also has a relay
+      // candidate. Older Workers may omit `turn` from the draft
+      // response; falling back to STUN-only matches the prior
+      // behaviour.
+      turn: draft.turn,
+    }),
+  );
+  // From here on, `transport` owns the signaling channel — its
+  // close() will close the WS too.
+  attempt.pushTeardown(() => transport.close());
+  checkAborted();
+  show({ state: "approving" });
+
+  // 7. Wait for the wallet's encrypted envelope on the data channel.
+  //    The wallet emits exactly one `prson_vp_v1 / msg=presentation`
+  //    on initial sign-in; renewals come later via the session handle.
+  const first = await guard(transport.awaitFirstMessage());
+  checkAborted();
+  show({ state: "verifying" });
+  const envelope = await decryptEnvelope(first, ephKeys);
+  if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
+    throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
+  }
+  // After the post-ROADMAP-§1 envelope grammar made `presentation`
+  // optional (so it can be absent on `display-update` /
+  // `credential-revoked`), the narrowed `msg === "presentation"`
+  // branch still has it as `string | undefined` to TypeScript.
+  // Defensive runtime check + local rebind for type narrowing.
+  const presentationStr = envelope.presentation;
+  if (!presentationStr) {
+    throw new Error("Initial presentation envelope had no presentation field");
+  }
+
+  // 8. Verify the presentation cryptographically before we hand it
+  //    to the host application. The five rules in SECURITY.md §7
+  //    are enforced here. When allowAnonymous is set, we also accept
+  //    the self-signed anonymous-wallet VCT (different verification
+  //    path: cnf.jwk == issuer, no notary signature to check).
+  const acceptedVcts = opts.allowAnonymous
+    ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT]
+    : [...KNOWN_VCTS];
+  const verified = await verifyPresentation(presentationStr, {
+    expectedAudience: `https://${domain}`,
+    expectedNonce: nonce,
+    acceptedVcts,
+    trustedIssuer: TRUSTED_ISSUER,
+  });
+  if (!verified.ok) {
+    throw new Error(`Presentation rejected: ${verified.reason}`);
+  }
+
+  // Enforce the level floor against the VERIFIED claims (the wallet
+  // already gates UX-side, but the host's policy must not depend on
+  // the wallet's good behaviour). Anonymous-wallet credentials carry
+  // no level claim and are governed by `allowAnonymous` alone.
+  // Default floor is 1 — a `verified_human: false` (level-0)
+  // credential is only accepted when the host explicitly set
+  // `required.minVerificationLevel: 0`.
+  if (verified.credential.vct !== ANONYMOUS_WALLET_VCT) {
+    const minLevel = opts.required?.minVerificationLevel ?? 1;
+    const claimedLevel =
+      typeof verified.claims.verification_level === "number"
+        ? verified.claims.verification_level
+        : 0;
+    if (claimedLevel < minLevel) {
+      throw new Error(
+        `Presentation rejected: verification_level ${claimedLevel} below required ${minLevel}`,
+      );
+    }
+  }
+
+  // Unique-human id (when required): the wallet attaches it to the
+  // initial envelope; we gate on presence here and pass it through
+  // OPAQUE — cryptographic verification belongs on the host's server
+  // (verifier-node `verifyUniqueHumanId`), since a browser-side check
+  // could be bypassed by the page's own code anyway.
+  const uniqueHumanId =
+    (envelope as { uniqueHumanId?: SignInResult["uniqueHumanId"] }).uniqueHumanId ?? null;
+  if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
+    throw new Error("Presentation rejected: required uniqueHumanId credential missing");
+  }
+  checkAborted();
+
+  // 9. Success: let the UI show it (a short check animation, skipped
+  //    under reduced motion), then the caller tears the code down. The
+  //    transport stays open for renewals; the session handle owns it
+  //    from here on.
+  const hold = handle.update?.({ state: "success", domain });
+  if (hold && typeof (hold as Promise<void>).then === "function") {
+    await Promise.race([hold, new Promise((r) => setTimeout(r, 1500))]);
+  }
+  checkAborted();
+
+  // The host needs both the SignInResult (returned synchronously
+  // below) AND a `signed_in` event on the typed event stream (so
+  // `onAny` listeners get a uniform lifecycle log). We build the
+  // result first, hand it to the session as the initial-signed-in
+  // payload (the session fires `signed_in` via microtask), and
+  // return the same object.
+  const result: SignInResult = {
+    sdJwtVc: presentationStr,
+    nonce,
+    claims: verified.claims,
+    cnf: verified.cnf,
+    credential: verified.credential,
+    uniqueHumanId,
+    // session is filled in below — temporary placeholder cast
+    // avoids a circular-self-reference in the literal.
+    session: undefined as unknown as PrsonLoginSession,
+  };
+
+  const session = new PrsonLoginSession({
+    cnf: verified.cnf,
+    credential: verified.credential,
+    transport,
+    ephKeys,
+    verifierContext: {
+      expectedAudience: `https://${domain}`,
+      expectedNonceFactory: () => nonce, // renewals carry a fresh nonce; see session.ts
+      acceptedVcts: [...KNOWN_VCTS],
+      trustedIssuer: TRUSTED_ISSUER,
+    },
+    // Cache the verified claims so the session can diff them
+    // against future `claim-update` envelopes — see ROADMAP §1.
+    initialClaims: verified.claims,
+    // Fire `signed_in` on the typed event stream. Microtask-
+    // deferred inside the constructor, so listeners attached
+    // synchronously after this `signIn()` resolves still
+    // receive it.
+    initialSignedInResult: result,
+    // Forward `walletSessionPk` + `preferredLanguage` from the
+    // FIRST envelope (which `signIn()` consumed before the session
+    // existed) so they're available immediately on the session
+    // handle. Without this seed the session would have
+    // `walletSessionPk: null` (breaking the request channel) and
+    // `preferredLanguage: null` (host can't localise on first
+    // paint) until a subsequent envelope arrives.
+    walletSessionPk: envelope.walletSessionPk,
+    initialPreferredLanguage: envelope.preferredLanguage,
+    // Public-profile fields the wallet may stamp onto the first
+    // envelope. They aren't part of the verified-human VC (which
+    // carries verification facts only), so without seeding here
+    // the host's `session.displayName` would stay null until a
+    // later `display-update` envelope.
+    initialDisplayName: envelope.displayName,
+    initialAvatar: envelope.avatar,
+  });
+  result.session = session;
+
+  return result;
+}
+
+/** A failure in words the person signing in can act on. */
+function friendlyError(err: unknown): string {
+  const m = err instanceof Error ? err.message : String(err);
+  if (/Too many login sessions/i.test(m)) return "Too many sign-ins from this network. Wait a moment and try again.";
+  if (/createDraft failed|Failed to fetch|NetworkError|signaling: WS/i.test(m)) {
+    return "Couldn't reach Prson. Check your connection and try again.";
+  }
+  if (/uniqueHumanId/i.test(m)) return "This site needs a passport or ID card verified in the Prson app.";
+  if (/verification_level/i.test(m)) return "This site needs a more verified identity than the one chosen.";
+  if (/data channel/i.test(m)) return "Your phone couldn't connect to this browser. Try again.";
+  return "Sign-in didn't finish. Try again.";
+}
+
 // Re-export for verifier-only consumers + custom UIs.
 export { PrsonLoginSession };
+export type { LoginQrContext, LoginQrHandle, LoginQrRenderer, LoginUiState } from "./qr.js";
 export type { Renewal };
 
 // Request channel — types + DOM-binding helpers. `bindInput` /
