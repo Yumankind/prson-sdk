@@ -15,6 +15,14 @@ import { checkCredentialStatus, type StatusCheckOptions, type StatusPolicy } fro
 export { checkCredentialStatus, clearStatusCache, type StatusCheckOptions, type StatusCheckResult, type StatusPolicy } from "./status.js";
 
 export {
+  NOTIFY_HANDLE,
+  readNotifyHandle,
+  sendNotification,
+  type SendNotificationOptions,
+  type SendNotificationResult,
+} from "./notify.js";
+
+export {
   canonicalJson,
   verdictDisclosureDigest,
   verifyVerdict,

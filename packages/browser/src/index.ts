@@ -32,6 +32,7 @@ import {
 } from "./qr.js";
 import type { DraftResult } from "./api.js";
 import { verifyPresentation } from "./verify.js";
+import { notifyHandleFrom } from "./notify.js";
 
 // ─────────────────────────────────────────────────────────────────────
 // Public types — these mirror the contract in this folder's README.
@@ -231,6 +232,23 @@ export type SignInOptions = {
    * Default false.
    */
   mouseControl?: boolean;
+
+  /**
+   * **Ask to send notifications.** The wallet's sign-in sheet shows an
+   * unticked "Let {site} send you notifications" row; nothing is sent
+   * unless the person ticks it. When they do, `SignInResult.notifications`
+   * carries a handle for this person at your domain: random, so it can't
+   * be linked to the same person's handle on any other site. Send it to
+   * your backend with the presentation and call
+   * `POST https://api.prson.net/v1/notify { handle, title, body, url? }`
+   * with an API key that has `notify:write`, for an app whose registered
+   * domains include this one. Plain text only (title up to 60
+   * characters, body up to 180), `url` only on this sign-in domain itself
+   * (the app asks the person before opening it), about 3
+   * a day per person. A 410 means the person turned you off: forget the
+   * handle. Default false.
+   */
+  notifications?: boolean;
 };
 
 export type CnfJwk = {
@@ -265,6 +283,12 @@ export type SignInResult = {
     signature: string;
     kid: string;
   } | null;
+  /**
+   * Present when you set `notifications: true` and the person ticked "Let
+   * {site} send you notifications": the handle your backend sends with
+   * (see SignInOptions.notifications). null when they didn't.
+   */
+  notifications?: { handle: string } | null;
   session: PrsonLoginSession;
 };
 
@@ -604,6 +628,9 @@ async function runAttempt(
     // See SignInOptions.mouseControl + bindMouse's ambient
     // subscriber path.
     mouseControl: opts.mouseControl === true,
+    // Website notifications: the wallet offers an unticked opt-in row.
+    // See SignInOptions.notifications.
+    ...(opts.notifications === true ? { notifications: true } : {}),
     // App-to-app return leg — validated here (fail fast at the
     // integrator's desk) AND in the wallet (the enforcing side).
     ...(opts.returnUrl ? { returnUrl: validateReturnUrl(opts.returnUrl, domain) } : {}),
@@ -755,6 +782,9 @@ async function runAttempt(
   if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
     throw new Error("Presentation rejected: required uniqueHumanId credential missing");
   }
+  // Notification handle (when asked for and the person opted in):
+  // opaque, like uniqueHumanId; the API checks it when the site sends.
+  const notifyHandle = opts.notifications === true ? notifyHandleFrom(envelope) : null;
   checkAborted();
 
   // 9. Success: let the UI show it (a short check animation, skipped
@@ -780,6 +810,7 @@ async function runAttempt(
     cnf: verified.cnf,
     credential: verified.credential,
     uniqueHumanId,
+    ...(opts.notifications === true ? { notifications: notifyHandle ? { handle: notifyHandle } : null } : {}),
     // session is filled in below — temporary placeholder cast
     // avoids a circular-self-reference in the literal.
     session: undefined as unknown as PrsonLoginSession,
@@ -841,6 +872,7 @@ function friendlyError(err: unknown): string {
 
 // Re-export for verifier-only consumers + custom UIs.
 export { PrsonLoginSession };
+export { NOTIFY_HANDLE, notifyHandleFrom } from "./notify.js";
 export type { LoginQrContext, LoginQrHandle, LoginQrRenderer, LoginUiState } from "./qr.js";
 export type { Renewal };
 
