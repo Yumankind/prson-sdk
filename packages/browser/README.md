@@ -257,6 +257,43 @@ app.post("/api/login", async (req, res) => {
 });
 ```
 
+## Verifications: "sign this PDF", "prove you're 18"
+
+Sign-in hands you a credential in the browser. A **verification** is an
+organisation's request made by your server with your API key
+(`POST https://api.prson.net/v1/verifications`): a fact, a verified
+document, a selfie, or a signature on a PDF with the person's
+government-verified name (upload the PDF with
+`POST /v1/verifications/documents`, then a `document_signature`
+requirement). `awaitVerification` shows its `share_url` (a QR code on a
+computer, an "Open in Prson" button on a phone) and waits until your
+server says it's answered. The API key stays on your server.
+
+```ts
+import { awaitVerification, VerificationClosedError } from "@prson/login-sdk";
+
+// Your server created the verification and returns its id and share_url.
+const { id, share_url } = await (await fetch("/api/contract/sign", { method: "POST" })).json();
+try {
+  await awaitVerification({
+    shareUrl: share_url,
+    title: "Sign the rental agreement",
+    // Your server calls GET /v1/verifications/{id} (or remembers the verification.* webhooks).
+    checkStatus: async (signal) => (await (await fetch(`/api/verifications/${id}`, { signal })).json()).status,
+  });
+  // fulfilled: your server downloads the signed PDF from the response's signature.download_path.
+} catch (e) {
+  if (e instanceof VerificationClosedError) console.log(`The request was ${e.status}`);
+}
+```
+
+The signed PDF is the uploaded file plus a PAdES signature (B-T, with a
+timestamp) by a certificate naming the person as their chip-read
+identity document does, under the Prson Root CA. It is an **advanced**
+electronic signature under eIDAS, not a qualified one. The response
+carries both SHA-256 hashes (as uploaded, as signed) in Prson's signed
+verdict, and the signed file's first bytes are exactly your upload.
+
 ## Build status
 
 - **Spec**: stable (this folder).
