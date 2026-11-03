@@ -702,6 +702,16 @@ export {
   type RemoteNavOptions,
 } from "./bind.js";
 
+// Verifications (an organisation's request, e.g. "sign this PDF with your
+// verified name"): show the share_url and wait until it's answered.
+export {
+  awaitVerification,
+  VerificationAbortedError,
+  VerificationClosedError,
+  type AwaitVerificationOptions,
+  type VerificationStatus,
+} from "./verification.js";
+
 // ─────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────
