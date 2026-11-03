@@ -383,7 +383,8 @@ export async function verifySignedFragment(
     identityId: fragment.identityId,
     signedAt: fragment.signedAt,
     expiresAt: fragment.expiresAt,
-    description: fragment.description,
+    // Not returned: the native signature doesn't cover the description, so a
+    // holder could change it. Label the fact from `fragmentId`.
     kid: fragment.kid,
   };
 }
@@ -449,8 +450,25 @@ export async function verifyFragmentCredential(
     return { ok: false, reason: "issuer_key_resolve_failed", detail: `iss=${String(payload.iss)}` };
   }
   const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
-  if (typeof payload.exp === "number" && payload.exp < nowSec) {
+  // Prson always sets an expiry; a credential without one is not Prson's.
+  if (typeof payload.exp !== "number") {
+    return { ok: false, reason: "malformed", detail: "no exp" };
+  }
+  if (payload.exp < nowSec) {
     return { ok: false, reason: "expired" };
+  }
+  // Audience-scoped credentials are bound to one relying party, the same rule
+  // as verifySignedFragment: a fact minted for another site never verifies here.
+  if (payload.aud != null) {
+    const expected = (opts.expectedAudience ?? "").trim().toLowerCase();
+    const bound = (Array.isArray(payload.aud) ? payload.aud : [payload.aud]).map((a) => String(a).toLowerCase());
+    if (!expected || !bound.includes(expected)) {
+      return {
+        ok: false,
+        reason: "audience_mismatch",
+        detail: `credential bound to '${bound.join(",")}', expectedAudience='${expected || "(unset)"}'`,
+      };
+    }
   }
   if (!header.kid) return { ok: false, reason: "issuer_key_resolve_failed", detail: "no kid" };
   const issuerJwk = await resolveIssuerJwk(header.kid, opts);

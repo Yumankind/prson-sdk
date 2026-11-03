@@ -1,20 +1,18 @@
-// Express verifier — one route, no database, pure-function.
+// Express verifier — the backend half of "Sign in with Prson".
 //
-// POST /verify { presentation, audience, nonce } → 200 with verified
-// claims or 400 with a typed failure reason. The whole point is to
-// show how a backend integrator wires `verifyPresentation` from
-// `@prson/login-verifier` against a sign-in attempt.
+//   POST /nonce   → { nonce }   a one-time value for the next sign-in
+//   POST /verify  { presentation, nonce } → verified claims, or a typed failure
+//   POST /verify-fragment { fragment }   → one verified fact
 //
-// In a real deployment you'd:
-//   1. Mint + store `nonce` at /session/draft time keyed by `reqId`.
-//   2. Receive the presentation from the browser via your sign-in
-//      callback (or via a /session/finalize route the SDK doesn't
-//      directly provide — host-side wiring).
-//   3. Verify it here with the SAME nonce + your origin as audience.
-//   4. On success, mint a server-side session cookie anchored to
-//      `cnf.jwk.x` so a stolen cookie can't be replayed against a
-//      different identity.
+// The browser asks /nonce first and passes it to `PrsonLogin.signIn({ nonce })`.
+// /verify accepts each nonce once, within 5 minutes, and checks the
+// presentation against THIS server's own origin (never one the browser sends),
+// so a captured presentation can't be replayed here or minted for another site.
+// On success, start your session anchored to `cnf.jwk.x`.
+//
+// Configure your site's host with PRSON_HOST (default localhost:5173).
 
+import { randomBytes } from "node:crypto";
 import express from "express";
 import {
   verifyPresentation,
@@ -40,21 +38,43 @@ app.use((req, res, next) => {
   next();
 });
 
+// Your site's host. The SDK binds every sign-in to `https://<host>`; facts to the host alone.
+const HOST = (process.env.PRSON_HOST ?? "localhost:5173").toLowerCase();
+const AUDIENCE = `https://${HOST}`;
+const FRAGMENT_AUDIENCE = HOST;
+
+// One-time nonces. A real deployment keeps these in its session store or database.
+const NONCE_TTL_MS = 5 * 60_000;
+const nonces = new Map();
+
+app.post("/nonce", (_req, res) => {
+  const now = Date.now();
+  for (const [n, exp] of nonces) if (exp <= now) nonces.delete(n);
+  const nonce = randomBytes(32).toString("base64url");
+  nonces.set(nonce, now + NONCE_TTL_MS);
+  res.json({ nonce });
+});
+
+/** True once for a nonce this server issued and that hasn't expired. */
+function takeNonce(nonce) {
+  const exp = nonces.get(nonce);
+  nonces.delete(nonce);
+  return exp !== undefined && exp > Date.now();
+}
+
 app.post("/verify", async (req, res) => {
-  const { presentation, audience, nonce } = req.body ?? {};
-  if (
-    typeof presentation !== "string" ||
-    typeof audience !== "string" ||
-    typeof nonce !== "string"
-  ) {
-    res
-      .status(400)
-      .json({ ok: false, reason: "malformed", detail: "presentation/audience/nonce all required" });
+  const { presentation, nonce } = req.body ?? {};
+  if (typeof presentation !== "string" || typeof nonce !== "string") {
+    res.status(400).json({ ok: false, reason: "malformed", detail: "presentation and nonce are required" });
+    return;
+  }
+  if (!takeNonce(nonce)) {
+    res.status(400).json({ ok: false, reason: "nonce_unknown_or_used" });
     return;
   }
 
   const result = await verifyPresentation(presentation, {
-    expectedAudience: audience,
+    expectedAudience: AUDIENCE,
     expectedNonce: nonce,
     // Defaults to the production notary's JWKS + the two real-credential
     // VCTs. Pass `acceptedVcts` here too if you opted into
@@ -63,11 +83,9 @@ app.post("/verify", async (req, res) => {
   });
 
   if (!result.ok) {
-    res.status(400).json({
-      ok: false,
-      reason: result.reason,
-      detail: result.detail ?? null,
-    });
+    // The reason only; `detail` stays in your logs.
+    console.warn("verify failed", result.reason, result.detail);
+    res.status(400).json({ ok: false, reason: result.reason });
     return;
   }
 
@@ -111,12 +129,14 @@ app.post("/verify-fragment", async (req, res) => {
     res.status(400).json({ ok: false, reason: "malformed", detail: "fragment required" });
     return;
   }
+  // Facts bound to another site never verify here.
   const result =
     typeof fragment === "string"
-      ? await verifyFragmentCredential(fragment)
-      : await verifySignedFragment(fragment);
+      ? await verifyFragmentCredential(fragment, { expectedAudience: FRAGMENT_AUDIENCE })
+      : await verifySignedFragment(fragment, { expectedAudience: FRAGMENT_AUDIENCE });
   if (!result.ok) {
-    res.status(400).json({ ok: false, reason: result.reason, detail: result.detail ?? null });
+    console.warn("verify-fragment failed", result.reason, result.detail);
+    res.status(400).json({ ok: false, reason: result.reason });
     return;
   }
   res.status(200).json({
@@ -129,7 +149,6 @@ app.post("/verify-fragment", async (req, res) => {
     identityId: result.identityId,
     signedAt: result.signedAt,
     expiresAt: result.expiresAt,
-    description: result.description,
     kid: result.kid,
   });
 });
@@ -137,6 +156,8 @@ app.post("/verify-fragment", async (req, res) => {
 const PORT = Number(process.env.PORT ?? 8080);
 app.listen(PORT, () => {
   console.log(`Express verifier listening on http://localhost:${PORT}`);
-  console.log(`POST /verify          { presentation, audience, nonce }`);
+  console.log(`Audience: ${AUDIENCE}`);
+  console.log(`POST /nonce           → { nonce }`);
+  console.log(`POST /verify          { presentation, nonce }`);
   console.log(`POST /verify-fragment { fragment }   // object or compact JWT string`);
 });

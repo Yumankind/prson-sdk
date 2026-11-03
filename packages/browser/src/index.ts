@@ -35,6 +35,17 @@ export type SignInOptions = {
   domain?: string;
 
   /**
+   * A one-time value your BACKEND made for this sign-in (at least 16 random
+   * bytes, base64url: 22-128 characters of `A-Z a-z 0-9 - _`). Store it
+   * server-side, then verify the presentation there with
+   * `verifyPresentation(presentation, { expectedNonce, expectedAudience })`
+   * and delete it, so a captured presentation can't be replayed to your
+   * backend. Omitted: the SDK makes one in the browser, which only protects
+   * the in-browser check — not enough for a backend that trusts the result.
+   */
+  nonce?: string;
+
+  /**
    * Which Prson backend environment to sign in against. `"dev"` points
    * the flow at the dev signaling Worker (`signaling-dev.prson.net`);
    * omit (or `"production"`) for the live environment. For a custom /
@@ -211,6 +222,8 @@ export type CnfJwk = {
 
 export type SignInResult = {
   sdJwtVc: string;
+  /** The nonce the presentation is bound to (yours when you passed `nonce`). */
+  nonce: string;
   claims: Record<string, unknown>;
   cnf: { jwk: CnfJwk };
   credential: {
@@ -394,7 +407,10 @@ export class PrsonLogin {
     // 2. Build the verifier request blob. The reqId is content-bound
     //    so the wallet sees the same canonical bytes the Worker stored
     //    (anti-tamper, see SECURITY.md §3).
-    const nonce = b64u(crypto.getRandomValues(new Uint8Array(32)));
+    if (opts.nonce !== undefined && !/^[A-Za-z0-9_-]{22,128}$/.test(opts.nonce)) {
+      throw new Error("nonce must be 22-128 base64url characters (at least 16 random bytes)");
+    }
+    const nonce = opts.nonce ?? b64u(crypto.getRandomValues(new Uint8Array(32)));
     const request = {
       domain,
       nonce,
@@ -604,6 +620,7 @@ export class PrsonLogin {
 
     const result: SignInResult = {
       sdJwtVc: presentationStr,
+      nonce,
       claims: verified.claims,
       cnf: verified.cnf,
       credential: verified.credential,

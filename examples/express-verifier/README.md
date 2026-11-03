@@ -33,11 +33,10 @@ no database. Use it as a recipe rather than a framework.
 2. **`vct` is in the accepted list** —
    `verified-human/v1`, `verified-identity/v1` are the defaults.
    Anything outside is rejected.
-3. **`aud` matches** `expectedAudience` in BOTH the VC body and
-   the KB-JWT. A presentation issued for `bank.com` can't be
-   replayed against `evil.com`.
-4. **`nonce` matches** the value the verifier put in the
-   `/session/draft` blob. Prevents replay across sign-in attempts.
+3. **`aud` matches** `expectedAudience` in the KB-JWT. A presentation
+   made for `bank.com` can't be replayed against `evil.com`.
+4. **`nonce` matches** the one-time value your server issued for this
+   sign-in. Prevents replay across sign-in attempts.
 5. **KB-JWT signature** verifies against `cnf.jwk` AND the
    embedded `sd_hash` equals SHA-256 of the actual disclosed
    chain. This is the proof-of-possession — the holder of the
@@ -57,20 +56,22 @@ explanation.
 ```bash
 cd login-sdk/examples/express-verifier
 npm install
-npm start
+PRSON_HOST=your-site.example npm start
 # → listening on http://localhost:8080
 ```
 
-`POST /verify` with a JSON body:
+The sign-in takes three steps:
+
+1. **Your backend issues a nonce.** The browser calls `POST /nonce` and gets `{ "nonce": "…" }`.
+   The server keeps it for 5 minutes.
+2. **The browser signs in with it.** `const r = await PrsonLogin.signIn({ nonce })`, then it
+   posts `r.sdJwtVc` and the nonce to your backend.
+3. **Your backend verifies.**
 
 ```bash
 curl -sS http://localhost:8080/verify \
   -H 'content-type: application/json' \
-  -d '{
-    "presentation": "<the SD-JWT-VC compact string the browser passed up>",
-    "audience": "https://your-site.example",
-    "nonce": "<the same nonce you minted at /session/draft time>"
-  }'
+  -d '{ "presentation": "<r.sdJwtVc>", "nonce": "<the nonce from /nonce>" }'
 ```
 
 Response on success:
@@ -89,28 +90,25 @@ Response on success:
 }
 ```
 
-Response on failure:
+Response on failure (the `detail` goes to the server log, not the client):
 
 ```json
-{ "ok": false, "reason": "nonce_mismatch", "detail": "..." }
+{ "ok": false, "reason": "nonce_mismatch" }
 ```
 
-The `reason` is one of the typed codes from
-[`VerifyFailureReason`](../../packages/verifier-node/src/index.ts) —
-each one points at a single one of the five checks above so you can
-log + alert with confidence about what went wrong.
+`nonce_unknown_or_used` means the nonce wasn't issued by this server, expired, or was already
+used. The other `reason` values are the typed codes from
+[`VerifyFailureReason`](../../packages/verifier-node/src/index.ts), one per check above.
 
-## Where the nonce + audience come from
+## Where the nonce and audience come from
 
-For the canonical sign-in flow:
-
-- `expectedAudience` is your origin, e.g. `https://your-site.example`.
-  The browser SDK already sent `aud: "https://<domain>"` to the
-  wallet; pass the same value here.
-- `expectedNonce` is the random 32-byte base64url the browser
-  generated and POSTed to `/session/draft`. You stored it in the
-  draft record alongside the verifier request blob; retrieve it
-  by `reqId` when the browser later submits the presentation.
+- **`expectedAudience`** is always `https://<your host>`, from your own configuration
+  (`PRSON_HOST`). The browser SDK binds the presentation to the page's origin. Never take the
+  audience from the request: a presentation made for another site would then pass.
+- **`expectedNonce`** is the value your server issued, looked up and deleted on first use. Never
+  take it from the request alone, or a captured presentation can be replayed. If the page calls
+  `signIn()` without `nonce`, the SDK makes one in the browser. That protects only the
+  in-browser check, not your backend.
 
 If the host is using anonymous-wallet credentials
 (`signIn({ allowAnonymous: true })`), pass `acceptedVcts` that
@@ -167,10 +165,12 @@ Success response:
 ```
 
 The verifier checks: the RSA signature against the notary's published
-JWK, the `expiresAt` clock, and (for JWT shapes) the `vct` is in the
-accepted predicate-VCT list. It does not check `aud`/`nonce` —
-predicates are transferable facts about a property, not bound to a
-specific request. Anti-replay comes from the short TTL plus the
-`propertyHash` binding (a stolen predicate can't be re-presented for a
-different property or identity).
+JWK, the expiry (required), the `vct` (for JWT shapes) and the audience.
+A fact the wallet made for a site is bound to that site's host; this
+server passes its own `PRSON_HOST` as `expectedAudience`, so a fact
+made for another site fails with `audience_mismatch`. Facts carry no
+nonce: within their lifetime one can be presented again to the same
+site, so tie it to the signed-in user (`identityId`, `propertyHash`).
+Label a fact from its `fragmentId`: the native format's `description`
+isn't covered by the signature, so it isn't returned.
 

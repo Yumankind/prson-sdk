@@ -1370,6 +1370,8 @@ export class PrsonLoginSession {
     this._armExpiryTimer();
     const fresh: SignInResult = {
       sdJwtVc: envelope.presentation,
+      // The wallet picks a renewal's nonce, so a backend can't have issued it.
+      nonce: String(verifierOpts.expectedNonce),
       claims: verified.claims,
       cnf: verified.cnf,
       credential: verified.credential,

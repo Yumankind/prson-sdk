@@ -3555,6 +3555,8 @@ var PrsonLoginSession = class {
     this._armExpiryTimer();
     const fresh = {
       sdJwtVc: envelope.presentation,
+      // The wallet picks a renewal's nonce, so a backend can't have issued it.
+      nonce: String(verifierOpts.expectedNonce),
       claims: verified.claims,
       cnf: verified.cnf,
       credential: verified.credential,
@@ -5310,7 +5312,10 @@ var PrsonLogin = class {
       );
       const ephKeys = await generateEphemeralKeypair();
       checkAborted();
-      const nonce = b64u(crypto.getRandomValues(new Uint8Array(32)));
+      if (opts.nonce !== void 0 && !/^[A-Za-z0-9_-]{22,128}$/.test(opts.nonce)) {
+        throw new Error("nonce must be 22-128 base64url characters (at least 16 random bytes)");
+      }
+      const nonce = opts.nonce ?? b64u(crypto.getRandomValues(new Uint8Array(32)));
       const request = {
         domain,
         nonce,
@@ -5320,6 +5325,9 @@ var PrsonLogin = class {
         // offered. The SDK side enforces acceptance below at verify time;
         // the wallet enforces drawer UX based on this flag.
         allowAnonymous: opts.allowAnonymous === true,
+        // Sponsorship offer (advisory on the wire — the server enforces
+        // the stored grant's domain/caps/budget at charge time).
+        ...opts.sponsorship?.grantId ? { sponsorship: { grantId: opts.sponsorship.grantId } } : {},
         // If set, instructs the wallet to mint a fresh random Ed25519
         // keypair for this single sign-in (no deterministic per-domain
         // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
@@ -5333,6 +5341,9 @@ var PrsonLogin = class {
         // See SignInOptions.mouseControl + bindMouse's ambient
         // subscriber path.
         mouseControl: opts.mouseControl === true,
+        // App-to-app return leg — validated here (fail fast at the
+        // integrator's desk) AND in the wallet (the enforcing side).
+        ...opts.returnUrl ? { returnUrl: validateReturnUrl(opts.returnUrl, domain) } : {},
         ttlMaxMinutes
       };
       const draft = await createDraft(request, {
@@ -5406,13 +5417,28 @@ var PrsonLogin = class {
       if (!verified.ok) {
         throw new Error(`Presentation rejected: ${verified.reason}`);
       }
+      if (verified.credential.vct !== ANONYMOUS_WALLET_VCT2) {
+        const minLevel = opts.required?.minVerificationLevel ?? 1;
+        const claimedLevel = typeof verified.claims.verification_level === "number" ? verified.claims.verification_level : 0;
+        if (claimedLevel < minLevel) {
+          throw new Error(
+            `Presentation rejected: verification_level ${claimedLevel} below required ${minLevel}`
+          );
+        }
+      }
       qrHandle?.dispose();
       modalHandle?.dispose();
+      const uniqueHumanId = envelope.uniqueHumanId ?? null;
+      if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
+        throw new Error("Presentation rejected: required uniqueHumanId credential missing");
+      }
       const result = {
         sdJwtVc: presentationStr,
+        nonce,
         claims: verified.claims,
         cnf: verified.cnf,
         credential: verified.credential,
+        uniqueHumanId,
         // session is filled in below — temporary placeholder cast
         // avoids a circular-self-reference in the literal.
         session: void 0
@@ -5474,6 +5500,25 @@ function b64u(bytes) {
   let s = "";
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
   return btoa(s).replace(/=+$/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+function validateReturnUrl(returnUrl, domain) {
+  let parsed;
+  try {
+    parsed = new URL(returnUrl);
+  } catch {
+    throw new Error(`returnUrl is not a valid URL: ${returnUrl}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(
+      "returnUrl must be https:// (custom schemes are refused \u2014 any app could claim them; use a Universal Link / App Link on your domain)"
+    );
+  }
+  if (parsed.host.toLowerCase() !== domain.toLowerCase()) {
+    throw new Error(
+      `returnUrl host (${parsed.host}) must equal the login domain (${domain})`
+    );
+  }
+  return returnUrl;
 }
 function resolveMount(into) {
   if (!into) return null;
