@@ -243,8 +243,11 @@ export class PrsonLoginSession {
    * True when the sign-in presentation didn't bind a session key (a
    * wallet older than envelope v2). The sender of inbound envelopes
    * can't be checked then, so envelopes that act on the page (`nav`,
-   * `value`, `mouse-update`, file transfer) are ignored; everything
-   * else still works. See SECURITY.md §4.
+   * `value`, `mouse-update`, file transfer) and request replies
+   * (`response`) are ignored, `request()` resolves with
+   * `{ ok: false, error: "unsupported" }` and no field values are sent
+   * (`focus`). Sign-in, renewals and claim updates (all verified
+   * presentations) and sign-out still work. See SECURITY.md §4.
    */
   private _legacyChannel = false;
 
@@ -638,6 +641,9 @@ export class PrsonLoginSession {
    *      replied. Defaults to 60 s.
    *   * `session-closed` — the session shut down with this request
    *      in flight.
+   *   * `unsupported` — the wallet predates envelope v2 (it bound no
+   *      session key into the sign-in), so its replies couldn't be told
+   *      apart from anyone else's. Nothing is sent to it.
    *
    * Wire grammar: outbound envelope shape is
    * `{ v, msg: "request", issuedAt, domain, requestId, kind, ...kindFields }`,
@@ -724,6 +730,9 @@ export class PrsonLoginSession {
   ): Promise<void> {
     if (this._closed) return;
     if (!this._walletSessionPk) return;
+    // A legacy wallet's key isn't bound to the sign-in, and its edits
+    // (`value`) are ignored anyway: don't send it the page's fields.
+    if (this._legacyChannel) return;
     // Focus updates drive the wallet drawer's mirrored input — the
     // user can't edit a value the wallet never received, so we
     // ack-track these. The promise is awaited only by tests; the
@@ -870,6 +879,10 @@ export class PrsonLoginSession {
     onMouseFrame?: (mouse: NonNullable<DecryptedEnvelope["mouse"]>) => void,
   ): Promise<LoginResponse> {
     if (this._closed) return { ok: false, error: "session-closed" };
+    // A legacy session can't check who sent a `response` (no session
+    // key bound in the presentation), so anyone able to box to us could
+    // answer. Refuse the request instead of trusting the reply.
+    if (this._legacyChannel) return { ok: false, error: "unsupported" };
     const recipientPk = this._walletSessionPk;
     if (!recipientPk) return { ok: false, error: "no-active-session" };
 
@@ -1300,6 +1313,9 @@ export class PrsonLoginSession {
         this._handleCredentialRevoked(envelope);
         return;
       case "response":
+        // Legacy sessions never send requests (see _sendRequest); a
+        // `response` there is unauthenticated, so it resolves nothing.
+        if (this._legacyChannel) return;
         // Wallet replied to an outbound `request`. Match by UUID
         // and resolve the matching promise. Late replies (after
         // timeout) silently no-op — the controller already

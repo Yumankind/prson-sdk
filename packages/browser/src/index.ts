@@ -121,21 +121,25 @@ export type SignInOptions = {
   allowAnonymous?: boolean;
 
   /**
-   * If `true`, the wallet generates a **fresh random Ed25519 keypair**
-   * for this single login instead of the deterministic per-domain
-   * HKDF derivation. The credential's `cnf.jwk` is therefore
-   * **different on every sign-in attempt** — there is no stable per-
-   * user id, and a future mnemonic compromise cannot retroactively
-   * link the user across sessions on this site.
+   * If `true`, the wallet signs in with a **device-only key for your
+   * site** instead of the per-site key derived from the person's
+   * recovery phrase. The wallet makes a random Ed25519 keypair on the
+   * first sign-in to your domain, keeps its seed in this phone's secure
+   * storage only, and reuses it on later sign-ins from the same phone,
+   * so `cnf.jwk.x` stays the same there and the person returns to the
+   * same account. A new key is made after the person revokes your site
+   * in the wallet, on another phone, or after reinstalling the app.
    *
-   * Trade-off: `cnf.jwk.x` is no longer a per-user identifier on this
-   * domain. Sites that key sessions off `cnf.jwk.x` must derive a
-   * usable account id by some other means (e.g. a user-chosen
-   * username on first visit). Best fit for read-only / single-use
-   * flows where re-identification on return is irrelevant.
+   * What it buys: the key isn't derived from the recovery phrase, so a
+   * future phrase compromise can't retroactively link the person to
+   * your site, and no notification handle (one per wallet and site) is
+   * offered. What it doesn't: sign-ins from the same phone are linkable
+   * by `cnf.jwk.x`, like the default — it is not a one-time key.
    *
-   * Combine with `allowAnonymous: true` for a fully unlinkable
-   * anonymous flow. Default false.
+   * Trade-off: the account is tied to the phone. Losing the phone or
+   * the app loses the key, so pair it with your own recovery path.
+   * Combine with `allowAnonymous: true` for an account that carries no
+   * identity at all. Default false.
    *
    * Closes [SECURITY-AUDIT §M-5](../../SECURITY-AUDIT-2026-05-28.md).
    */
@@ -633,9 +637,9 @@ async function runAttempt(
     // Sponsorship offer (advisory on the wire — the server enforces
     // the stored grant's domain/caps/budget at charge time).
     ...(opts.sponsorship?.grantId ? { sponsorship: { grantId: opts.sponsorship.grantId } } : {}),
-    // If set, instructs the wallet to mint a fresh random Ed25519
-    // keypair for this single sign-in (no deterministic per-domain
-    // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
+    // If set, the wallet signs in with a random, device-only key for
+    // this site (kept on that phone and reused there; not derived from
+    // the recovery phrase). Closes M-5; see SignInOptions.ephemeralIdentity.
     ephemeralIdentity: opts.ephemeralIdentity === true,
     // QR-mode remote navigation — wallet surfaces Prev / Next /
     // Submit / Logout / Mouse on a persistent banner. See
@@ -782,8 +786,9 @@ async function runAttempt(
   // presentation (`prson_wsk`). The envelope must have been boxed by
   // that very key — then nobody else (a relay, someone who saw the QR)
   // can talk to this page as the wallet, or swap the key the page
-  // sends to. A wallet that predates it gets a legacy session: it
-  // works, but page-acting messages are ignored (see session.ts).
+  // sends to. A wallet that predates it gets a legacy session: sign-in
+  // and renewals work, but page-acting messages and request replies are
+  // ignored and `request()` resolves "unsupported" (see session.ts).
   const boundKey = verified.binding.walletSessionPk;
   if (boundKey) {
     if (senderPk !== boundKey) {

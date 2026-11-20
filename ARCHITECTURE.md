@@ -179,8 +179,9 @@ on this site — and changing devices loses access to the account. See
        browserPk: b64u(ephKeys.publicKey),
        allowAnonymous: <bool>,    // verifier opts in to self-signed
                                   // anonymous-wallet credentials
-       ephemeralIdentity: <bool>, // verifier requests a fresh per-sign-in
-                                  // key (no stable per-site identifier)
+       ephemeralIdentity: <bool>, // verifier requests a device-only key for
+                                  // this site (random, not derived from the
+                                  // recovery phrase; reused on that phone)
        returnUrl: <string?>,      // app-to-app return leg: https URL the
                                   // wallet opens after delivering the
                                   // credential. Wallet enforces https +
@@ -272,8 +273,11 @@ on this site — and changing devices loses access to the account. See
      Approve the wallet renews it first (renew stops at the relay's
      hard ceiling, claim + 15 min: 409 `ceiling-reached`).
    - If the verifier requested `ephemeralIdentity: true`, the wallet
-     generates a fresh Ed25519 keypair for this sign-in (no HKDF) and
-     uses that as the per-message holder key — no stable per-site id.
+     uses a random Ed25519 keypair for this site that lives only on
+     that phone (no HKDF from the recovery phrase): made on the first
+     sign-in, reused on later ones from the same phone, forgotten when
+     the person removes the site. Sign-ins from that phone are linkable
+     on that site; sign-ins from another phone or after a restore are not.
    - Otherwise wallet derives the per-domain holder key:
        sigSeed = HKDF(identityKey, salt="prson-login-rekey/v1", info=domain)
        sigKey  = Ed25519.fromSeed(sigSeed)

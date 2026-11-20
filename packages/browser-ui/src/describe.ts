@@ -125,7 +125,7 @@ export function describeShares(req: Request): ShareItem[] {
   for (const c of r.requiredClaims ?? []) add(CLAIMS[c] ?? { icon: "check", label: humanize(c) });
   add(
     req.ephemeralIdentity
-      ? { icon: "key", label: "A one-time key", detail: "Nothing links your visits" }
+      ? { icon: "key", label: "A key for this phone only", detail: "Not linked to your Prson identity" }
       : { icon: "key", label: "A sign-in key just for this site" },
   );
   return out;

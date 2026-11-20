@@ -710,6 +710,10 @@ export type UniqueHumanIdEnvelope = {
   issuingCountry: string | null;
   signedAt: string;
   expiresAt: string;
+  /** The sign-in's nonce: the one your server issued for this login. */
+  nonce?: string;
+  /** The wallet's per-site sign-in key (the presentation's `cnf.jwk`, i.e. `prsonId`). */
+  cnf?: { jwk: { kty: "OKP"; crv: "Ed25519"; x: string } };
 };
 
 export type UniqueHumanIdCredential = {
@@ -718,8 +722,39 @@ export type UniqueHumanIdCredential = {
   kid: string;
 };
 
+export type UniqueHumanIdFailureReason =
+  | FragmentVerifyFailureReason
+  /** The envelope has no nonce or no cnf (an old app build), and `allowUnbound` isn't set. */
+  | "unbound"
+  /** `expectedNonce` or `expectedCnfX` wasn't passed. */
+  | "binding_required"
+  | "nonce_mismatch"
+  | "cnf_mismatch";
+
+export type UniqueHumanIdVerifyOptions = FragmentVerifyOptions & {
+  /**
+   * The nonce your server issued for this sign-in (the one you also pass
+   * to `verifyPresentation`). REQUIRED unless `allowUnbound`.
+   */
+  expectedNonce?: string;
+  /**
+   * The wallet's sign-in key from the verified presentation:
+   * `presentation.prsonId` (= `cnf.jwk.x`). REQUIRED unless `allowUnbound`.
+   * Binds the id to this sign-in, so a copied envelope can't be replayed
+   * by someone else.
+   */
+  expectedCnfX?: string;
+  /**
+   * Accept envelopes without a nonce or cnf (wallets older than build
+   * 2026110702). Temporary: an unbound envelope is a bearer token until it
+   * expires. When the envelope does carry them, they are still checked
+   * against whatever you pass.
+   */
+  allowUnbound?: boolean;
+};
+
 export type UniqueHumanIdVerifyResult =
-  | { ok: false; reason: FragmentVerifyFailureReason; detail?: string }
+  | { ok: false; reason: UniqueHumanIdFailureReason; detail?: string }
   | { ok: true; uniqueIdHash: string; envelope: UniqueHumanIdEnvelope; kid: string };
 
 /**
@@ -745,13 +780,14 @@ function canonicalStringify(obj: unknown): string {
 /**
  * Verify a unique-human-id credential. Checks, in order: shape, scope,
  * audience binding (must equal YOUR host — pass `expectedAudience`),
- * expiry, and the notary RSA-SHA256 signature against the published
+ * expiry, the binding to this sign-in (`expectedNonce`, `expectedCnfX`),
+ * and the notary RSA-SHA256 signature against the published
  * JWKS (kid-pinned). On success, `uniqueIdHash` is safe to use as the
  * per-domain uniqueness key.
  */
 export async function verifyUniqueHumanId(
   credential: UniqueHumanIdCredential,
-  opts: FragmentVerifyOptions = {},
+  opts: UniqueHumanIdVerifyOptions = {},
 ): Promise<UniqueHumanIdVerifyResult> {
   const env = credential?.envelope;
   if (
@@ -779,6 +815,22 @@ export async function verifyUniqueHumanId(
   const now = (opts.now ?? new Date()).getTime();
   if (new Date(env.expiresAt).getTime() <= now) {
     return { ok: false, reason: "expired" };
+  }
+  // Binding to this sign-in (nonce + the wallet's sign-in key): without it
+  // the envelope is a bearer token anyone who copies it can replay.
+  const envNonce = typeof env.nonce === "string" ? env.nonce : null;
+  const envCnfX = typeof env.cnf?.jwk?.x === "string" ? env.cnf.jwk.x : null;
+  if (!opts.allowUnbound) {
+    if (!opts.expectedNonce || !opts.expectedCnfX) {
+      return { ok: false, reason: "binding_required", detail: "pass expectedNonce and expectedCnfX (the presentation's prsonId)" };
+    }
+    if (envNonce === null || envCnfX === null) return { ok: false, reason: "unbound" };
+  }
+  if (envNonce !== null && opts.expectedNonce !== undefined && envNonce !== opts.expectedNonce) {
+    return { ok: false, reason: "nonce_mismatch" };
+  }
+  if (envCnfX !== null && opts.expectedCnfX !== undefined && envCnfX !== opts.expectedCnfX) {
+    return { ok: false, reason: "cnf_mismatch" };
   }
   const jwk = await resolveIssuerJwk(credential.kid, opts);
   if (!jwk) return { ok: false, reason: "issuer_key_resolve_failed", detail: credential.kid };

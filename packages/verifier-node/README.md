@@ -134,10 +134,21 @@ const native = await verifySignedFragment(fragment, { expectedAudience: "shop.ex
 
 // "One unique, document-verified human at your domain":
 // { envelope: { scope: "prson-unique-human/1", audience, uniqueIdHash, … }, signature, kid }.
-// Checks scope, audience (must equal expectedAudience), expiry and the
-// signature over the canonical (sorted-keys) envelope.
-const unique = await verifyUniqueHumanId(credential, { expectedAudience: "shop.example.com" });
+// Checks scope, audience (must equal expectedAudience), expiry, the
+// binding to THIS sign-in (nonce + the wallet's sign-in key) and the
+// signature over the canonical (sorted-keys) envelope. Without the binding
+// a copied envelope would work for anyone until it expires.
+const unique = await verifyUniqueHumanId(credential, {
+  expectedAudience: "shop.example.com",
+  expectedNonce: nonce,          // the nonce you passed to verifyPresentation
+  expectedCnfX: result.prsonId,  // the verified presentation's key
+  // allowUnbound: true,         // temporary: accept Prson apps older than
+                                 // build 2026110702 (no nonce/cnf; bearer)
+});
 if (unique.ok) useAsAccountKey(unique.uniqueIdHash); // pairwise: stable here only
+// Failure reasons besides the shared ones: "binding_required" (you didn't
+// pass expectedNonce/expectedCnfX), "unbound" (an old app's envelope),
+// "nonce_mismatch", "cnf_mismatch".
 ```
 
 `resolveIssuerKey(kid, opts?)` fetches (and caches) an issuer key, e.g.

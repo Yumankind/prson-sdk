@@ -23,7 +23,7 @@ import { decodeURLSafe, encodeURLSafe } from "@stablelib/base64";
 
 import { PrsonLoginSession, type LoginEvent } from "./session.js";
 import type { Transport } from "./transport.js";
-import { rtcConfigFor } from "./transport.js";
+import { isLoopbackHost, rtcConfigFor } from "./transport.js";
 import { connectSignaling } from "./signaling.js";
 import { boxToWallet, openEnvelope, type EphemeralKeys } from "./crypto.js";
 import { isSensitiveField } from "./bind.js";
@@ -274,6 +274,21 @@ test("a legacy session (no bound key) ignores page-acting envelopes", async () =
   s.session.close();
 });
 
+test("a legacy session refuses request() and ignores responses", async () => {
+  const s = await makeSession({ legacy: true });
+  const before = s.t.sent.length;
+  const res = await s.session.request({ kind: "claim-value", name: "given_name" }, { timeoutMs: 200 });
+  assert.deepEqual(res, { ok: false, error: "unsupported" });
+  // Nothing went to the unverified key: no request, no focus mirror.
+  await s.session._sendFocus({ name: "email", value: "a@b.c" });
+  assert.equal(s.t.sent.length, before);
+  // An injected `response` resolves nothing and doesn't throw.
+  const anyone = generateKeyPair();
+  s.t.push(walletBox(anyone, s.browser.publicKey, { v: "prson_vp_v1", msg: "response", issuedAt: 0, requestId: "x", result: { ok: true, value: 1 } }));
+  await settle();
+  s.session.close();
+});
+
 // ─── Sensitive fields ──────────────────────────────────────────────
 
 function fakeEl(attrs: Record<string, string>): Element {
@@ -319,9 +334,20 @@ test("rtcConfigFor keeps only TURN servers and goes relay-only", () => {
   ]);
 });
 
-test("rtcConfigFor without TURN (dev relay) falls back to all candidates", () => {
-  const cfg = rtcConfigFor([{ urls: ["stun:stun.cloudflare.com:3478"], username: "", credential: "" }]);
+test("rtcConfigFor without TURN refuses to connect (fails closed)", () => {
+  assert.throws(() => rtcConfigFor([{ urls: ["stun:stun.cloudflare.com:3478"], username: "", credential: "" }]), /no TURN/);
+  assert.throws(() => rtcConfigFor([]), /no TURN/);
+});
+
+test("rtcConfigFor without TURN allows direct candidates only on loopback", () => {
+  const cfg = rtcConfigFor([{ urls: ["stun:stun.cloudflare.com:3478"], username: "", credential: "" }], { allowDirect: true });
   assert.equal(cfg.iceTransportPolicy, "all");
+  for (const h of ["localhost", "app.localhost", "127.0.0.1", "127.1.2.3", "::1", "[::1]"]) {
+    assert.equal(isLoopbackHost(h), true, h);
+  }
+  for (const h of ["example.com", "localhost.example.com", "10.0.0.1", "128.0.0.1", "", undefined, null]) {
+    assert.equal(isLoopbackHost(h), false, String(h));
+  }
 });
 
 class FakeWebSocket extends EventTarget {

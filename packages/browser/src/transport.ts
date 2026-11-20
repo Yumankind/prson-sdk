@@ -27,21 +27,42 @@ export interface Transport {
 }
 
 /**
- * RTCPeerConnection config for the browser side. With TURN available
- * the browser is relay-only (`iceTransportPolicy: "relay"`, no STUN):
- * it gathers only relay candidates, so none of its own addresses (LAN,
- * public) reach the phone — the wallet has done the same since M-4.
- * A dev relay without TURN credentials hands out STUN only; relay-only
- * would find no candidates, so that case falls back to `"all"`.
+ * RTCPeerConnection config for the browser side. The browser is always
+ * relay-only (`iceTransportPolicy: "relay"`, no STUN): it gathers only
+ * relay candidates, so none of its own addresses (LAN, public) reach the
+ * phone — the wallet has done the same since M-4.
+ *
+ * A relay that sends no TURN server would leave nothing to relay
+ * through, and the old fallback (`"all"`) leaked the browser's
+ * addresses. That now fails closed: the sign-in stops with an error.
+ * The one exception is a page on loopback ([allowDirect], for a local
+ * relay without TURN credentials during development), where the direct
+ * candidates stay on the developer's own machine and network.
  */
-export function rtcConfigFor(iceServers: RTCIceServer[]): RTCConfiguration {
+export function rtcConfigFor(iceServers: RTCIceServer[], opts?: { allowDirect?: boolean }): RTCConfiguration {
   const urls = (s: RTCIceServer) => (Array.isArray(s.urls) ? s.urls : [s.urls]);
   const isTurn = (u: string) => /^turns?:/i.test(u);
   const turn = iceServers
     .map((s) => ({ ...s, urls: urls(s).filter(isTurn) }))
     .filter((s) => s.urls.length > 0);
   if (turn.length > 0) return { iceServers: turn, iceTransportPolicy: "relay" };
-  return { iceServers, iceTransportPolicy: "all" };
+  if (opts?.allowDirect === true) return { iceServers, iceTransportPolicy: "all" };
+  throw new Error("transport: the relay sent no TURN server; refusing a direct connection");
+}
+
+/** True when [hostname] is this machine: `localhost` (and `*.localhost`),
+ *  127.0.0.0/8 or `::1`. */
+export function isLoopbackHost(hostname: string | undefined | null): boolean {
+  if (!hostname) return false;
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h === "::1") return true;
+  return /^127(?:\.\d{1,3}){3}$/.test(h);
+}
+
+function pageIsLoopback(): boolean {
+  const loc = (globalThis as { location?: { hostname?: string } }).location;
+  return isLoopbackHost(loc?.hostname);
 }
 
 /** How long a live data channel must stay silent after a `peer-gone`
@@ -58,7 +79,7 @@ export async function establishTransport(opts: {
    */
   iceServers: RTCIceServer[];
 }): Promise<Transport> {
-  const pc = new RTCPeerConnection(rtcConfigFor(opts.iceServers));
+  const pc = new RTCPeerConnection(rtcConfigFor(opts.iceServers, { allowDirect: pageIsLoopback() }));
 
   // Browser is the initiator → opens the data channel before the
   // offer. Negotiated=false so the wallet sees `ondatachannel`.

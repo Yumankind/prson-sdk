@@ -34,7 +34,7 @@ test("level 0, unique human, organisations, one-time keys and anonymous sign-in"
   const org = describeShares({ required: { identityType: "organization" } });
   assert.equal(org[0]?.label, "An organisation identity");
   const oneTime = describeShares({ ephemeralIdentity: true });
-  assert.equal(oneTime[oneTime.length - 1]?.label, "A one-time key");
+  assert.equal(oneTime[oneTime.length - 1]?.label, "A key for this phone only");
   assert.equal(describeCode(codeUrl({ allowAnonymous: true })).anonymousAllowed, true);
 });
 

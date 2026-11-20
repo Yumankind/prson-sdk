@@ -6,6 +6,18 @@ Versions follow SemVer; while on 0.x, minor versions may break the API.
 
 ## Unreleased — Sign in with Prson channel hardening
 
+### `@prson/login-verifier` — breaking
+
+- **`verifyUniqueHumanId` checks that the id belongs to this sign-in.**
+  New options `expectedNonce` (the sign-in's nonce) and `expectedCnfX`
+  (the verified presentation's `prsonId`) are required; without them the
+  result is `binding_required`. An envelope without `nonce` and `cnf`
+  (Prson apps before build 2026110702) fails with `unbound` unless you
+  pass `allowUnbound: true`. Before this, a copied envelope worked for
+  anyone until it expired. New failure reasons: `binding_required`,
+  `unbound`, `nonce_mismatch`, `cnf_mismatch`. The envelope type now
+  declares `nonce` and `cnf`.
+
 Needs a relay that sends `{"type":"ice"}` after the claim (older relays
 that put `turn` in the draft response still work) and a Prson app with
 envelope v2 for the full protection.

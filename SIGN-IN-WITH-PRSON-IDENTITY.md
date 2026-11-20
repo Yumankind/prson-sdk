@@ -333,7 +333,9 @@ identities (level ≥ 4), fetches the credential at approve time
 envelope. The browser SDK gates on its presence and exposes it as
 `result.uniqueHumanId` — an OPAQUE pass-through the host MUST verify
 server-side with `@prson/login-verifier`'s `verifyUniqueHumanId`
-(`expectedAudience` = your host), then key accounts off
+(`expectedAudience` = your host, `expectedNonce` = this sign-in's nonce,
+`expectedCnfX` = the presentation's `prsonId`, which bind the id to this
+sign-in so a copied one can't be replayed), then key accounts off
 `envelope.uniqueIdHash`.
 
 ### Sponsored verifications (`sponsorship: { grantId }`)
@@ -554,7 +556,7 @@ verifyPresentation(body.presentation, {
   expectedNonce: body.nonce,
 });
 verifySignedFragment(fact.credential, { expectedAudience: "your-domain.com" });
-verifyUniqueHumanId(body.uniqueHumanId, { expectedAudience: "your-domain.com" });
+verifyUniqueHumanId(body.uniqueHumanId, { expectedAudience: "your-domain.com", expectedNonce: body.nonce, expectedCnfX: presentation.prsonId });
 ```
 
 Everything is pairwise-scoped to your domain — the ids you receive are

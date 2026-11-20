@@ -104,11 +104,12 @@ Consequences:
 
 ### Ephemeral identity (M-5)
 
-When `signIn({ ephemeralIdentity: true })` is passed, the wallet
-generates a fresh random Ed25519 keypair per sign-in instead of the
-deterministic per-domain key. Each session on the same site lands as
-a *different* `cnf.jwk.x`. The trade-off is no stable per-user id on
-that domain — best fit for read-only / single-use flows.
+When `signIn({ ephemeralIdentity: true })` is passed, the wallet uses a
+random Ed25519 keypair for the site instead of the per-domain key derived
+from the recovery phrase. The key lives only on that phone and is reused
+there, so sign-ins from the same phone land as the same `cnf.jwk.x`; a
+different phone, or the same person after a restore, lands as a different
+one. The trade-off is that the account can't be recovered elsewhere.
 
 The session secret is persisted in the wallet's secure storage so a
 return visit lands in the same anonymous account on the same device.

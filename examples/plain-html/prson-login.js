@@ -2871,8 +2871,11 @@ var PrsonLoginSession = class {
      * True when the sign-in presentation didn't bind a session key (a
      * wallet older than envelope v2). The sender of inbound envelopes
      * can't be checked then, so envelopes that act on the page (`nav`,
-     * `value`, `mouse-update`, file transfer) are ignored; everything
-     * else still works. See SECURITY.md §4.
+     * `value`, `mouse-update`, file transfer) and request replies
+     * (`response`) are ignored, `request()` resolves with
+     * `{ ok: false, error: "unsupported" }` and no field values are sent
+     * (`focus`). Sign-in, renewals and claim updates (all verified
+     * presentations) and sign-out still work. See SECURITY.md §4.
      */
     this._legacyChannel = false;
     /** `iat` of the newest verified presentation (sign-in or renewal).
@@ -3137,6 +3140,9 @@ var PrsonLoginSession = class {
    *      replied. Defaults to 60 s.
    *   * `session-closed` — the session shut down with this request
    *      in flight.
+   *   * `unsupported` — the wallet predates envelope v2 (it bound no
+   *      session key into the sign-in), so its replies couldn't be told
+   *      apart from anyone else's. Nothing is sent to it.
    *
    * Wire grammar: outbound envelope shape is
    * `{ v, msg: "request", issuedAt, domain, requestId, kind, ...kindFields }`,
@@ -3178,6 +3184,7 @@ var PrsonLoginSession = class {
   async _sendFocus(focus) {
     if (this._closed) return;
     if (!this._walletSessionPk) return;
+    if (this._legacyChannel) return;
     await this._sendWithAck({
       msg: "focus",
       focus
@@ -3294,6 +3301,7 @@ var PrsonLoginSession = class {
   }
   async _sendRequest(req, opts, onMouseFrame) {
     if (this._closed) return { ok: false, error: "session-closed" };
+    if (this._legacyChannel) return { ok: false, error: "unsupported" };
     const recipientPk = this._walletSessionPk;
     if (!recipientPk) return { ok: false, error: "no-active-session" };
     const timeoutMs = opts?.timeoutMs ?? 6e4;
@@ -3634,6 +3642,7 @@ var PrsonLoginSession = class {
         this._handleCredentialRevoked(envelope);
         return;
       case "response":
+        if (this._legacyChannel) return;
         this._requestController.resolve(envelope);
         if (envelope.requestId) this._mouseSubscribers.delete(envelope.requestId);
         return;
@@ -4011,16 +4020,28 @@ async function connectSignaling(opts) {
 }
 
 // src/transport.ts
-function rtcConfigFor(iceServers) {
+function rtcConfigFor(iceServers, opts) {
   const urls = (s) => Array.isArray(s.urls) ? s.urls : [s.urls];
   const isTurn = (u) => /^turns?:/i.test(u);
   const turn = iceServers.map((s) => ({ ...s, urls: urls(s).filter(isTurn) })).filter((s) => s.urls.length > 0);
   if (turn.length > 0) return { iceServers: turn, iceTransportPolicy: "relay" };
-  return { iceServers, iceTransportPolicy: "all" };
+  if (opts?.allowDirect === true) return { iceServers, iceTransportPolicy: "all" };
+  throw new Error("transport: the relay sent no TURN server; refusing a direct connection");
+}
+function isLoopbackHost(hostname) {
+  if (!hostname) return false;
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h === "::1") return true;
+  return /^127(?:\.\d{1,3}){3}$/.test(h);
+}
+function pageIsLoopback() {
+  const loc = globalThis.location;
+  return isLoopbackHost(loc?.hostname);
 }
 var PEER_GONE_CONFIRM_MS = 6e3;
 async function establishTransport(opts) {
-  const pc = new RTCPeerConnection(rtcConfigFor(opts.iceServers));
+  const pc = new RTCPeerConnection(rtcConfigFor(opts.iceServers, { allowDirect: pageIsLoopback() }));
   const dc = pc.createDataChannel("prson-login", { ordered: true });
   pc.addEventListener("icecandidate", (e) => {
     if (e.candidate) opts.signaling.send({ msg: "candidate", candidate: e.candidate.toJSON() });
@@ -5825,9 +5846,9 @@ async function runAttempt(opts, env) {
     // Sponsorship offer (advisory on the wire — the server enforces
     // the stored grant's domain/caps/budget at charge time).
     ...opts.sponsorship?.grantId ? { sponsorship: { grantId: opts.sponsorship.grantId } } : {},
-    // If set, instructs the wallet to mint a fresh random Ed25519
-    // keypair for this single sign-in (no deterministic per-domain
-    // HKDF). Closes M-5; see SignInOptions.ephemeralIdentity.
+    // If set, the wallet signs in with a random, device-only key for
+    // this site (kept on that phone and reused there; not derived from
+    // the recovery phrase). Closes M-5; see SignInOptions.ephemeralIdentity.
     ephemeralIdentity: opts.ephemeralIdentity === true,
     // QR-mode remote navigation — wallet surfaces Prev / Next /
     // Submit / Logout / Mouse on a persistent banner. See
