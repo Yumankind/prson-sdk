@@ -22,6 +22,8 @@
  *     hit the page normally — the overlay is purely cosmetic.
  */
 
+import { cspStyleNonce } from "./csp.js";
+
 interface OverlayHandle {
   host: HTMLElement;
   close: () => void;
@@ -60,6 +62,8 @@ export function openPointPhoneOverlay(): OverlayHandle {
 
   const shadow = host.attachShadow({ mode: "open" });
   const style = document.createElement("style");
+  const nonce = cspStyleNonce();
+  if (nonce) style.nonce = nonce;
   style.textContent = OVERLAY_CSS;
   shadow.appendChild(style);
 

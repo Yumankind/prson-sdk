@@ -32,6 +32,7 @@ import {
 } from "./qr.js";
 import type { DraftResult } from "./api.js";
 import { verifyPresentation } from "./verify.js";
+import { PrsonCspError, watchCsp } from "./csp.js";
 import { notifyHandleFrom } from "./notify.js";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -472,6 +473,9 @@ export class PrsonLogin {
     if (prior) await prior.abort();
     const me = makeInflight();
     _inflight = me;
+    // Turn a CSP block of Prson's hosts into an error that says what to allow.
+    const csp = watchCsp(resolveSignalingBase(opts));
+    me.pushTeardown(() => csp.stop());
 
     try {
       const domain = opts.domain ?? window.location.origin.replace(/^https?:\/\//, "");
@@ -532,8 +536,10 @@ export class PrsonLogin {
           ui.handle?.dispose();
           dialog.current?.dispose();
           return out;
-        } catch (err) {
-          if (err instanceof LoginAbortedError) throw err;
+        } catch (caught) {
+          if (caught instanceof LoginAbortedError) throw caught;
+          const err = await csp.explain(caught);
+          if (err instanceof PrsonCspError && typeof console !== "undefined") console.error(err.message);
           // Show what went wrong where the person is looking.
           ui.handle?.update?.({ state: "error", message: friendlyError(err) });
           if (!dialog.current || !ui.handle?.update) {
@@ -554,6 +560,7 @@ export class PrsonLogin {
         }
       }
     } finally {
+      csp.stop();
       // Release the slot ONLY if we still own it. If a newer signIn()
       // displaced us mid-flight, `_inflight` already points at
       // someone else; we mustn't clobber their entry. The displacing
@@ -919,6 +926,7 @@ async function runAttempt(
 
 /** A failure in words the person signing in can act on. */
 function friendlyError(err: unknown): string {
+  if (err instanceof PrsonCspError) return "This site's security settings blocked Prson. The site's owner needs to allow Prson in its Content-Security-Policy.";
   const m = err instanceof Error ? err.message : String(err);
   if (/Too many login sessions/i.test(m)) return "Too many sign-ins from this network. Wait a moment and try again.";
   if (/createDraft failed|Failed to fetch|NetworkError|signaling: WS/i.test(m)) {
@@ -932,6 +940,7 @@ function friendlyError(err: unknown): string {
 
 // Re-export for verifier-only consumers + custom UIs.
 export { PrsonLoginSession };
+export { PrsonCspError, PRSON_CONNECT_SRC, connectSourcesFor, cspStyleNonce } from "./csp.js";
 export { NOTIFY_HANDLE, notifyHandleFrom } from "./notify.js";
 export type { LoginQrContext, LoginQrHandle, LoginQrRenderer, LoginUiState } from "./qr.js";
 export type { Renewal };

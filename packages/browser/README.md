@@ -48,8 +48,10 @@ type SignInOptions = {
   /** What you require from the holder. The SDK presents this to the
    *  user in the wallet's login drawer — the user can refuse. */
   required?: {
-    /** 1..6. Default: no minimum. Use 5 to force NFC-backed VC. */
-    minVerificationLevel?: 1 | 2 | 3 | 4 | 5 | 6;
+    /** 0..6. Omitted ⇒ 1 (a live selfie, checked on the phone). 5 needs a
+     *  chip-checked passport or ID card. See "Choose your level" in the
+     *  top-level README. */
+    minVerificationLevel?: 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
     /** Standard SD-JWT-VC claim names (e.g. "given_name", "birthdate").
      *  Omit to ask for `verified_human` only. */
@@ -61,6 +63,12 @@ type SignInOptions = {
 
     /** Default: "personal". */
     identityType?: "personal" | "organization";
+
+    /** Ask for a unique-human id: the same `uniqueIdHash` for one person
+     *  on your site whatever phone or install they use (level 5+).
+     *  `result.prsonId` is NOT one per person; this is. Verify it on your
+     *  server with `verifyUniqueHumanId`. */
+    uniqueHumanId?: boolean;
   };
 
   /** If `true`, the SDK ALSO accepts a self-signed **anonymous-wallet**
@@ -218,6 +226,14 @@ class PrsonLogin {
 ```
 
 ## Behaviour notes
+
+- **Content-Security-Policy.** A site with a CSP must allow Prson's hosts
+  in `connect-src` and give the injected styles a nonce
+  (`<meta property="csp-nonce" nonce="…">`). The exact lines are in the
+  top-level README, under "Content-Security-Policy". A blocked request
+  makes `signIn()` reject with `PrsonCspError`, which says what to add.
+- **Codes last 3 minutes** and work once. The dialog offers "Get a new
+  code" when one expires, and `signIn()` keeps waiting.
 
 - **Same-device detection.** If the SDK detects a touch device + the
   Prson app is installed (universal-link probe), the QR is replaced

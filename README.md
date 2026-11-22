@@ -20,7 +20,7 @@ import { PrsonLogin } from "@prson/login-sdk";
 const result = await PrsonLogin.signIn({
   domain: window.location.hostname,                // bound into the request
   required: {
-    minVerificationLevel: 5,                       // weak < 5 ≤ strong
+    minVerificationLevel: 5,                       // see "Choose your level" below
     requiredClaims: ["given_name"],                // standard SD-JWT-VC names
     predicates: ["age_gte_18"],                    // on-demand signed predicates
     identityType: "personal",                      // | "organization"
@@ -36,8 +36,121 @@ console.log(result.cnf.jwk);           // holder's Ed25519 public key (verify KB
 console.log(result.session.expiresAt); // ms epoch — renew before this
 ```
 
-That's it on the happy path. Everything below is the design surface
-behind those four lines.
+That's it on the happy path. Before you ship, read the next four sections:
+they're the things integrators most often get wrong.
+
+## Choose your level
+
+`required.minVerificationLevel` decides who can sign in. The levels are
+defined in Prson's identity-levels spec; in short:
+
+| Level | What the person did | Checked by | Good for |
+|---|---|---|---|
+| 0 | Nothing (pseudonymous identity) | — | Comments, saved settings: a stable key and nothing more |
+| 1 | Live selfie in the Prson app | Their phone | Low-friction sign-up, growth, "a real person is here right now" |
+| 2–3 | Selfie plus fingerprint or Face ID | Their phone | As level 1 |
+| 4 | Selfie plus a photo of an ID document | Their phone | As level 1; not a verified document |
+| 5 | Passport or ID card **chip** read and checked | Prson's server | "Verified human"; one account per person (with `uniqueHumanId`) |
+| 6 | Level 5 plus a face match against the chip photo | Their phone, attested | The strongest: the person holding the phone is the document's owner |
+
+Levels 1–4 are checked on the phone. They're labelled "checked on a
+genuine device" when Prson verified an App Attest / Play Integrity
+attestation, and "self-declared" otherwise. They are never "verified human".
+
+> **`prsonId` is not one per person.** `result.prsonId` is the key of the
+> person's Prson app on your site. It stays the same while they keep the
+> app, but someone who deletes and reinstalls Prson (or uses a second phone)
+> signs in with a new `prsonId`, at any level.
+>
+> If you need **one per person**, for a free credit, a trial, a vote or
+> a ban that sticks, ask for `required.uniqueHumanId: true`. It requires
+> level 5 (a chip-checked passport or ID card) and gives you a
+> `uniqueIdHash` that is the same for that person on your site, whatever
+> phone or install they use, and different on every other site. Verify it
+> on your server with `verifyUniqueHumanId` from
+> [`@prson/login-verifier`](packages/verifier-node/README.md), and key
+> the one-per-person rule on `uniqueIdHash`, not on `prsonId`.
+>
+> At levels 1–4 there is no one-per-person signal today. If you give
+> something away at level 1, add your own limits (per account, per network,
+> per payment method) and expect some repeats.
+
+## Content-Security-Policy
+
+If your site sends a `Content-Security-Policy`, allow these, or sign-in
+fails:
+
+```
+connect-src 'self' https://signaling.prson.net wss://signaling.prson.net https://app.prson.net https://api.prson.net;
+style-src   'self' 'nonce-<your nonce>';
+```
+
+- **`connect-src`:** `signaling.prson.net` makes the sign-in code and
+  carries the WebSocket. `app.prson.net` serves the issuer's public keys
+  (`/.well-known/jwt-vc-issuer`). `api.prson.net` serves the revocation
+  lists the browser checks. The same list is exported as
+  `PRSON_CONNECT_SRC`. With `environment: "dev"` or your own
+  `signalingBase`, use `connectSourcesFor(base)` instead.
+- **`style-src`:** the sign-in dialog and the overlays add a `<style>`
+  element. Put your nonce on a `<meta property="csp-nonce" nonce="…">`
+  tag (the convention Vite uses) and the SDK copies it onto every style
+  element it adds. Without a nonce you need `'unsafe-inline'` in
+  `style-src`. Alternatively, serve `PRSON_LOGIN_UI_CSS` yourself inside
+  a `<style data-prson-login-ui>` element, and the dialog won't add its
+  own (the kiosk overlays still need the nonce).
+- **`script-src`:** nothing extra when you bundle the SDK or serve it from
+  your own origin (recommended). If you import the hosted bundle from
+  `https://prson.net/vendor/prson-login/`, add `https://prson.net`. That
+  bundle is unversioned, so pin your own copy for production.
+- **Nothing else:** no frames, no remote images, no fonts. The QR code and
+  icons are inline SVG. The phone-to-browser connection is WebRTC
+  (through Cloudflare's TURN relay), which CSP doesn't govern.
+
+When your policy blocks a Prson host during `signIn()`, the promise
+rejects with a `PrsonCspError` (with the SDK's dialog, once the person
+closes it). Its message names the directive, what it
+blocked and the sources to add; the SDK also logs it to the console. The
+person sees "This site's security settings blocked Prson" instead of a
+generic network error.
+
+## How long a code lasts
+
+- **The QR code (or the "Open Prson" button on phones) is valid for 3
+  minutes** from when it's shown. A ring around the code counts down and
+  turns darker for the last 30 seconds. When it runs out, the dialog shows
+  "This code expired" with a **Get a new code** button. That makes a fresh
+  code in place, and `signIn()` keeps waiting, so you don't need to do
+  anything. With `ui.mountQrInto`, your page gets the bubbling
+  `prson-login-refresh-requested` event; call `signIn()` again from it,
+  or let the SDK refresh the code itself.
+- **A code works once.** It's bound to this browser tab's temporary key,
+  so a code someone else scanned, or one sent in a message, is useless.
+- **After sign-in, the session lasts `ttlMinutes`** (at most 2 minutes
+  today) and is extended from the phone. See
+  [Sessions, renewal, revocation](#sessions-renewal-revocation).
+
+## Verifying on your server: which runtimes
+
+`@prson/login-verifier` uses `node:crypto` and `jose`. Tested on 22 Nov
+2026 (issuing and checking a fact credential and a unique-human id, and
+rejecting a tampered one):
+
+| Runtime | Works |
+|---|---|
+| Node.js 20 or later | Yes |
+| Bun | Yes |
+| Cloudflare Workers | Yes, in workerd. Turn on the `nodejs_compat` compatibility flag. |
+| Deno | Not tested yet (import it with the `npm:` specifier) |
+| Vercel Edge / Next.js `runtime = "edge"` | No: the Edge runtime has no `node:crypto`. Use the Node.js runtime for the route that verifies. |
+
+## Quickstarts
+
+Working examples in [`examples/`](examples/):
+
+- [`plain-html/`](examples/plain-html/): a static page with the button and dialog.
+- [`express-verifier/`](examples/express-verifier/): a Node.js server that makes the nonce and verifies the result.
+
+Next.js, Nuxt and Cloudflare Workers examples aren't written yet.
 
 ---
 
@@ -80,7 +193,7 @@ Prson's wire format.
 
 ## What you're getting
 
-Two-package monorepo:
+Four packages:
 
 ```
 login-sdk/
@@ -90,16 +203,11 @@ login-sdk/
 ├── TRUST-CHAIN.md           # identity proof end-to-end + token design decisions
 ├── packages/
 │   ├── browser/             # @prson/login-sdk        (this is the SDK)
-│   │   ├── README.md
-│   │   ├── package.json
-│   │   └── src/
-│   └── verifier-node/       # @prson/login-verifier   (reference verifier)
-│       ├── README.md
-│       ├── package.json
-│       └── src/
+│   ├── browser-ui/          # @prson/login-sdk-ui     (button + dialog)
+│   ├── verifier-node/       # @prson/login-verifier   (server checks)
+│   └── cli-node/            # @prson/login-cli        (command-line sign-in)
 └── examples/
     ├── plain-html/          # drop into any static site
-    ├── next/                # Next.js App Router example
     └── express-verifier/    # tiny Node.js verifier that prints claims
 ```
 

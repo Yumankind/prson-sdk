@@ -6,6 +6,21 @@ Versions follow SemVer; while on 0.x, minor versions may break the API.
 
 ## Unreleased — Sign in with Prson channel hardening
 
+### `@prson/login-sdk` and `@prson/login-sdk-ui` — Content-Security-Policy
+
+- **`signIn()` rejects with `PrsonCspError` when the page's CSP blocked a
+  Prson host**, naming the directive, what it blocked and the sources to
+  add, instead of a bare "Failed to fetch". The dialog tells the person the
+  site's security settings blocked Prson.
+- **Injected `<style>` elements take the page's nonce** from
+  `<meta property="csp-nonce" nonce="…">`. The UI logs a console error
+  when the page's CSP blocked its stylesheet.
+- New exports: `PrsonCspError`, `PRSON_CONNECT_SRC`, `connectSourcesFor`,
+  `cspStyleNonce`.
+- README: "Choose your level" (and that `prsonId` is not one per person;
+  `uniqueHumanId` is), the CSP lines, how long a code lasts, and which
+  runtimes the verifier runs on.
+
 ### `@prson/login-verifier` — breaking
 
 - **`verifyUniqueHumanId` checks that the id belongs to this sign-in.**

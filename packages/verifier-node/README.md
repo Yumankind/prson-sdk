@@ -17,8 +17,11 @@
 npm install @prson/login-verifier
 ```
 
-Node 20 or later. This package is server-side only and has no browser
-bundle.
+Server-side only; there's no browser bundle. Runs on Node.js 20 or later,
+Bun, and Cloudflare Workers with the `nodejs_compat` compatibility flag
+(tested 22 Nov 2026). It doesn't run on Vercel Edge or Next.js
+`runtime = "edge"`, which have no `node:crypto`: verify in a Node.js
+route instead. Deno isn't tested yet.
 
 ```bash
 npm install @prson/login-verifier

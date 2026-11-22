@@ -286,8 +286,21 @@ export function injectStylesOnce(): void {
   if (document.querySelector("style[data-prson-login-ui]")) return;
   const el = document.createElement("style");
   el.setAttribute("data-prson-login-ui", "1");
+  // Pages whose style-src uses a nonce: <meta property="csp-nonce" nonce="…">.
+  // Only the nonce attribute (hidden from CSS selectors), never `content`.
+  const nonceMeta = document.querySelector<HTMLMetaElement>('meta[property="csp-nonce"]');
+  const nonce = nonceMeta ? nonceMeta.nonce || nonceMeta.getAttribute("nonce") : "";
+  if (nonce) el.nonce = nonce;
   el.textContent = PRSON_LOGIN_UI_CSS;
   // Append rather than prepend so partner-supplied stylesheets that
   // load earlier still win the cascade tie-break by default.
   document.head.append(el);
+  // A style-src the element doesn't satisfy leaves it without a sheet.
+  if (!el.sheet && typeof console !== "undefined") {
+    console.error(
+      "Prson sign-in: this page's Content-Security-Policy blocked the dialog's stylesheet. " +
+        "Allow it with a nonce (<meta property=\"csp-nonce\" nonce=\"…\">) or 'unsafe-inline' in style-src, " +
+        "or serve PRSON_LOGIN_UI_CSS from your own stylesheet in a <style data-prson-login-ui> element.",
+    );
+  }
 }
