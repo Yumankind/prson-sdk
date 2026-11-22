@@ -7,6 +7,7 @@
  * host, the failure is reported as a `PrsonCspError` that says which
  * directive blocked what and which sources to add.
  */
+import { PrsonLoginError } from "./errors.js";
 
 /** Hosts the browser SDK talks to in production (see the README's CSP section). */
 export const PRSON_CONNECT_SRC = [
@@ -17,12 +18,13 @@ export const PRSON_CONNECT_SRC = [
 ] as const;
 
 /** Thrown by `signIn()` when the page's Content-Security-Policy blocked Prson. */
-export class PrsonCspError extends Error {
+export class PrsonCspError extends PrsonLoginError {
   readonly directive: string;
   readonly blockedUri: string;
   readonly allow: string[];
   constructor(directive: string, blockedUri: string, allow: string[]) {
     super(
+      "csp_blocked",
       `This page's Content-Security-Policy blocked Prson sign-in: ${directive} doesn't allow ${blockedUri}. ` +
         `Add to connect-src: ${allow.join(" ")}`,
     );
@@ -34,7 +36,7 @@ export class PrsonCspError extends Error {
 }
 
 /** The connect-src sources a sign-in against `signalingBase` needs. */
-export function connectSourcesFor(signalingBase: string): string[] {
+export function connectSourcesFor(signalingBase: string, issuerJwksUri?: string): string[] {
   const out = new Set<string>();
   try {
     const u = new URL(signalingBase);
@@ -43,8 +45,17 @@ export function connectSourcesFor(signalingBase: string): string[] {
   } catch {
     /* a bad base fails elsewhere with its own error */
   }
-  out.add("https://app.prson.net");
-  out.add("https://api.prson.net");
+  if (issuerJwksUri) {
+    // The dev issuer: its keys and revocation lists are on the dev API.
+    try {
+      out.add(new URL(issuerJwksUri).origin);
+    } catch {
+      /* ignore a bad override */
+    }
+  } else {
+    out.add("https://app.prson.net");
+    out.add("https://api.prson.net");
+  }
   return [...out];
 }
 
@@ -75,11 +86,11 @@ export type CspWatch = {
  * Watch for CSP blocks of Prson hosts during a sign-in. A no-op outside
  * a browser.
  */
-export function watchCsp(signalingBase: string): CspWatch {
+export function watchCsp(signalingBase: string, issuerJwksUri?: string): CspWatch {
   if (typeof document === "undefined" || typeof document.addEventListener !== "function") {
     return { explain: async (e) => e, stop: () => {} };
   }
-  const allow = connectSourcesFor(signalingBase);
+  const allow = connectSourcesFor(signalingBase, issuerJwksUri);
   const prsonHosts = new Set(allow.map(hostOf).filter((h): h is string => !!h));
   let seen: { directive: string; blockedUri: string } | null = null;
   const onViolation = (ev: Event) => {

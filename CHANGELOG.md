@@ -6,6 +6,24 @@ Versions follow SemVer; while on 0.x, minor versions may break the API.
 
 ## Unreleased — Sign in with Prson channel hardening
 
+### `@prson/login-sdk` — error codes and the dev issuer
+
+- **Every `signIn()` rejection is a `PrsonLoginError` with a `code`**
+  (`aborted`, `expired`, `level_too_low`, `unique_human_missing`,
+  `presentation_rejected` with `reason`, `csp_blocked`, `rate_limited`,
+  `network`, `invalid_options`, `protocol`, `unknown` with `cause`).
+  `LoginAbortedError` and `PrsonCspError` extend it. Messages are unchanged.
+- **`environment: "dev"` now trusts the dev issuer** (`TRUSTED_ISSUER_DEV`,
+  keys at `ISSUER_JWKS_DEV`); before, dev credentials always failed the
+  browser's check. Production sign-ins still trust only `did:web:app.prson.net`.
+  Dev mode on any host other than localhost logs a warning.
+
+### `@prson/login-verifier`
+
+- `verifyUniqueHumanId` accepts `expectedAudience` as the bare host or as
+  `https://host` (a trailing slash is ignored); any other scheme, a port or
+  a path still fails with `audience_mismatch`.
+
 ### `@prson/login-sdk` and `@prson/login-sdk-ui` — Content-Security-Policy
 
 - **`signIn()` rejects with `PrsonCspError` when the page's CSP blocked a

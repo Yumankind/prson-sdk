@@ -804,7 +804,11 @@ export async function verifyUniqueHumanId(
   if (env.scope !== "prson-unique-human/1") {
     return { ok: false, reason: "unsupported_format", detail: `scope ${String(env.scope)}` };
   }
-  const expected = (opts.expectedAudience ?? "").trim().toLowerCase();
+  // The envelope names the bare host; accept it as "shop.example.com" or as
+  // "https://shop.example.com" (the form verifyPresentation takes), so one
+  // value works for both checks. Nothing else is stripped: a path, port or
+  // other scheme still mismatches.
+  const expected = (opts.expectedAudience ?? "").trim().toLowerCase().replace(/^https:\/\//, "").replace(/\/$/, "");
   if (!expected || expected !== env.audience.toLowerCase()) {
     return {
       ok: false,

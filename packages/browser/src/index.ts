@@ -33,6 +33,7 @@ import {
 import type { DraftResult } from "./api.js";
 import { verifyPresentation } from "./verify.js";
 import { PrsonCspError, watchCsp } from "./csp.js";
+import { PrsonLoginError, asLoginError } from "./errors.js";
 import { notifyHandleFrom } from "./notify.js";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -320,6 +321,15 @@ export const PROTOCOL_VERSION = "prson_vp_v1";
  */
 export const ENVELOPE_VERSION = 2;
 export const TRUSTED_ISSUER = "did:web:app.prson.net";
+/** The dev API's issuer and where it publishes its keys. Trusted only with
+ *  `environment: "dev"`; never accept dev credentials in production. */
+export const TRUSTED_ISSUER_DEV = "did:web:prson-app-dev.web.app:.well-known:dev";
+export const ISSUER_JWKS_DEV = "https://prson-api-dev.powerhouse.workers.dev/.well-known/jwt-vc-issuer";
+
+/** Which issuer a sign-in trusts: production's, or the dev API's with `environment: "dev"`. */
+export function issuerFor(opts: { environment?: "production" | "dev" }): { trustedIssuer: string; jwksUri?: string } {
+  return opts.environment === "dev" ? { trustedIssuer: TRUSTED_ISSUER_DEV, jwksUri: ISSUER_JWKS_DEV } : { trustedIssuer: TRUSTED_ISSUER };
+}
 export const KNOWN_VCTS = [
   "https://app.prson.net/credentials/verified-human/v1",
   "https://app.prson.net/credentials/verified-identity/v1",
@@ -383,9 +393,9 @@ export function resolveSignalingBase(opts: {
  * this — the user's second click is the cancellation signal — but
  * the typed error lets you distinguish it from real failures.
  */
-export class LoginAbortedError extends Error {
+export class LoginAbortedError extends PrsonLoginError {
   constructor(message = "sign-in aborted by a newer signIn() call") {
-    super(message);
+    super("aborted", message);
     this.name = "LoginAbortedError";
   }
 }
@@ -474,7 +484,11 @@ export class PrsonLogin {
     const me = makeInflight();
     _inflight = me;
     // Turn a CSP block of Prson's hosts into an error that says what to allow.
-    const csp = watchCsp(resolveSignalingBase(opts));
+    const csp = watchCsp(resolveSignalingBase(opts), issuerFor(opts).jwksUri);
+    // Dev mode trusts the dev issuer, whose test identities anyone can make: say so on a real site.
+    if (opts.environment === "dev" && typeof location !== "undefined" && !/^(localhost|127\.0\.0\.1|\[::1\])$|\.localhost$|\.test$/.test(location.hostname)) {
+      console.warn(`Prson sign-in is in dev mode on ${location.hostname}: it accepts dev credentials. Remove environment: "dev" before going live.`);
+    }
     me.pushTeardown(() => csp.stop());
 
     try {
@@ -538,7 +552,7 @@ export class PrsonLogin {
           return out;
         } catch (caught) {
           if (caught instanceof LoginAbortedError) throw caught;
-          const err = await csp.explain(caught);
+          const err = asLoginError(await csp.explain(caught));
           if (err instanceof PrsonCspError && typeof console !== "undefined") console.error(err.message);
           // Show what went wrong where the person is looking.
           ui.handle?.update?.({ state: "error", message: friendlyError(err) });
@@ -629,7 +643,7 @@ async function runAttempt(
   const given = typeof opts.nonce === "function" ? await guard(Promise.resolve(opts.nonce())) : opts.nonce;
   checkAborted();
   if (given !== undefined && (typeof given !== "string" || !/^[A-Za-z0-9_-]{22,128}$/.test(given))) {
-    throw new Error("nonce must be 22-128 base64url characters (at least 16 random bytes)");
+    throw new PrsonLoginError("invalid_options", "nonce must be 22-128 base64url characters (at least 16 random bytes)");
   }
   const nonce = given ?? b64u(crypto.getRandomValues(new Uint8Array(32)));
   const request = {
@@ -759,7 +773,7 @@ async function runAttempt(
   show({ state: "verifying" });
   const { envelope, senderPk } = await openEnvelope(first, ephKeys);
   if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
-    throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
+    throw new PrsonLoginError("protocol", `Unexpected first message: ${envelope.v}/${envelope.msg}`);
   }
   // After the post-ROADMAP-§1 envelope grammar made `presentation`
   // optional (so it can be absent on `display-update` /
@@ -768,7 +782,7 @@ async function runAttempt(
   // Defensive runtime check + local rebind for type narrowing.
   const presentationStr = envelope.presentation;
   if (!presentationStr) {
-    throw new Error("Initial presentation envelope had no presentation field");
+    throw new PrsonLoginError("protocol", "Initial presentation envelope had no presentation field");
   }
 
   // 8. Verify the presentation cryptographically before we hand it
@@ -783,10 +797,10 @@ async function runAttempt(
     expectedAudience: `https://${domain}`,
     expectedNonce: nonce,
     acceptedVcts,
-    trustedIssuer: TRUSTED_ISSUER,
+    ...issuerFor(opts),
   });
   if (!verified.ok) {
-    throw new Error(`Presentation rejected: ${verified.reason}`);
+    throw new PrsonLoginError("presentation_rejected", `Presentation rejected: ${verified.reason}`, verified.reason);
   }
 
   // Envelope v2: the holder signed its session key into the
@@ -799,10 +813,10 @@ async function runAttempt(
   const boundKey = verified.binding.walletSessionPk;
   if (boundKey) {
     if (senderPk !== boundKey) {
-      throw new Error("Presentation rejected: envelope not sent by the wallet's signed session key");
+      throw new PrsonLoginError("presentation_rejected", "Presentation rejected: envelope not sent by the wallet's signed session key", "session_key_mismatch");
     }
     if (envelope.walletSessionPk !== undefined && envelope.walletSessionPk !== boundKey) {
-      throw new Error("Presentation rejected: walletSessionPk differs from the signed one");
+      throw new PrsonLoginError("presentation_rejected", "Presentation rejected: walletSessionPk differs from the signed one", "session_key_mismatch");
     }
   } else if (typeof console !== "undefined") {
     // eslint-disable-next-line no-console
@@ -826,7 +840,8 @@ async function runAttempt(
         ? verified.claims.verification_level
         : 0;
     if (claimedLevel < minLevel) {
-      throw new Error(
+      throw new PrsonLoginError(
+        "level_too_low",
         `Presentation rejected: verification_level ${claimedLevel} below required ${minLevel}`,
       );
     }
@@ -840,7 +855,7 @@ async function runAttempt(
   const uniqueHumanId =
     (envelope as { uniqueHumanId?: SignInResult["uniqueHumanId"] }).uniqueHumanId ?? null;
   if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
-    throw new Error("Presentation rejected: required uniqueHumanId credential missing");
+    throw new PrsonLoginError("unique_human_missing", "Presentation rejected: required uniqueHumanId credential missing");
   }
   // Notification handle (when asked for and the person opted in):
   // opaque, like uniqueHumanId; the API checks it when the site sends.
@@ -887,7 +902,7 @@ async function runAttempt(
       expectedNonceFactory: () => nonce, // renewals carry a fresh nonce; see session.ts
       // The same set as the sign-in, so an anonymous session can renew.
       acceptedVcts,
-      trustedIssuer: TRUSTED_ISSUER,
+      ...issuerFor(opts),
     },
     // Renewal anti-replay baseline: a renewal must be strictly newer.
     initialPresentation: { presentation: presentationStr, iat: verified.binding.iat },
@@ -926,7 +941,24 @@ async function runAttempt(
 
 /** A failure in words the person signing in can act on. */
 function friendlyError(err: unknown): string {
-  if (err instanceof PrsonCspError) return "This site's security settings blocked Prson. The site's owner needs to allow Prson in its Content-Security-Policy.";
+  if (err instanceof PrsonLoginError) {
+    switch (err.code) {
+      case "csp_blocked":
+        return "This site's security settings blocked Prson. The site's owner needs to allow Prson in its Content-Security-Policy.";
+      case "rate_limited":
+        return "Too many sign-ins from this network. Wait a moment and try again.";
+      case "network":
+        return "Couldn't reach Prson. Check your connection and try again.";
+      case "expired":
+        return "This code expired. Get a new code and try again.";
+      case "unique_human_missing":
+        return "This site needs a passport or ID card verified in the Prson app.";
+      case "level_too_low":
+        return "This site needs a more verified identity than the one chosen.";
+      default:
+        break;
+    }
+  }
   const m = err instanceof Error ? err.message : String(err);
   if (/Too many login sessions/i.test(m)) return "Too many sign-ins from this network. Wait a moment and try again.";
   if (/createDraft failed|Failed to fetch|NetworkError|signaling: WS/i.test(m)) {
@@ -941,6 +973,7 @@ function friendlyError(err: unknown): string {
 // Re-export for verifier-only consumers + custom UIs.
 export { PrsonLoginSession };
 export { PrsonCspError, PRSON_CONNECT_SRC, connectSourcesFor, cspStyleNonce } from "./csp.js";
+export { PrsonLoginError, type PrsonLoginErrorCode } from "./errors.js";
 export { NOTIFY_HANDLE, notifyHandleFrom } from "./notify.js";
 export type { LoginQrContext, LoginQrHandle, LoginQrRenderer, LoginUiState } from "./qr.js";
 export type { Renewal };
@@ -1000,16 +1033,18 @@ function validateReturnUrl(returnUrl: string, domain: string): string {
   try {
     parsed = new URL(returnUrl);
   } catch {
-    throw new Error(`returnUrl is not a valid URL: ${returnUrl}`);
+    throw new PrsonLoginError("invalid_options", `returnUrl is not a valid URL: ${returnUrl}`);
   }
   if (parsed.protocol !== "https:") {
-    throw new Error(
+    throw new PrsonLoginError(
+      "invalid_options",
       "returnUrl must be https:// (custom schemes are refused — any app " +
         "could claim them; use a Universal Link / App Link on your domain)"
     );
   }
   if (parsed.host.toLowerCase() !== domain.toLowerCase()) {
-    throw new Error(
+    throw new PrsonLoginError(
+      "invalid_options",
       `returnUrl host (${parsed.host}) must equal the login domain (${domain})`
     );
   }

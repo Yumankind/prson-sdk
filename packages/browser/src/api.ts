@@ -6,6 +6,7 @@
  * /session/claim for the wallet. See `../../../../cloudflare-workers/signaling-worker`
  * for the server impl and `../../ARCHITECTURE.md` for the spec.
  */
+import { PrsonLoginError } from "./errors.js";
 import { SIGNALING_BASE } from "./index.js";
 
 /** The verifier-side request blob the SDK assembles + sends to /session/draft. */
@@ -80,9 +81,9 @@ export async function createDraft(
   if (!res.ok) {
     const text = await safeText(res);
     if (res.status === 429) {
-      throw new Error("Too many login sessions from this network — please retry shortly.");
+      throw new PrsonLoginError("rate_limited", "Too many login sessions from this network — please retry shortly.");
     }
-    throw new Error(`createDraft failed: HTTP ${res.status} ${text || res.statusText}`);
+    throw new PrsonLoginError("network", `createDraft failed: HTTP ${res.status} ${text || res.statusText}`);
   }
   return (await res.json()) as DraftResult;
 }

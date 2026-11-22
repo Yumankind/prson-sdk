@@ -8,6 +8,7 @@
  * those types directly because cross-package type sharing would
  * bloat the SDK; the two definitions are kept in sync by the spec.
  */
+import { PrsonLoginError, closedCode } from "./errors.js";
 
 const WS_SUBPROTOCOL = "prson-login-v1";
 
@@ -66,7 +67,7 @@ export async function connectSignaling(opts: {
     const onErrorBefore = () => {
       ws.removeEventListener("open", onOpen);
       ws.removeEventListener("error", onErrorBefore);
-      reject(new Error("signaling: WS upgrade failed (auth?)"));
+      reject(new PrsonLoginError("network", "signaling: WS upgrade failed (auth?)"));
     };
     ws.addEventListener("open", onOpen);
     ws.addEventListener("error", onErrorBefore);
@@ -94,7 +95,7 @@ export async function connectSignaling(opts: {
   ws.addEventListener("close", (evt) => {
     const reason = evt.reason || `code-${evt.code}`;
     closedReason = reason;
-    for (const w of iceWaiters.splice(0)) w.reject(new Error(`signaling: closed before the code was claimed (${reason})`));
+    for (const w of iceWaiters.splice(0)) w.reject(new PrsonLoginError(closedCode(reason), `signaling: closed before the code was claimed (${reason})`));
     for (const cb of closeListeners) cb(reason);
   });
 
@@ -112,7 +113,7 @@ export async function connectSignaling(opts: {
     awaitIce() {
       if (ice) return Promise.resolve(ice);
       if (closedReason !== null) {
-        return Promise.reject(new Error(`signaling: closed before the code was claimed (${closedReason})`));
+        return Promise.reject(new PrsonLoginError(closedCode(closedReason), `signaling: closed before the code was claimed (${closedReason})`));
       }
       return new Promise((resolve, reject) => iceWaiters.push({ resolve, reject }));
     },

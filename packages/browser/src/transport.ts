@@ -3,6 +3,7 @@
  * ICE exchange via the Cloudflare Worker signaling, and exposes a
  * tiny event-stream interface over the established data channel.
  */
+import { PrsonLoginError } from "./errors.js";
 import type { SignalingConnection } from "./signaling.js";
 
 export interface Transport {
@@ -47,7 +48,7 @@ export function rtcConfigFor(iceServers: RTCIceServer[], opts?: { allowDirect?: 
     .filter((s) => s.urls.length > 0);
   if (turn.length > 0) return { iceServers: turn, iceTransportPolicy: "relay" };
   if (opts?.allowDirect === true) return { iceServers, iceTransportPolicy: "all" };
-  throw new Error("transport: the relay sent no TURN server; refusing a direct connection");
+  throw new PrsonLoginError("network", "transport: the relay sent no TURN server; refusing a direct connection");
 }
 
 /** True when [hostname] is this machine: `localhost` (and `*.localhost`),
@@ -150,7 +151,7 @@ export async function establishTransport(opts: {
     const onError = () => {
       dc.removeEventListener("open", onOpen);
       dc.removeEventListener("error", onError);
-      reject(new Error("transport: data channel failed to open"));
+      reject(new PrsonLoginError("network", "transport: data channel failed to open"));
     };
     dc.addEventListener("open", onOpen);
     dc.addEventListener("error", onError);

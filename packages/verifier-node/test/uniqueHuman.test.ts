@@ -84,3 +84,14 @@ test("a nonce or key changed after signing fails the signature", async () => {
   const r = await verifyUniqueHumanId(c as never, { ...bound, expectedNonce: "forged" });
   assert.deepEqual([r.ok, !r.ok && r.reason], [false, "issuer_sig_invalid"]);
 });
+
+test("the audience can be the bare host or https://host, nothing looser", async () => {
+  for (const aud of ["shop.example.com", "https://shop.example.com", "https://shop.example.com/", "Shop.Example.com"]) {
+    const res = await verifyUniqueHumanId(credential(), { ...bound, expectedAudience: aud });
+    assert.equal(res.ok, true, aud);
+  }
+  for (const aud of ["http://shop.example.com", "https://shop.example.com/login", "https://shop.example.com:8443", "evil.com", "example.com"]) {
+    const res = await verifyUniqueHumanId(credential(), { ...bound, expectedAudience: aud });
+    assert.deepEqual([res.ok, !res.ok && res.reason], [false, "audience_mismatch"], aud);
+  }
+});

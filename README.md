@@ -129,6 +129,53 @@ generic network error.
   today) and is extended from the phone. See
   [Sessions, renewal, revocation](#sessions-renewal-revocation).
 
+## When sign-in fails: `err.code`
+
+Every error `signIn()` rejects with is a `PrsonLoginError` with a stable
+`code`. Branch on the code, not the message; messages may change.
+
+| `code` | What happened |
+|---|---|
+| `aborted` | A newer `signIn()` call, or the person closed the dialog (`LoginAbortedError`) |
+| `expired` | The code ran out before anyone approved it |
+| `level_too_low` | The person's level is below `required.minVerificationLevel` |
+| `unique_human_missing` | `required.uniqueHumanId` was set and no unique-human id came back |
+| `presentation_rejected` | The credential failed a check; `err.reason` says which (`aud_mismatch`, `nonce_mismatch`, `vc_revoked`…) |
+| `csp_blocked` | Your Content-Security-Policy blocked Prson (`PrsonCspError`) |
+| `rate_limited` | Too many sign-ins from this network; retry shortly |
+| `network` | Prson's relay or the phone couldn't be reached |
+| `invalid_options` | A `signIn()` option is wrong (`nonce`, `returnUrl`) |
+| `protocol` | The phone sent something the SDK doesn't understand |
+| `unknown` | Anything else; `err.cause` is the original error |
+
+## Checking on your server: timing, and one-off checks
+
+- **Post the result to your server right away.** `verifyPresentation`
+  accepts the phone's proof for 60 seconds by default (`kb_iat_stale`
+  after that). The proof is signed when the person approves, so verify it
+  as soon as `signIn()` resolves; don't store it and check it later. If
+  your server's clock drifts, raise `maxKbJwtAgeSeconds` a little (up to
+  120), not more.
+- **One-off checks** ("prove you're 18" before checkout): call
+  `result.session.close()` once your server has verified the result, so the
+  person's phone doesn't keep a live session with your site.
+- **Unique-human ids:** `verifyUniqueHumanId` takes `expectedAudience` as
+  `"shop.example.com"` or `"https://shop.example.com"`, so you can pass
+  the same value you give `verifyPresentation`.
+
+## Testing with the dev environment
+
+`signIn({ environment: "dev" })` signs in against Prson's dev relay with
+the Prson app's dev build. Its credentials come from the dev issuer
+(`did:web:prson-app-dev.web.app:.well-known:dev`, keys at
+`https://prson-api-dev.powerhouse.workers.dev/.well-known/jwt-vc-issuer`),
+which the browser SDK trusts only in dev mode. On your server pass the same
+to the verifier: `{ trustedIssuer: TRUSTED_ISSUER_DEV, jwksUri: ISSUER_JWKS_DEV }`
+(both exported by `@prson/login-sdk`). The CSP needs
+`https://signaling-dev.prson.net wss://signaling-dev.prson.net https://prson-api-dev.powerhouse.workers.dev`
+instead of the production hosts. Never accept dev credentials in production.
+A test issuer you can run without a phone is planned.
+
 ## Verifying on your server: which runtimes
 
 `@prson/login-verifier` uses `node:crypto` and `jose`. Tested on 22 Nov

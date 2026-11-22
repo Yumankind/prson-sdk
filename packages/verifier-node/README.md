@@ -142,7 +142,7 @@ const native = await verifySignedFragment(fragment, { expectedAudience: "shop.ex
 // signature over the canonical (sorted-keys) envelope. Without the binding
 // a copied envelope would work for anyone until it expires.
 const unique = await verifyUniqueHumanId(credential, {
-  expectedAudience: "shop.example.com",
+  expectedAudience: "shop.example.com", // or "https://shop.example.com"
   expectedNonce: nonce,          // the nonce you passed to verifyPresentation
   expectedCnfX: result.prsonId,  // the verified presentation's key
   // allowUnbound: true,         // temporary: accept Prson apps older than

@@ -19,7 +19,7 @@
     "build:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login.js --sourcemap",
     "watch:example": "esbuild src/index.ts --bundle --format=esm --target=es2020 --platform=browser --outfile=../../examples/plain-html/prson-login.js --sourcemap --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/session.test.js dist/status.test.js dist/notify.test.js dist/channel.test.js dist/csp.test.js",
+    "test": "tsc && node --test dist/session.test.js dist/status.test.js dist/notify.test.js dist/channel.test.js dist/csp.test.js dist/errors.test.js",
     "prepublishOnly": "npm test && npm run build"
   },
   "dependencies": {
