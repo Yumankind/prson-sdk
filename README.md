@@ -1,10 +1,29 @@
-# @prson/login-sdk
+<p align="center">
+  <img src="docs/media/prson-mark.svg" width="56" height="56" alt="">
+</p>
+<h1 align="center">Sign in with Prson</h1>
+<p align="center">
+  Let real people sign in to your website by scanning a code with the Prson app.<br>
+  No passwords to store, no API key in the browser, and only the facts you ask for.
+</p>
+<p align="center">
+  <a href="https://www.npmjs.com/package/@prson/login-sdk"><img src="https://img.shields.io/npm/v/@prson/login-sdk?color=FBBF24&label=%40prson%2Flogin-sdk" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/@prson/login-verifier"><img src="https://img.shields.io/npm/v/@prson/login-verifier?color=FBBF24&label=%40prson%2Flogin-verifier" alt="npm"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-52525b" alt="Apache-2.0"></a>
+</p>
 
-> Frontend-first **sign-in / sign-up** SDK for any website. The user proves
-> they're a real human (and optionally any attested fact) by presenting a
-> Prson **SD-JWT-VC** from their mobile wallet, delivered to the browser
-> over an end-to-end-encrypted WebRTC channel — never touching the
-> website's backend until you choose to forward it.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/sign-in-dialog-dark.gif">
+    <img src="docs/media/sign-in-dialog.gif" width="400" alt="The Sign in with Prson dialog: a code to scan, then Phone connected, Checking the proof, and Signed in">
+  </picture>
+  &nbsp;&nbsp;
+  <img src="docs/media/sign-in-phone.png" width="240" alt="On a phone the dialog is a bottom sheet with an Open Prson button">
+</p>
+
+<p align="center">
+  <img src="docs/media/how-it-works.png" width="860" alt="1. Your page shows a code. 2. They scan and approve in the Prson app. 3. Your page gets the proof, end-to-end encrypted. 4. Your server checks it.">
+</p>
 
 Packages: [`@prson/login-sdk`](packages/browser) (browser),
 [`@prson/login-sdk-ui`](packages/browser-ui) (button and QR),
@@ -317,6 +336,8 @@ The credential is unchanged; only the transport is. See
 
 ### 4. CLI / terminal programs (QR or short code → your backend)
 
+<p align="center"><img src="docs/media/cli-sign-in.gif" width="480" alt="A terminal: mycli login prints a QR code and a short link, waits for approval, then prints Signed in"></p>
+
 `mycli login` renders a QR (or a typeable short code) built by
 [`@prson/login-cli`](./packages/cli-node/README.md); the user approves
 on their phone and the wallet POSTs the presentation + signed
@@ -349,6 +370,8 @@ configuration:
 ```
 
 ### The "Sign in with Prson" button
+
+<p align="center"><img src="docs/media/sign-in-buttons.png" width="760" alt="Four button variants: amber, dark, outline, and light on a dark background"></p>
 
 The Prson mark (the "p" on a rounded square) followed by "Sign in with
 Prson" in Inter 600. Every variant and size is at least 44 px tall, with a

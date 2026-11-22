@@ -1,40 +1,74 @@
-# @prson/login-sdk
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Yumankind/prson-sdk/main/docs/media/prson-mark.svg" width="48" height="48" alt="">
+</p>
+<h1 align="center">@prson/login-sdk</h1>
+<p align="center">Sign in with Prson for any website. Your visitors prove they're a real person by scanning a code with the Prson app. No passwords to store, no API key in the browser.</p>
+<p align="center">
+  <a href="https://www.npmjs.com/package/@prson/login-sdk"><img src="https://img.shields.io/npm/v/@prson/login-sdk?color=FBBF24&label=npm" alt="npm version"></a>
+  <a href="https://github.com/Yumankind/prson-sdk/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@prson/login-sdk?color=52525b" alt="Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/types-included-52525b" alt="TypeScript types included">
+</p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Yumankind/prson-sdk/main/docs/media/sign-in-dialog-dark.gif">
+    <img src="https://raw.githubusercontent.com/Yumankind/prson-sdk/main/docs/media/sign-in-dialog.gif" width="420" alt="The Sign in with Prson dialog: a code to scan, then Phone connected, Checking the proof, and Signed in">
+  </picture>
+</p>
 
-> The browser package. Drops into any website with one `<script>` tag
-> (or `npm install @prson/login-sdk` for modular bundlers).
->
-> See [`../../README.md`](../../README.md) for the whole-system
-> overview, [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) for the
-> wire format, [`../../SECURITY.md`](../../SECURITY.md) for the threat
-> model.
+## Quick start
+
+```bash
+npm install @prson/login-sdk @prson/login-sdk-ui
+```
+
+```ts
+import "@prson/login-sdk-ui";               // the button and the dialog
+import { PrsonLogin } from "@prson/login-sdk";
+
+const result = await PrsonLogin.signIn({
+  // A one-time nonce from your server, fresh for each code.
+  nonce: async () => (await fetch("/auth/prson/nonce", { method: "POST" }).then((r) => r.json())).nonce,
+  required: { minVerificationLevel: 1 },   // a live selfie; 5 = passport or ID chip
+});
+
+// Check it on your server with @prson/login-verifier.
+await fetch("/auth/prson", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ presentation: result.sdJwtVc, nonce: result.nonce }),
+});
+```
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Yumankind/prson-sdk/main/docs/media/how-it-works.png" width="840" alt="1. Your page shows a code. 2. They scan and approve in the Prson app. 3. Your page gets the proof, end-to-end encrypted. 4. Your server checks it.">
+</p>
+
+| You want | Read |
+|---|---|
+| To choose who can sign in (level 1 or one account per person) | [Choose your level](https://github.com/Yumankind/prson-sdk/blob/main/README.md#choose-your-level) |
+| The lines your Content-Security-Policy needs | [Content-Security-Policy](https://github.com/Yumankind/prson-sdk/blob/main/README.md#content-security-policy) |
+| To handle errors (`err.code`) | [When sign-in fails](https://github.com/Yumankind/prson-sdk/blob/main/README.md#when-sign-in-fails-errcode) |
+| The server check | [`@prson/login-verifier`](https://www.npmjs.com/package/@prson/login-verifier) |
+| The full guide | [prson.net/docs/sign-in](https://prson.net/docs/sign-in) |
+
+No registration or API key is needed: sign-in works on any website, with 1,000 free sign-ins a month per site (25,000 once you verify the domain).
 
 ## Install
-
-Install from npm (below), or load the browser bundle from
-`https://prson.net/vendor/prson-login/prson-login.js` (see *CDN* below).
-
-### Bundled
 
 ```bash
 npm install @prson/login-sdk
 ```
 
-```ts
-import { PrsonLogin } from "@prson/login-sdk";
-```
-
-### CDN (no build step)
+Or, with no build step, load the bundles prson.net serves:
 
 ```html
 <script type="module">
   import { PrsonLogin } from "https://prson.net/vendor/prson-login/prson-login.js";
-  // Optional: the styled QR card (registers itself; no exports needed).
-  import "https://prson.net/vendor/prson-login/prson-login-ui.js";
+  import "https://prson.net/vendor/prson-login/prson-login-ui.js"; // the button and the dialog
 </script>
 ```
 
-The bundle is an unversioned ES module built from this repository's
-`main`; pin your own copy if you need a fixed version.
+Those files are unversioned (always the latest build of `main`). For production, bundle the npm package or serve your own copy.
 
 ## The full API surface, in one block
 
@@ -292,7 +326,7 @@ A 410 means they turned you off: forget the handle. Rules and limits:
 
 ## Backend verification
 
-Use [`@prson/login-verifier`](../verifier-node/) — drop-in for
+Use [`@prson/login-verifier`](https://github.com/Yumankind/prson-sdk/blob/main/packages/verifier-node/) — drop-in for
 Node.js. The full verifier in 20 lines:
 
 ```ts
@@ -362,4 +396,4 @@ verdict, and the signed file's first bytes are exactly your upload.
   truth). Tests: `npm test`.
 - **Distribution**: npm (`@prson/login-sdk`) and the browser bundle at
   `https://prson.net/vendor/prson-login/`. See
-  [`../../CHANGELOG.md`](../../CHANGELOG.md).
+  [`../../CHANGELOG.md`](https://github.com/Yumankind/prson-sdk/blob/main/CHANGELOG.md).

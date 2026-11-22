@@ -1,11 +1,27 @@
-# @prson/login-cli
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Yumankind/prson-sdk/main/docs/media/prson-mark.svg" width="48" height="48" alt="">
+</p>
+<h1 align="center">@prson/login-cli</h1>
+<p align="center">Sign in with Prson from a command-line program. <code>mycli login</code> shows a code, the person approves on their phone, and your CLI gets a session from your server. No password, no pasted API key.</p>
+<p align="center">
+  <a href="https://www.npmjs.com/package/@prson/login-cli"><img src="https://img.shields.io/npm/v/@prson/login-cli?color=FBBF24&label=npm" alt="npm version"></a>
+  <a href="https://github.com/Yumankind/prson-sdk/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@prson/login-cli?color=52525b" alt="Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/types-included-52525b" alt="TypeScript types included">
+</p>
 
-Sign in with Prson from **terminal programs** — `mycli login` shows a
-QR code (or a short code), the user approves on their phone, and your
-CLI gets a session from your backend. No password, no copy-pasted API
-key, and the same verified-human / predicate guarantees as a web
-sign-in (including predicates like `age_gte_18` or
-`email_domain_academic`).
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Yumankind/prson-sdk/main/docs/media/cli-sign-in.gif" width="520" alt="A terminal: mycli login prints a QR code and a short link, waits for approval, then prints Signed in">
+</p>
+
+## Install
+
+```bash
+npm install @prson/login-cli
+```
+
+Node 20 or later. The person approves in the Prson app; the result goes to **your server**, never through the terminal.
+
+## How it works
 
 It reuses the audited **sessionless wallet-action transport**
 (`/request/v1` links with delivery pinning) end-to-end: there is no
@@ -34,18 +50,6 @@ terminal (CLI)            user's phone (wallet)        your backend
                           └───────────────────┘
 ```
 
-## Install
-
-```bash
-npm install @prson/login-cli
-```
-
-Node 20 or later. This package is Node-only and has no browser bundle.
-
-```bash
-npm install @prson/login-cli
-```
-
 ## Why this is safe for a terminal
 
 A CLI has no browser Origin, so the web login's origin-pinning can't
@@ -62,7 +66,7 @@ apply. Instead this flow inherits the wallet-action trust model:
   random `nonce` and whatever your backend chooses to return (a
   session token). Verification of the presentation, KB-JWT audience,
   nonce and predicate signatures happens in your backend with
-  [`@prson/login-verifier`](../verifier-node/README.md).
+  [`@prson/login-verifier`](https://github.com/Yumankind/prson-sdk/blob/main/packages/verifier-node/README.md).
 
 Like every cross-device flow (incl. RFC 8628 device codes), the QR
 itself doesn't prove which terminal initiated it — the consent screen

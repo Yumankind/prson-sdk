@@ -1,31 +1,49 @@
-# @prson/login-verifier
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Yumankind/prson-sdk/main/docs/media/prson-mark.svg" width="48" height="48" alt="">
+</p>
+<h1 align="center">@prson/login-verifier</h1>
+<p align="center">Check a Sign in with Prson result on your server. No Prson account, no API key: it checks Prson's signature against the published keys, your domain, the nonce, freshness and revocation.</p>
+<p align="center">
+  <a href="https://www.npmjs.com/package/@prson/login-verifier"><img src="https://img.shields.io/npm/v/@prson/login-verifier?color=FBBF24&label=npm" alt="npm version"></a>
+  <a href="https://github.com/Yumankind/prson-sdk/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@prson/login-verifier?color=52525b" alt="Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/types-included-52525b" alt="TypeScript types included">
+</p>
 
-> Pure-function Node.js verifier for SD-JWT-VC presentations issued
-> by the Prson notary. **Drop-in**: no Prson API key, no live
-> network call beyond fetching the publicly-served notary JWKS
-> (cached aggressively). Verifies via standard IETF SD-JWT + SD-JWT-VC
-> primitives, so this code reads like spec.
->
-> See [`../../README.md`](../../README.md) for the system overview,
-> [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) for the wire
-> format, [`../../SECURITY.md` §7](../../SECURITY.md#7-the-five-rules-a-verifier-must-enforce)
-> for the five rules every verifier must enforce.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Yumankind/prson-sdk/main/docs/media/how-it-works.png" width="840" alt="1. Your page shows a code. 2. They scan and approve in the Prson app. 3. Your page gets the proof. 4. Your server checks it with this package.">
+</p>
 
-## Install
+## Runs where your server runs
+
+| Runtime | Works |
+|---|---|
+| Node.js 20 or later | Yes |
+| Bun | Yes |
+| Cloudflare Workers | Yes, with the `nodejs_compat` flag |
+| Vercel Edge, Next.js edge routes, Deno | Coming next: a version on standard web crypto |
+
+Tested 22 Nov 2026 by signing test credentials and verifying them in each runtime.
+
+## Quick start
 
 ```bash
 npm install @prson/login-verifier
 ```
 
-Server-side only; there's no browser bundle. Runs on Node.js 20 or later,
-Bun, and Cloudflare Workers with the `nodejs_compat` compatibility flag
-(tested 22 Nov 2026). It doesn't run on Vercel Edge or Next.js
-`runtime = "edge"`, which have no `node:crypto`: verify in a Node.js
-route instead. Deno isn't tested yet.
+```ts
+import { verifyPresentation } from "@prson/login-verifier";
 
-```bash
-npm install @prson/login-verifier
+// POST /auth/prson: the page sends what signIn() returned.
+const result = await verifyPresentation(body.presentation, {
+  expectedAudience: "https://shop.example.com", // your site
+  expectedNonce: session.prsonNonce,            // the one-time nonce you issued
+});
+
+if (!result.ok) return reply(401, result.reason); // e.g. nonce_mismatch, vc_revoked
+signIn(result.prsonId);                            // this person's ID on your site
 ```
+
+Verify as soon as the page posts the result: the phone's proof is accepted for 60 seconds. For one account per person, also check `verifyUniqueHumanId` (below). The [main README](https://github.com/Yumankind/prson-sdk/blob/main/README.md) and [prson.net/docs/sign-in](https://prson.net/docs/sign-in) have the whole flow.
 
 ## API
 
@@ -258,4 +276,4 @@ the person turned your site off. See `documentation/SITE_NOTIFICATIONS.md`.
 Implemented on [`jose`](https://github.com/panva/jose) and `node:crypto`;
 tests: `npm test` (unit tests plus `test/*.test.ts`, which check real
 credential shapes). See
-[`../../CHANGELOG.md`](../../CHANGELOG.md).
+[`../../CHANGELOG.md`](https://github.com/Yumankind/prson-sdk/blob/main/CHANGELOG.md).
