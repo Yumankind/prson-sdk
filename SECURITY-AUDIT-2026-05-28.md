@@ -1,5 +1,7 @@
 # Sign-in-with-Prson — security audit (2026-05-28)
 
+> Paths in `code` that point outside this SDK (`mobile-app/…`, `cloudflare-workers/…`, `scripts/…`, `functions/…`) are in Prson's main repository, which isn't public.
+
 > **Scope.** End-to-end review of the implemented sign-in flow: browser SDK
 > (`@prson/login-sdk`), Cloudflare Worker signaling + Durable Object,
 > wallet-side `LoginSessionService` + drawer + active-sessions tile, and
@@ -33,11 +35,11 @@
 
 | Finding | Implementation |
 |---|---|
-| **C-1** | `handleDraft` in [signaling-worker/src/index.ts](../cloudflare-workers/signaling-worker/src/index.ts) rejects `POST /session/draft` when the `Origin` header host doesn't match `request.domain`. Returns `400 origin-required` if Origin is missing, `403 origin-domain-mismatch` on disagreement. **Not a full fix** — see the 2026-11-03 follow-up below. |
-| **C-2** | `buildDeepLinkUrl` in [packages/browser/src/index.ts](./packages/browser/src/index.ts) now emits `https://app.prson.net/login/v1?…`. `/login/v1*` added to the AASA at [mobile-app/web/.well-known/apple-app-site-association](../mobile-app/web/.well-known/apple-app-site-association). Android already uses `handle_all_urls` so no change there. Since 2026-11-03 the wallet's `LoginDeepLink.tryParse` accepts only the https form (other `prson://` links are unaffected). |
-| **M-1** | New `SIG_TOKEN_HMAC_KEYRING` env binding with `{active, retired[]}` JSON. Tokens are kid-prefixed (`<kid>.<exp>.<role>.<HMAC>`). Verifier accepts any kid still in the keyring (active or retired within `validUntil`). Legacy 3-segment tokens still verify under `SIG_TOKEN_HMAC_SECRET` for in-flight back-compat. Rotation playbook in [scripts/cloudflare/login-secret.sh](../scripts/cloudflare/login-secret.sh) — `stage`, `rotate`, `prune`. |
+| **C-1** | `handleDraft` in `signaling-worker/src/index.ts` rejects `POST /session/draft` when the `Origin` header host doesn't match `request.domain`. Returns `400 origin-required` if Origin is missing, `403 origin-domain-mismatch` on disagreement. **Not a full fix** — see the 2026-11-03 follow-up below. |
+| **C-2** | `buildDeepLinkUrl` in [packages/browser/src/index.ts](./packages/browser/src/index.ts) now emits `https://app.prson.net/login/v1?…`. `/login/v1*` added to the AASA at `mobile-app/web/.well-known/apple-app-site-association`. Android already uses `handle_all_urls` so no change there. Since 2026-11-03 the wallet's `LoginDeepLink.tryParse` accepts only the https form (other `prson://` links are unaffected). |
+| **M-1** | New `SIG_TOKEN_HMAC_KEYRING` env binding with `{active, retired[]}` JSON. Tokens are kid-prefixed (`<kid>.<exp>.<role>.<HMAC>`). Verifier accepts any kid still in the keyring (active or retired within `validUntil`). Legacy 3-segment tokens still verify under `SIG_TOKEN_HMAC_SECRET` for in-flight back-compat. Rotation playbook in `scripts/cloudflare/login-secret.sh` — `stage`, `rotate`, `prune`. |
 | **M-2** | `SessionState.pinnedTokenHashes` in the Durable Object locks each role to the first-seen `sha256(token)`. Second WS upgrade for the same role with a different hash returns `401 role-token-pin-mismatch`. Defends against token forgery (e.g. compromised-but-rotated-out HMAC key) but does NOT block exact-token replay from XSS — that needs the refresh-token-endpoint design proposed in the audit, deferred. |
-| **M-3** | **Claim-tuple v1 → v2 protocol bump: timestamp is now server-issued.** Worker stamps `serverTs = nowSec` at `/session/draft` and stores it in the Durable Object. Browser SDK relays it to the wallet via the QR's new `t=<serverTs>` param ([packages/browser/src/index.ts](./packages/browser/src/index.ts), [packages/browser/src/api.ts](./packages/browser/src/api.ts) `DraftResult.serverTs`). Wallet's canonical-claim-bytes are now `"prson-login-claim/v2\n<reqId>\n<walletPkX>\n<serverTs>\n<domain>"` ([login_envelope.dart](../mobile-app/prson_app/lib/core/utils/login_envelope.dart)). The `/session/claim` request no longer carries `ts` at all; signature verification moved **inside** the Durable Object, where the stored `serverTs` is read and the bytes reconstructed atomically with the DRAFT→ACTIVE promotion. The wallet never computes time, so clock-skew + replay-within-skew both vanish. ServerClock service was removed (the wallet-side approach is obsolete under v2). |
+| **M-3** | **Claim-tuple v1 → v2 protocol bump: timestamp is now server-issued.** Worker stamps `serverTs = nowSec` at `/session/draft` and stores it in the Durable Object. Browser SDK relays it to the wallet via the QR's new `t=<serverTs>` param ([packages/browser/src/index.ts](./packages/browser/src/index.ts), [packages/browser/src/api.ts](./packages/browser/src/api.ts) `DraftResult.serverTs`). Wallet's canonical-claim-bytes are now `"prson-login-claim/v2\n<reqId>\n<walletPkX>\n<serverTs>\n<domain>"` (`login_envelope.dart`). The `/session/claim` request no longer carries `ts` at all; signature verification moved **inside** the Durable Object, where the stored `serverTs` is read and the bytes reconstructed atomically with the DRAFT→ACTIVE promotion. The wallet never computes time, so clock-skew + replay-within-skew both vanish. ServerClock service was removed (the wallet-side approach is obsolete under v2). |
 | **M-4** | `LoginWebRtcClient.connect` defaults to `iceTransportPolicy: "relay"`. Wallet's host + server-reflexive candidates are never gathered → never end up in the SDP exchanged through the Worker or at the browser. Opt-out via `allowDirectP2p: true` for advanced callers who accept the IP-exposure trade. |
 | **M-5** | New SDK option `signIn({ ephemeralIdentity: true })`. Wallet generates a fresh random Ed25519 keypair per sign-in (no per-domain HKDF). Drawer surfaces "Fresh key per sign-in (no stable per-site id)" line so the user understands the trade-off. Deterministic per-domain remains the default; sites that want unlinkability opt in. |
 
@@ -137,7 +139,7 @@ For QR usage: most QR scanners on modern phones now invoke universal links direc
 
 ### Suggested fix — given our infrastructure
 
-Mirror the notary keyring pattern ([`project_notary_keyring`](../mobile-app/prson_app/docs/trust_architecture.md)):
+Mirror the notary keyring pattern (`project_notary_keyring`):
 
 1. Worker secret becomes `SIG_TOKEN_HMAC_SECRETS_JSON` = `{ active: { kid, secret }, retired: [{ kid, secret, validUntil }] }`.
 2. Token format gains a `kid` prefix: `<kid>.<exp>.<role>.<HMAC>`.
@@ -291,12 +293,12 @@ Cost: ~40 LoC in `ActiveWebSessionsService` + a small reconnect helper in `Login
 
 | Property | Reference |
 |---|---|
-| `aud` mismatch rejected | [sd_jwt_kb_test.dart](../mobile-app/prson_app/test/core/utils/sd_jwt_kb_test.dart) `buildAndSign → verify with real Ed25519 round-trip` |
-| Disclosure tampering detected | [sd_jwt_present_test.dart](../mobile-app/prson_app/test/core/utils/sd_jwt_present_test.dart) `tampered Disclosure not bound` |
-| Worker `/session/claim` Ed25519 signature verification | [signaling-worker/src/index.ts](../cloudflare-workers/signaling-worker/src/index.ts) `canonicalClaimBytes` |
-| Browser openBox byte-compat with wallet pinenacl | [login_crypto_test.dart](../mobile-app/prson_app/test/core/utils/login_crypto_test.dart) `encryptToBrowser → browser openBox round-trip` |
-| Anti-tamper QR: URL domain must agree with req-blob domain | [login_deep_link_test.dart](../mobile-app/prson_app/test/core/utils/login_deep_link_test.dart) `rejects when domain in URL disagrees` |
-| Worker rejects MRZ-only credential issuance | [identityCredentials.test.js](../functions/test/services/identityCredentials.test.js) |
+| `aud` mismatch rejected | `sd_jwt_kb_test.dart` `buildAndSign → verify with real Ed25519 round-trip` |
+| Disclosure tampering detected | `sd_jwt_present_test.dart` `tampered Disclosure not bound` |
+| Worker `/session/claim` Ed25519 signature verification | `signaling-worker/src/index.ts` `canonicalClaimBytes` |
+| Browser openBox byte-compat with wallet pinenacl | `login_crypto_test.dart` `encryptToBrowser → browser openBox round-trip` |
+| Anti-tamper QR: URL domain must agree with req-blob domain | `login_deep_link_test.dart` `rejects when domain in URL disagrees` |
+| Worker rejects MRZ-only credential issuance | `identityCredentials.test.js` |
 
 ---
 

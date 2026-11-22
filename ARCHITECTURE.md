@@ -1,5 +1,7 @@
 # Architecture — Prson Login SDK
 
+> Paths in `code` that point outside this SDK (`mobile-app/…`, `cloudflare-workers/…`, `scripts/…`, `functions/…`) are in Prson's main repository, which isn't public.
+
 > Wire-format specification + protocol spec for the SDK. This document
 > is the canonical source of truth; if the code disagrees with this
 > doc, treat the doc as authoritative until a versioned change is
@@ -535,7 +537,7 @@ Token format (kid-prefixed; closes audit §M-1):
 - Signed via `SIG_TOKEN_HMAC_KEYRING` env binding, a JSON `{active, retired[]}` keyring. `active` is the current minting kid; `retired[]` carry their own `validUntil` epoch so a verifier accepts in-flight tokens for a configurable window after rotation.
 - `draftToken` = `<kid>.<exp=now+60s>.browser.HMAC(kid\nreqId\nbrowser\nexp)`.
 - `walletSessionToken` = `<kid>.<exp=now+15min>.wallet.HMAC(kid\nreqId\nwallet\nexp)`.
-- Legacy `SIG_TOKEN_HMAC_SECRET` still verifies older 3-segment tokens until they expire — see [scripts/cloudflare/login-secret.sh](../scripts/cloudflare/login-secret.sh) for the rotation playbook (`stage`, `rotate`, `prune`).
+- Legacy `SIG_TOKEN_HMAC_SECRET` still verifies older 3-segment tokens until they expire — see `scripts/cloudflare/login-secret.sh` for the rotation playbook (`stage`, `rotate`, `prune`).
 
 Inside the Durable Object `LoginSession`:
 
@@ -548,7 +550,7 @@ Inside the Durable Object `LoginSession`:
 - ACTIVE alarm fires at `sessionExp` (= 15 min after claim) → closes.
 - On WS upgrade: only the role from the verified token is allowed (one socket per role; reconnects replace the prior). The DO **pins** the first-seen `sha256(token)` per role; a second WS upgrade for the same role with a different token hash is rejected `401 role-token-pin-mismatch` (defends against token forgery after key rotation; §M-2).
 - Caches SDP offer/answer + ICE candidates so the late-joining wallet receives the browser's already-emitted handshake immediately.
-- **WebSocket Hibernation API.** The DO accepts both peers via `state.acceptWebSocket(ws, [role])` rather than `ws.accept()`. Between signaling messages the DO instance unloads from memory; the sockets stay connected, the runtime re-instantiates the DO on the next inbound message, and the `webSocketMessage` / `webSocketClose` / `webSocketError` class methods receive the event. Per-WS metadata (`role`, `joinedAt`) rides in `ws.serializeAttachment(...)` so it survives hibernation; `state.getWebSockets("browser" | "wallet")` returns the peer(s) for fan-out without needing an in-memory `peers` array. This is what keeps the per-100k-sessions duration cost in the included tier (see [`mobile-app/prson_app/docs/wallet_lifecycle.md`](../mobile-app/prson_app/docs/wallet_lifecycle.md) for the cost table).
+- **WebSocket Hibernation API.** The DO accepts both peers via `state.acceptWebSocket(ws, [role])` rather than `ws.accept()`. Between signaling messages the DO instance unloads from memory; the sockets stay connected, the runtime re-instantiates the DO on the next inbound message, and the `webSocketMessage` / `webSocketClose` / `webSocketError` class methods receive the event. Per-WS metadata (`role`, `joinedAt`) rides in `ws.serializeAttachment(...)` so it survives hibernation; `state.getWebSockets("browser" | "wallet")` returns the peer(s) for fan-out without needing an in-memory `peers` array. This is what keeps the per-100k-sessions duration cost in the included tier (see `mobile-app/prson_app/docs/wallet_lifecycle.md` for the cost table).
 
 Cost: ~$0.10 per 100K sessions (Workers $0.30/M req + Durable Objects
 $0.15/M req + tiny KV) **with the WebSocket Hibernation API engaged**.
@@ -592,10 +594,10 @@ default sensibly on return visits:
 
 | Surface | Where | Sensitivity |
 |---|---|---|
-| `lastIdentity.<domain>` → `DerivedIdentity.id` (or `__ephemeral__` sentinel) | `SharedPreferences` via [LoginSettingsService.rememberLastUsedIdentity](../mobile-app/prson_app/lib/core/services/login/login_settings_service.dart) | Non-secret — just a UX pointer. |
-| `ephKey.<domain>` → b64u(32-byte Ed25519 seed) | [SecureStorageService](../mobile-app/prson_app/lib/core/storage/secure_storage_service.dart) (`first_unlock_this_device` on iOS, encrypted SharedPreferences excluded from Auto Backup on Android) | **Device-bound secret.** Treated like any other identity key on the device. |
+| `lastIdentity.<domain>` → `DerivedIdentity.id` (or `__ephemeral__` sentinel) | `SharedPreferences` via `LoginSettingsService.rememberLastUsedIdentity` | Non-secret — just a UX pointer. |
+| `ephKey.<domain>` → b64u(32-byte Ed25519 seed) | `SecureStorageService` (`first_unlock_this_device` on iOS, encrypted SharedPreferences excluded from Auto Backup on Android) | **Device-bound secret.** Treated like any other identity key on the device. |
 
-The login drawer ([login_request_drawer.dart](../mobile-app/prson_app/lib/views/identity/login_request_drawer.dart)) pre-selects in this order: last-used identity (if still eligible) → globally-active identity (if eligible) → null (user picks). The picker still always lets the user override.
+The login drawer (`login_request_drawer.dart`) pre-selects in this order: last-used identity (if still eligible) → globally-active identity (if eligible) → null (user picks). The picker still always lets the user override.
 
 **Ephemeral-identity persistence trade-off.** When the verifier sets `ephemeralIdentity: true`, the wallet:
 
@@ -608,7 +610,7 @@ The cost is a hard one: the seed is **not** derived from the recovery phrase, so
 
 Why not derive the ephemeral seed from the mnemonic? Because the whole point of `ephemeralIdentity: true` (audit §M-5) is that a mnemonic compromise must NOT retroactively de-anonymise every site the user ever visited. If the seed were mnemonic-derived, the security property collapses.
 
-When the user revokes an active session for the domain (active-sessions tile → Revoke), the wallet purges both entries — see [LoginSettingsService.forgetLastUsedIdentity](../mobile-app/prson_app/lib/core/services/login/login_settings_service.dart) + [forgetEphemeralSeed](../mobile-app/prson_app/lib/core/services/login/login_settings_service.dart). The next sign-in to that domain mints a fresh key.
+When the user revokes an active session for the domain (active-sessions tile → Revoke), the wallet purges both entries — see `LoginSettingsService.forgetLastUsedIdentity` + `forgetEphemeralSeed`. The next sign-in to that domain mints a fresh key.
 
 ## 6. Standards compatibility
 

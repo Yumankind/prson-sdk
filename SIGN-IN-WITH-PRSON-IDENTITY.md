@@ -1,5 +1,7 @@
 # Sign in with Prson **Identity** — design
 
+> Paths in `code` that point outside this SDK (`mobile-app/…`, `cloudflare-workers/…`, `scripts/…`, `functions/…`) are in Prson's main repository, which isn't public.
+
 > Design doc for the next layer on top of the existing "Sign in with
 > Prson" flow. The base SDK already proves "a verified human holding
 > this wallet just authenticated to this origin." This doc covers what
@@ -582,7 +584,7 @@ re-prompt with a clearer "please update your Prson wallet" message.
   responsibilities.
 - [`packages/verifier-node/src/index.ts`](./packages/verifier-node/src/index.ts) —
   `verifyPresentation`, `verifySignedFragment`, `verifyFragmentCredential`.
-- [`mobile-app/prson_app/lib/core/services/credentials/identity_credential_service.dart`](../mobile-app/prson_app/lib/core/services/credentials/identity_credential_service.dart) —
+- `mobile-app/prson_app/lib/core/services/credentials/identity_credential_service.dart` —
   `exportHumanPresentation`, `exportIdentityPresentation`.
-- [`mobile-app/prson_app/docs/trust_architecture.md`](../mobile-app/prson_app/docs/trust_architecture.md) §6.3 —
+- `mobile-app/prson_app/docs/trust_architecture.md` §6.3 —
   per-domain holder-key derivation (which `sub` derivation mirrors).

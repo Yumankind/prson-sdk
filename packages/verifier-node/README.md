@@ -43,7 +43,7 @@ if (!result.ok) return reply(401, result.reason); // e.g. nonce_mismatch, vc_rev
 signIn(result.prsonId);                            // this person's ID on your site
 ```
 
-Verify as soon as the page posts the result: the phone's proof is accepted for 60 seconds. For one account per person, also check `verifyUniqueHumanId` (below). The [main README](https://github.com/Yumankind/prson-sdk/blob/main/README.md) and [prson.net/docs/sign-in](https://prson.net/docs/sign-in) have the whole flow.
+Verify as soon as the page posts the result: the phone's proof is accepted for 60 seconds. For one account per person, also check `verifyUniqueHumanId` (below). The [main README](https://github.com/Yumankind/prson-sdk/blob/main/README.md) and [prson.net/docs/sign-in](https://prson.net/docs/sign-in/) have the whole flow.
 
 ## API
 

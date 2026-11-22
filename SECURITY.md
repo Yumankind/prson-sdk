@@ -1,5 +1,7 @@
 # Security — Prson Login SDK
 
+> Paths in `code` that point outside this SDK (`mobile-app/…`, `cloudflare-workers/…`, `scripts/…`, `functions/…`) are in Prson's main repository, which isn't public.
+
 > Threat model, crypto rationale, and the failure modes the SDK is
 > designed to make impossible. Read alongside
 > [`ARCHITECTURE.md`](./ARCHITECTURE.md).
@@ -32,7 +34,7 @@ Only **two** root facts a verifier must trust:
    and as a JWKS at [`/.well-known/jwt-vc-issuer`](https://app.prson.net/.well-known/jwt-vc-issuer).
    Both are static files served by Firebase Hosting under HTTPS with
    HSTS preload; rotation is publish-and-overlap — see
-   [`project_notary_keyring`](../mobile-app/prson_app/docs/trust_architecture.md#4-rotation-models).
+   `project_notary_keyring`.
 2. **`https://<domain>` is bound into the KB-JWT `aud`** by the wallet.
    The phisher in A1 *can* make the wallet bind to their own
    phishdomain (the user has to read the drawer) — see §4.1 below.
@@ -204,7 +206,7 @@ There are **four** independent paths that kill a session immediately:
 |---|---|---|
 | User taps "Sign out" on the website | Browser → SDK | The SDK drops the cookie + emits `onExpiry("user_revoked")`. Prson server-side does not need to be touched. |
 | User taps "Sign out everywhere" on the wallet | Mobile app → WebRTC data channel (`{msg:"revoke"}`) | All active sessions for this (identity, domain) tear down. SDK fires `onExpiry("wallet_signed_out")`. |
-| **Credential is revoked** on the notary side (e.g. document alias-transferred away — see [`project_identity_sd_jwt_vc`](../mobile-app/prson_app/docs/trust_architecture.md#62-what-s-in-the-vc-vs-signed-on-demand)) | Server → wallet → browser | Wallet stops issuing renewals; browser session lapses at TTL. (A future status-list endpoint enables instant revocation.) |
+| **Credential is revoked** on the notary side (e.g. document alias-transferred away — see `project_identity_sd_jwt_vc`) | Server → wallet → browser | Wallet stops issuing renewals; browser session lapses at TTL. (A future status-list endpoint enables instant revocation.) |
 | User loses the device | Mnemonic recovery on a new device → re-register → old device deauthorized | All sessions from the old device stop being renewable; they lapse at TTL. The mobile app on the new device sees the active-sessions list and can renew. |
 
 ## 7. The five rules a verifier MUST enforce

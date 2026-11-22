@@ -187,6 +187,6 @@ Requires Node ≥ 18. Single runtime dependency: `qrcode-terminal`.
 ## Not using Node?
 
 The CLI side is four steps any language can do (the package is just a
-convenience). See [PROTOCOL.md](./PROTOCOL.md) for the wire format,
+convenience). See [PROTOCOL.md](https://github.com/Yumankind/prson-sdk/blob/main/packages/cli-node/PROTOCOL.md) for the wire format,
 the validation rules to mirror, and ready-to-paste examples in
 **Python, Go, Rust and Bash**.

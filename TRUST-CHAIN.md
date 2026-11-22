@@ -1,5 +1,7 @@
 # Trust chain and identity proof
 
+> Paths in `code` that point outside this SDK (`mobile-app/…`, `cloudflare-workers/…`, `scripts/…`, `functions/…`) are in Prson's main repository, which isn't public.
+
 > *How the verifier (the website) actually decides "this is the user
 > they claim to be". Why the HMAC bearer doesn't gate identity. The
 > design decisions behind each layer.*
@@ -31,8 +33,8 @@ Three signatures stack inside that string:
 
 The compact form is exactly the SD-JWT-VC draft-08 / draft-09 wire
 format — see [`packages/browser/src/verify.ts`](packages/browser/src/verify.ts)
-for the verifier, [`mobile-app/prson_app/lib/core/utils/sd_jwt_present.dart`](../mobile-app/prson_app/lib/core/utils/sd_jwt_present.dart)
-and [`sd_jwt_kb.dart`](../mobile-app/prson_app/lib/core/utils/sd_jwt_kb.dart)
+for the verifier, `mobile-app/prson_app/lib/core/utils/sd_jwt_present.dart`
+and `sd_jwt_kb.dart`
 for the wallet-side builder.
 
 ## 2. The five verification rules
@@ -89,7 +91,7 @@ perDomainSeed = HKDF(identitySeed, info=domain)
 perDomainKp   = Ed25519.fromSeed(perDomainSeed)
 ```
 
-See [`login_per_domain_key.dart`](../mobile-app/prson_app/lib/core/utils/login_per_domain_key.dart).
+See `login_per_domain_key.dart`.
 
 Consequences:
 - On `bank.com` the user is always the same `cnf.jwk.x` across
@@ -179,7 +181,7 @@ Example: `2026-05.1748509100.wallet.kJq3…QkXY`
 | `role` | `"browser"` \| `"wallet"` | Which peer this token authorises |
 | `tag` | base64url HMAC-SHA256 | Authenticator |
 
-Verification (see [`verifyRoleToken`](../cloudflare-workers/signaling-worker/src/index.ts)):
+Verification (see `verifyRoleToken`):
 
 1. Split into 4 parts → `{ kid, exp, role, tag }`
 2. Expiry check.
@@ -302,7 +304,7 @@ signed in. A proximity check is future work.
 The worst case: attacker can forge VC bodies for any user.
 
 - Recovery is operational: rotate the notary keyring
-  ([`scripts/notary/rotate.sh`](../scripts/notary/rotate.sh)),
+  (`scripts/notary/rotate.sh`),
   publish the new DID document at
   `app.prson.net/.well-known/jwt-vc-issuer`, retire the old key.
   Browser SDK refetches the JWKS on next sign-in and rejects

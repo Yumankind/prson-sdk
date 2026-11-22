@@ -1,5 +1,7 @@
 # Roadmap — Prson Login SDK
 
+> Paths in `code` that point outside this SDK (`mobile-app/…`, `cloudflare-workers/…`, `scripts/…`, `functions/…`) are in Prson's main repository, which isn't public.
+
 > Features documented here are **deliberately not built yet**. Each
 > section is a contract: the API shape is committed, the wire format
 > is sketched, the security model is mapped to existing primitives.
@@ -20,7 +22,7 @@
 > via `session.on(type, cb)` / `session.onAny(cb)`; the wallet
 > emits `display-update` and `credential-revoked` envelopes
 > automatically from the
-> [`ActiveSessionEventBridge`](../mobile-app/prson_app/lib/core/services/login/active_session_event_bridge.dart)
+> `ActiveSessionEventBridge`
 > when the bound identity changes. **§1.5 (request channel) is
 > also shipped** — `session.request(...)` opens a verifier→wallet
 > bidirectional surface for claim-value asks, fragment checks,
@@ -277,7 +279,7 @@ the protocol round-trips end-to-end.
 
 **Goal**: let a logged-in website ask the user to sign a document
 without a separate flow. Reuses the existing PAdES infrastructure
-([`mobile-app/prson_app/docs/identity_pdf_signing.md`](../mobile-app/prson_app/docs/identity_pdf_signing.md))
+(`mobile-app/prson_app/docs/identity_pdf_signing.md`)
 end-to-end — the only new piece is the SDK-side trigger.
 
 ### 2.1 Pre-condition: the user has a signing certificate

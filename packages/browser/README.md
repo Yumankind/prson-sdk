@@ -49,7 +49,7 @@ await fetch("/auth/prson", {
 | The lines your Content-Security-Policy needs | [Content-Security-Policy](https://github.com/Yumankind/prson-sdk/blob/main/README.md#content-security-policy) |
 | To handle errors (`err.code`) | [When sign-in fails](https://github.com/Yumankind/prson-sdk/blob/main/README.md#when-sign-in-fails-errcode) |
 | The server check | [`@prson/login-verifier`](https://www.npmjs.com/package/@prson/login-verifier) |
-| The full guide | [prson.net/docs/sign-in](https://prson.net/docs/sign-in) |
+| The full guide | [prson.net/docs/sign-in](https://prson.net/docs/sign-in/) |
 
 No registration or API key is needed: sign-in works on any website, with 1,000 free sign-ins a month per site (25,000 once you verify the domain).
 
