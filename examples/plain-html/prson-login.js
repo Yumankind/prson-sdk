@@ -3919,6 +3919,26 @@ function _deepEqual(a, b) {
   }
 }
 
+// src/errors.ts
+var PrsonLoginError = class extends Error {
+  constructor(code, message, reason, cause) {
+    super(message);
+    this.name = "PrsonLoginError";
+    this.code = code;
+    if (reason !== void 0) this.reason = reason;
+    if (cause !== void 0) this.cause = cause;
+  }
+};
+function closedCode(reason) {
+  return /expir/i.test(reason) ? "expired" : "network";
+}
+function asLoginError(e) {
+  if (e instanceof PrsonLoginError) return e;
+  const message = e instanceof Error ? e.message : String(e);
+  const code = /Failed to fetch|NetworkError|Load failed/i.test(message) ? "network" : "unknown";
+  return new PrsonLoginError(code, message, void 0, e);
+}
+
 // src/api.ts
 async function createDraft(request, opts = {}) {
   const base = opts.signalingBase ?? SIGNALING_BASE;
@@ -3932,9 +3952,9 @@ async function createDraft(request, opts = {}) {
   if (!res.ok) {
     const text = await safeText(res);
     if (res.status === 429) {
-      throw new Error("Too many login sessions from this network \u2014 please retry shortly.");
+      throw new PrsonLoginError("rate_limited", "Too many login sessions from this network \u2014 please retry shortly.");
     }
-    throw new Error(`createDraft failed: HTTP ${res.status} ${text || res.statusText}`);
+    throw new PrsonLoginError("network", `createDraft failed: HTTP ${res.status} ${text || res.statusText}`);
   }
   return await res.json();
 }
@@ -3964,7 +3984,7 @@ async function connectSignaling(opts) {
     const onErrorBefore = () => {
       ws.removeEventListener("open", onOpen);
       ws.removeEventListener("error", onErrorBefore);
-      reject(new Error("signaling: WS upgrade failed (auth?)"));
+      reject(new PrsonLoginError("network", "signaling: WS upgrade failed (auth?)"));
     };
     ws.addEventListener("open", onOpen);
     ws.addEventListener("error", onErrorBefore);
@@ -3989,7 +4009,7 @@ async function connectSignaling(opts) {
   ws.addEventListener("close", (evt) => {
     const reason = evt.reason || `code-${evt.code}`;
     closedReason = reason;
-    for (const w of iceWaiters.splice(0)) w.reject(new Error(`signaling: closed before the code was claimed (${reason})`));
+    for (const w of iceWaiters.splice(0)) w.reject(new PrsonLoginError(closedCode(reason), `signaling: closed before the code was claimed (${reason})`));
     for (const cb of closeListeners) cb(reason);
   });
   return {
@@ -4006,7 +4026,7 @@ async function connectSignaling(opts) {
     awaitIce() {
       if (ice) return Promise.resolve(ice);
       if (closedReason !== null) {
-        return Promise.reject(new Error(`signaling: closed before the code was claimed (${closedReason})`));
+        return Promise.reject(new PrsonLoginError(closedCode(closedReason), `signaling: closed before the code was claimed (${closedReason})`));
       }
       return new Promise((resolve, reject) => iceWaiters.push({ resolve, reject }));
     },
@@ -4026,7 +4046,7 @@ function rtcConfigFor(iceServers, opts) {
   const turn = iceServers.map((s) => ({ ...s, urls: urls(s).filter(isTurn) })).filter((s) => s.urls.length > 0);
   if (turn.length > 0) return { iceServers: turn, iceTransportPolicy: "relay" };
   if (opts?.allowDirect === true) return { iceServers, iceTransportPolicy: "all" };
-  throw new Error("transport: the relay sent no TURN server; refusing a direct connection");
+  throw new PrsonLoginError("network", "transport: the relay sent no TURN server; refusing a direct connection");
 }
 function isLoopbackHost(hostname) {
   if (!hostname) return false;
@@ -4094,7 +4114,7 @@ async function establishTransport(opts) {
     const onError = () => {
       dc.removeEventListener("open", onOpen);
       dc.removeEventListener("error", onError);
-      reject(new Error("transport: data channel failed to open"));
+      reject(new PrsonLoginError("network", "transport: data channel failed to open"));
     };
     dc.addEventListener("open", onOpen);
     dc.addEventListener("error", onError);
@@ -4251,6 +4271,95 @@ function renderLoginQr(url, mount, theme, context) {
   };
 }
 
+// src/csp.ts
+var PRSON_CONNECT_SRC = [
+  "https://signaling.prson.net",
+  "wss://signaling.prson.net",
+  "https://app.prson.net",
+  "https://api.prson.net"
+];
+var PrsonCspError = class extends PrsonLoginError {
+  constructor(directive, blockedUri, allow) {
+    super(
+      "csp_blocked",
+      `This page's Content-Security-Policy blocked Prson sign-in: ${directive} doesn't allow ${blockedUri}. Add to connect-src: ${allow.join(" ")}`
+    );
+    this.name = "PrsonCspError";
+    this.directive = directive;
+    this.blockedUri = blockedUri;
+    this.allow = allow;
+  }
+};
+function connectSourcesFor(signalingBase, issuerJwksUri) {
+  const out = /* @__PURE__ */ new Set();
+  try {
+    const u = new URL(signalingBase);
+    out.add(u.origin);
+    out.add(`${u.protocol === "http:" ? "ws" : "wss"}://${u.host}`);
+  } catch {
+  }
+  if (issuerJwksUri) {
+    try {
+      out.add(new URL(issuerJwksUri).origin);
+    } catch {
+    }
+  } else {
+    out.add("https://app.prson.net");
+    out.add("https://api.prson.net");
+  }
+  return [...out];
+}
+function hostOf(uri) {
+  try {
+    return new URL(uri).host;
+  } catch {
+    return null;
+  }
+}
+function originOf(uri) {
+  try {
+    const u = new URL(uri);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return "(unknown)";
+  }
+}
+function watchCsp(signalingBase, issuerJwksUri) {
+  if (typeof document === "undefined" || typeof document.addEventListener !== "function") {
+    return { explain: async (e) => e, stop: () => {
+    } };
+  }
+  const allow = connectSourcesFor(signalingBase, issuerJwksUri);
+  const prsonHosts = new Set(allow.map(hostOf).filter((h) => !!h));
+  let seen = null;
+  const onViolation = (ev) => {
+    if (!ev.isTrusted) return;
+    const e = ev;
+    const host = hostOf(e.blockedURI);
+    if (!seen && host && (prsonHosts.has(host) || host.endsWith(".prson.net"))) {
+      seen = { directive: e.effectiveDirective || e.violatedDirective, blockedUri: originOf(e.blockedURI) };
+    }
+  };
+  document.addEventListener("securitypolicyviolation", onViolation);
+  return {
+    async explain(err) {
+      if (!seen) await new Promise((r) => setTimeout(r, 0));
+      if (!seen) return err;
+      const s = seen;
+      return new PrsonCspError(s.directive, s.blockedUri, allow);
+    },
+    stop() {
+      document.removeEventListener("securitypolicyviolation", onViolation);
+    }
+  };
+}
+function cspStyleNonce() {
+  if (typeof document === "undefined") return void 0;
+  const m = document.querySelector('meta[property="csp-nonce"]');
+  if (!m) return void 0;
+  return m.nonce || m.getAttribute("nonce") || void 0;
+}
+
 // src/notify.ts
 var NOTIFY_HANDLE = /^nh_[A-Za-z0-9_-]{43}$/;
 function notifyHandleFrom(envelope) {
@@ -4277,6 +4386,8 @@ function openSelectOverlay(select) {
   document.body.appendChild(host);
   const shadow = host.attachShadow({ mode: "open" });
   const style = document.createElement("style");
+  const nonce = cspStyleNonce();
+  if (nonce) style.nonce = nonce;
   style.textContent = OVERLAY_CSS;
   shadow.appendChild(style);
   const title = pickTitle(select);
@@ -4595,6 +4706,8 @@ function openPointPhoneOverlay() {
   document.body.appendChild(host);
   const shadow = host.attachShadow({ mode: "open" });
   const style = document.createElement("style");
+  const nonce = cspStyleNonce();
+  if (nonce) style.nonce = nonce;
   style.textContent = OVERLAY_CSS2;
   shadow.appendChild(style);
   const glow = document.createElement("div");
@@ -5671,6 +5784,11 @@ async function awaitVerification(opts) {
 var PROTOCOL_VERSION = "prson_vp_v1";
 var ENVELOPE_VERSION = 2;
 var TRUSTED_ISSUER = "did:web:app.prson.net";
+var TRUSTED_ISSUER_DEV = "did:web:prson-app-dev.web.app:.well-known:dev";
+var ISSUER_JWKS_DEV = "https://prson-api-dev.powerhouse.workers.dev/.well-known/jwt-vc-issuer";
+function issuerFor(opts) {
+  return opts.environment === "dev" ? { trustedIssuer: TRUSTED_ISSUER_DEV, jwksUri: ISSUER_JWKS_DEV } : { trustedIssuer: TRUSTED_ISSUER };
+}
 var KNOWN_VCTS = [
   "https://app.prson.net/credentials/verified-human/v1",
   "https://app.prson.net/credentials/verified-identity/v1"
@@ -5684,9 +5802,9 @@ function resolveSignalingBase(opts) {
   if (opts.signalingBase) return opts.signalingBase;
   return opts.environment === "dev" ? SIGNALING_BASE_DEV : SIGNALING_BASE;
 }
-var LoginAbortedError = class extends Error {
+var LoginAbortedError = class extends PrsonLoginError {
   constructor(message = "sign-in aborted by a newer signIn() call") {
-    super(message);
+    super("aborted", message);
     this.name = "LoginAbortedError";
   }
 };
@@ -5738,6 +5856,11 @@ var PrsonLogin = class {
     if (prior) await prior.abort();
     const me = makeInflight();
     _inflight = me;
+    const csp = watchCsp(resolveSignalingBase(opts), issuerFor(opts).jwksUri);
+    if (opts.environment === "dev" && typeof location !== "undefined" && !/^(localhost|127\.0\.0\.1|\[::1\])$|\.localhost$|\.test$/.test(location.hostname)) {
+      console.warn(`Prson sign-in is in dev mode on ${location.hostname}: it accepts dev credentials. Remove environment: "dev" before going live.`);
+    }
+    me.pushTeardown(() => csp.stop());
     try {
       const domain = opts.domain ?? window.location.origin.replace(/^https?:\/\//, "");
       const theme = opts.ui?.theme ?? "auto";
@@ -5786,8 +5909,10 @@ var PrsonLogin = class {
           ui.handle?.dispose();
           dialog.current?.dispose();
           return out;
-        } catch (err) {
-          if (err instanceof LoginAbortedError) throw err;
+        } catch (caught) {
+          if (caught instanceof LoginAbortedError) throw caught;
+          const err = asLoginError(await csp.explain(caught));
+          if (err instanceof PrsonCspError && typeof console !== "undefined") console.error(err.message);
           ui.handle?.update?.({ state: "error", message: friendlyError(err) });
           if (!dialog.current || !ui.handle?.update) {
             if (dialog.current) await me.abort();
@@ -5802,6 +5927,7 @@ var PrsonLogin = class {
         }
       }
     } finally {
+      csp.stop();
       if (_inflight === me) _inflight = null;
     }
   }
@@ -5831,7 +5957,7 @@ async function runAttempt(opts, env) {
   const given = typeof opts.nonce === "function" ? await guard(Promise.resolve(opts.nonce())) : opts.nonce;
   checkAborted();
   if (given !== void 0 && (typeof given !== "string" || !/^[A-Za-z0-9_-]{22,128}$/.test(given))) {
-    throw new Error("nonce must be 22-128 base64url characters (at least 16 random bytes)");
+    throw new PrsonLoginError("invalid_options", "nonce must be 22-128 base64url characters (at least 16 random bytes)");
   }
   const nonce = given ?? b64u(crypto.getRandomValues(new Uint8Array(32)));
   const request = {
@@ -5932,29 +6058,29 @@ async function runAttempt(opts, env) {
   show({ state: "verifying" });
   const { envelope, senderPk } = await openEnvelope(first, ephKeys);
   if (envelope.v !== PROTOCOL_VERSION || envelope.msg !== "presentation") {
-    throw new Error(`Unexpected first message: ${envelope.v}/${envelope.msg}`);
+    throw new PrsonLoginError("protocol", `Unexpected first message: ${envelope.v}/${envelope.msg}`);
   }
   const presentationStr = envelope.presentation;
   if (!presentationStr) {
-    throw new Error("Initial presentation envelope had no presentation field");
+    throw new PrsonLoginError("protocol", "Initial presentation envelope had no presentation field");
   }
   const acceptedVcts = opts.allowAnonymous ? [...KNOWN_VCTS, ANONYMOUS_WALLET_VCT2] : [...KNOWN_VCTS];
   const verified = await verifyPresentation(presentationStr, {
     expectedAudience: `https://${domain}`,
     expectedNonce: nonce,
     acceptedVcts,
-    trustedIssuer: TRUSTED_ISSUER
+    ...issuerFor(opts)
   });
   if (!verified.ok) {
-    throw new Error(`Presentation rejected: ${verified.reason}`);
+    throw new PrsonLoginError("presentation_rejected", `Presentation rejected: ${verified.reason}`, verified.reason);
   }
   const boundKey = verified.binding.walletSessionPk;
   if (boundKey) {
     if (senderPk !== boundKey) {
-      throw new Error("Presentation rejected: envelope not sent by the wallet's signed session key");
+      throw new PrsonLoginError("presentation_rejected", "Presentation rejected: envelope not sent by the wallet's signed session key", "session_key_mismatch");
     }
     if (envelope.walletSessionPk !== void 0 && envelope.walletSessionPk !== boundKey) {
-      throw new Error("Presentation rejected: walletSessionPk differs from the signed one");
+      throw new PrsonLoginError("presentation_rejected", "Presentation rejected: walletSessionPk differs from the signed one", "session_key_mismatch");
     }
   } else if (typeof console !== "undefined") {
     console.warn(
@@ -5965,14 +6091,15 @@ async function runAttempt(opts, env) {
     const minLevel = opts.required?.minVerificationLevel ?? 1;
     const claimedLevel = typeof verified.claims.verification_level === "number" ? verified.claims.verification_level : 0;
     if (claimedLevel < minLevel) {
-      throw new Error(
+      throw new PrsonLoginError(
+        "level_too_low",
         `Presentation rejected: verification_level ${claimedLevel} below required ${minLevel}`
       );
     }
   }
   const uniqueHumanId = envelope.uniqueHumanId ?? null;
   if (opts.required?.uniqueHumanId === true && !uniqueHumanId) {
-    throw new Error("Presentation rejected: required uniqueHumanId credential missing");
+    throw new PrsonLoginError("unique_human_missing", "Presentation rejected: required uniqueHumanId credential missing");
   }
   const notifyHandle = opts.notifications === true ? notifyHandleFrom(envelope) : null;
   checkAborted();
@@ -6005,7 +6132,7 @@ async function runAttempt(opts, env) {
       // renewals carry a fresh nonce; see session.ts
       // The same set as the sign-in, so an anonymous session can renew.
       acceptedVcts,
-      trustedIssuer: TRUSTED_ISSUER
+      ...issuerFor(opts)
     },
     // Renewal anti-replay baseline: a renewal must be strictly newer.
     initialPresentation: { presentation: presentationStr, iat: verified.binding.iat },
@@ -6041,6 +6168,24 @@ async function runAttempt(opts, env) {
   return result;
 }
 function friendlyError(err) {
+  if (err instanceof PrsonLoginError) {
+    switch (err.code) {
+      case "csp_blocked":
+        return "This site's security settings blocked Prson. The site's owner needs to allow Prson in its Content-Security-Policy.";
+      case "rate_limited":
+        return "Too many sign-ins from this network. Wait a moment and try again.";
+      case "network":
+        return "Couldn't reach Prson. Check your connection and try again.";
+      case "expired":
+        return "This code expired. Get a new code and try again.";
+      case "unique_human_missing":
+        return "This site needs a passport or ID card verified in the Prson app.";
+      case "level_too_low":
+        return "This site needs a more verified identity than the one chosen.";
+      default:
+        break;
+    }
+  }
   const m = err instanceof Error ? err.message : String(err);
   if (/Too many login sessions/i.test(m)) return "Too many sign-ins from this network. Wait a moment and try again.";
   if (/createDraft failed|Failed to fetch|NetworkError|signaling: WS/i.test(m)) {
@@ -6061,15 +6206,17 @@ function validateReturnUrl(returnUrl, domain) {
   try {
     parsed = new URL(returnUrl);
   } catch {
-    throw new Error(`returnUrl is not a valid URL: ${returnUrl}`);
+    throw new PrsonLoginError("invalid_options", `returnUrl is not a valid URL: ${returnUrl}`);
   }
   if (parsed.protocol !== "https:") {
-    throw new Error(
+    throw new PrsonLoginError(
+      "invalid_options",
       "returnUrl must be https:// (custom schemes are refused \u2014 any app could claim them; use a Universal Link / App Link on your domain)"
     );
   }
   if (parsed.host.toLowerCase() !== domain.toLowerCase()) {
-    throw new Error(
+    throw new PrsonLoginError(
+      "invalid_options",
       `returnUrl host (${parsed.host}) must equal the login domain (${domain})`
     );
   }
@@ -6099,24 +6246,32 @@ export {
   DEFAULT_TTL_MINUTES,
   ENVELOPE_VERSION,
   GET_APP_URL,
+  ISSUER_JWKS_DEV,
   KNOWN_VCTS,
   LoginAbortedError,
   MAX_TTL_MINUTES,
   NOTIFY_HANDLE,
   PROTOCOL_VERSION,
+  PRSON_CONNECT_SRC,
+  PrsonCspError,
   PrsonLogin,
+  PrsonLoginError,
   PrsonLoginSession,
   SIGNALING_BASE,
   SIGNALING_BASE_DEV,
   TRUSTED_ISSUER,
+  TRUSTED_ISSUER_DEV,
   VerificationAbortedError,
   VerificationClosedError,
   awaitVerification,
   bindForm,
   bindInput,
   bindMouse,
+  connectSourcesFor,
+  cspStyleNonce,
   enableRemoteNavigation,
   isSensitiveField,
+  issuerFor,
   notifyHandleFrom,
   resolveSignalingBase
 };

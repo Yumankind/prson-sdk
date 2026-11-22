@@ -2839,8 +2839,16 @@ function injectStylesOnce() {
   if (document.querySelector("style[data-prson-login-ui]")) return;
   const el2 = document.createElement("style");
   el2.setAttribute("data-prson-login-ui", "1");
+  const nonceMeta = document.querySelector('meta[property="csp-nonce"]');
+  const nonce = nonceMeta ? nonceMeta.nonce || nonceMeta.getAttribute("nonce") : "";
+  if (nonce) el2.nonce = nonce;
   el2.textContent = PRSON_LOGIN_UI_CSS;
   document.head.append(el2);
+  if (!el2.sheet && typeof console !== "undefined") {
+    console.error(
+      `Prson sign-in: this page's Content-Security-Policy blocked the dialog's stylesheet. Allow it with a nonce (<meta property="csp-nonce" nonce="\u2026">) or 'unsafe-inline' in style-src, or serve PRSON_LOGIN_UI_CSS from your own stylesheet in a <style data-prson-login-ui> element.`
+    );
+  }
 }
 
 // src/index.ts
