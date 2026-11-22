@@ -1,6 +1,6 @@
 {
   "name": "@prson/login-sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "description": "Frontend-first sign-in SDK that delivers a verifiable credential from a Prson mobile wallet to your website over an end-to-end-encrypted WebRTC channel. See README.md.",
   "type": "module",

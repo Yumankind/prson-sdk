@@ -1,6 +1,6 @@
 {
   "name": "@prson/login-verifier",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Node.js verifier for SD-JWT-VC presentations issued by the Prson notary and delivered via @prson/login-sdk. Pure-function; no Prson account or API key required.",
   "type": "module",
   "main": "./dist/index.js",

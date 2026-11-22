@@ -4,6 +4,12 @@ All notable changes to the login SDK packages (`@prson/login-sdk`,
 `@prson/login-sdk-ui`, `@prson/login-verifier`, `@prson/login-cli`).
 Versions follow SemVer; while on 0.x, minor versions may break the API.
 
+## 0.2.1 — 2026-11-22 — READMEs only
+
+- New READMEs for every package (the npm pages): a GIF of the sign-in
+  dialog, the phone view, the buttons, a how-it-works diagram, the CLI in
+  a terminal, and short quick starts. No code changes.
+
 ## 0.2.0 — 2026-11-22 — Sign in with Prson channel hardening
 
 ### `@prson/login-sdk` — error codes and the dev issuer

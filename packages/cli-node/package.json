@@ -1,6 +1,6 @@
 {
   "name": "@prson/login-cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Sign in with Prson from terminal programs. Builds delivery-pinned /request/v1 wallet links, renders them as terminal QR codes (or short codes), and polls your backend for the wallet's response. Pure-function; no Prson account or API key required.",
   "type": "module",
   "main": "./dist/index.js",
